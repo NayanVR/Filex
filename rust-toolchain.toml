@@ -1,0 +1,4 @@
+# Pinned to stable: gpui's `pathfinder_simd` dependency enables unstable SIMD
+# intrinsics on nightly toolchains and breaks when nightly renames them.
+[toolchain]
+channel = "stable"

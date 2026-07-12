@@ -1,0 +1,11 @@
+[package]
+name = "filex"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+gpui = "0.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
