@@ -1,16 +1,20 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
+use futures::StreamExt as _;
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, FocusHandle, KeyBinding, KeyDownEvent,
     SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*,
     px, rgb, size, uniform_list,
 };
 
-use filex::index::VolumeIndex;
-use filex::index::walker::{FsWalkSource, IndexSource};
+use filex::index::watcher::SharedIndex;
+use filex::index::{LiveIndex, VolumeIndex, start_live_index};
 use filex::listing::{Entry, format_size, read_dir_sorted};
+
+fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
+    index.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
 
@@ -44,7 +48,9 @@ struct Workspace {
     cwd: PathBuf,
     entries: Vec<Entry>,
     load_error: Option<SharedString>,
-    index: Option<Arc<VolumeIndex>>,
+    index: Option<SharedIndex>,
+    /// Keeps the watcher + writer threads alive; dropping stops live updates.
+    live: Option<LiveIndex>,
     index_status: IndexStatus,
     query: String,
     results: Vec<SearchRow>,
@@ -60,6 +66,7 @@ impl Workspace {
             entries: Vec::new(),
             load_error: None,
             index: None,
+            live: None,
             index_status: IndexStatus::Building,
             query: String::new(),
             results: Vec::new(),
@@ -70,26 +77,74 @@ impl Workspace {
         this
     }
 
-    /// Build the volume index on the background executor; the UI thread only
-    /// receives the finished result.
+    /// Build the volume index (with live FS watching where supported) on the
+    /// background executor, then keep listening for change notifications from
+    /// the writer thread. The UI thread never blocks on any of it.
     fn spawn_bootstrap_index(&self, root: PathBuf, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            let (change_tx, mut change_rx) = futures::channel::mpsc::unbounded::<()>();
             let result = cx
                 .background_executor()
-                .spawn(async move { FsWalkSource::default().bootstrap(&root) })
+                .spawn(async move {
+                    start_live_index(&root, move || {
+                        change_tx.unbounded_send(()).ok();
+                    })
+                })
                 .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(index) => {
-                        this.index_status = IndexStatus::Ready { files: index.len() };
-                        this.index = Some(Arc::new(index));
-                        // A query typed while indexing can now be answered.
+
+            let live = match result {
+                Ok(live) => live,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.index_status = IndexStatus::Failed(format!("{err:#}").into());
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let updated = this.update(cx, |this, cx| {
+                this.index = Some(live.index.clone());
+                this.live = Some(live);
+                this.refresh_index_stats(cx);
+                // A query typed while indexing can now be answered.
+                this.update_search(cx);
+            });
+            if updated.is_err() {
+                return; // workspace is gone
+            }
+
+            // Live-update loop: each writer batch refreshes the file count
+            // and re-runs the active query so results track the filesystem.
+            while change_rx.next().await.is_some() {
+                while change_rx.try_recv().is_ok() {} // drain bursts
+                let alive = this.update(cx, |this, cx| {
+                    this.refresh_index_stats(cx);
+                    if !this.query.is_empty() {
                         this.update_search(cx);
                     }
-                    Err(err) => {
-                        this.index_status = IndexStatus::Failed(format!("{err:#}").into());
-                    }
+                });
+                if alive.is_err() {
+                    break;
                 }
+            }
+        })
+        .detach();
+    }
+
+    /// Recompute the indexed-file count off-thread (it walks the arena).
+    fn refresh_index_stats(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.index.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move { read_index(&index).len() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.index_status = IndexStatus::Ready { files };
                 cx.notify();
             })
             .ok();
@@ -176,6 +231,7 @@ impl Workspace {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
+                    let index = read_index(&index);
                     index
                         .search(&query, SEARCH_RESULT_LIMIT)
                         .into_iter()

@@ -39,38 +39,52 @@ impl IndexSource for FsWalkSource {
             .canonicalize()
             .with_context(|| format!("canonicalizing index root {}", root.display()))?;
         let mut index = VolumeIndex::new(&root);
-        // Maps each *directory's* path to its entry, so children can find
-        // their parent. jwalk yields a directory before its contents.
-        let mut dir_ids: HashMap<PathBuf, EntryId> = HashMap::new();
-        dir_ids.insert(root.clone(), ROOT);
-
-        let walk = jwalk::WalkDir::new(&root)
-            .skip_hidden(self.skip_hidden)
-            .follow_links(false);
-
-        for dirent in walk {
-            let Ok(dirent) = dirent else {
-                continue; // unreadable entry: skip, keep indexing
-            };
-            if dirent.depth() == 0 {
-                continue; // the root itself is already entry 0
-            }
-            let Some(name) = dirent.file_name().to_str() else {
-                continue; // non-UTF-8 name: skip for now (tracked as future work)
-            };
-            let parent_path = dirent.parent_path();
-            let Some(&parent) = dir_ids.get(parent_path) else {
-                continue; // parent was skipped (unreadable / non-UTF-8)
-            };
-            // Symlinks (even to directories) are indexed as leaves.
-            let is_dir = dirent.file_type().is_dir();
-            let id = index.insert(parent, name, is_dir)?;
-            if is_dir {
-                dir_ids.insert(dirent.path(), id);
-            }
-        }
+        index_subtree(&mut index, ROOT, &root, self.skip_hidden)?;
         Ok(index)
     }
+}
+
+/// Walk the filesystem at `path` and insert everything found under the
+/// existing entry `under`. Used both for bootstrap (under = ROOT) and for
+/// re-indexing a subtree after a directory-level filesystem event.
+/// Symlinks become leaves; unreadable entries are skipped.
+pub fn index_subtree(
+    index: &mut VolumeIndex,
+    under: EntryId,
+    path: &Path,
+    skip_hidden: bool,
+) -> Result<()> {
+    // Maps each *directory's* path to its entry, so children can find
+    // their parent. jwalk yields a directory before its contents.
+    let mut dir_ids: HashMap<PathBuf, EntryId> = HashMap::new();
+    dir_ids.insert(path.to_path_buf(), under);
+
+    let walk = jwalk::WalkDir::new(path)
+        .skip_hidden(skip_hidden)
+        .follow_links(false);
+
+    for dirent in walk {
+        let Ok(dirent) = dirent else {
+            continue; // unreadable entry: skip, keep indexing
+        };
+        if dirent.depth() == 0 {
+            continue; // `path` itself is represented by `under`
+        }
+        let Some(name) = dirent.file_name().to_str() else {
+            continue; // non-UTF-8 name: skip for now (tracked as future work)
+        };
+        let parent_path = dirent.parent_path();
+        let Some(&parent) = dir_ids.get(parent_path) else {
+            continue; // parent was skipped (unreadable / non-UTF-8)
+        };
+        // Symlinks (even to directories) are indexed as leaves.
+        let is_dir = dirent.file_type().is_dir();
+        let id = index.insert(parent, name, is_dir)?;
+        if is_dir {
+            dir_ids.insert(dirent.path(), id);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -6,7 +6,10 @@
 //! are materialized on demand by chasing parent links. A second, case-folded
 //! copy of every name backs case-insensitive substring search.
 
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod walker;
+pub mod watcher;
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -260,6 +263,16 @@ impl VolumeIndex {
         None // cycle or absurd depth
     }
 
+    /// Live (non-tombstoned) children of a directory entry.
+    pub fn children_of(&self, id: EntryId) -> impl Iterator<Item = EntryId> + '_ {
+        self.children
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&c| self.entry(c).is_some_and(|e| !e.is_tombstone()))
+    }
+
     /// Find the live child of `parent` with the given name (exact match).
     pub fn resolve_child(&self, parent: EntryId, name: &str) -> Option<EntryId> {
         self.children.get(&parent)?.iter().copied().find(|&c| {
@@ -325,6 +338,59 @@ impl VolumeIndex {
             .map(|(kind, _, id)| SearchHit { id, kind })
             .collect()
     }
+}
+
+/// A volume index kept up to date by a platform watcher feeding an
+/// [`watcher::IndexWriter`]. Dropping this stops live updates.
+pub struct LiveIndex {
+    pub index: watcher::SharedIndex,
+    _writer: watcher::IndexWriter,
+    #[cfg(target_os = "macos")]
+    _watcher: Option<macos::FsEventsWatcher>,
+}
+
+/// Bootstrap an index for `root` and attach live updates where the platform
+/// supports them (macOS today; Windows/Linux watchers are future work — on
+/// those, the index is a static snapshot until restart).
+///
+/// The watcher starts *before* the bootstrap walk so no event is missed;
+/// deltas queued during the walk replay harmlessly because delta
+/// application is idempotent. `on_change` fires from the writer thread
+/// after each applied batch.
+pub fn start_live_index(
+    root: &Path,
+    on_change: impl Fn() + Send + 'static,
+) -> Result<LiveIndex> {
+    let (delta_tx, delta_rx) = std::sync::mpsc::channel();
+
+    #[cfg(target_os = "macos")]
+    let fs_watcher = {
+        // FSEvents reports canonical paths; watch the same form we index.
+        let canonical = root.canonicalize()?;
+        match macos::FsEventsWatcher::spawn(&canonical, None, delta_tx) {
+            Ok(watcher) => Some(watcher),
+            Err(err) => {
+                eprintln!("filex: live index updates disabled: {err:#}");
+                None
+            }
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    drop(delta_tx); // no watcher yet: writer thread exits immediately
+
+    let index = {
+        use walker::IndexSource as _;
+        walker::FsWalkSource::default().bootstrap(root)?
+    };
+    let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
+    let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change)?;
+
+    Ok(LiveIndex {
+        index: shared,
+        _writer: writer,
+        #[cfg(target_os = "macos")]
+        _watcher: fs_watcher,
+    })
 }
 
 #[cfg(test)]
@@ -436,6 +502,35 @@ mod tests {
         let g1 = index.generation();
         index.remove(report).unwrap();
         assert!(index.generation() > g1);
+    }
+
+    /// End-to-end: bootstrap + FSEvents watcher + writer thread. A file
+    /// created after startup becomes searchable without any rescan call.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_index_picks_up_new_files_end_to_end() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (notify_tx, notify_rx) = std::sync::mpsc::channel();
+        let live = start_live_index(dir.path(), move || {
+            notify_tx.send(()).ok();
+        })
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(500)); // let the stream attach
+        std::fs::write(dir.path().join("live-e2e.txt"), b"x").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if notify_rx.recv_timeout(Duration::from_millis(250)).is_ok() {
+                let index = live.index.read().unwrap();
+                if index.search("live-e2e", 10).len() == 1 {
+                    return;
+                }
+            }
+        }
+        panic!("file created after bootstrap never became searchable");
     }
 
     #[test]
