@@ -6,10 +6,15 @@
 //! are materialized on demand by chasing parent links. A second, case-folded
 //! copy of every name backs case-insensitive substring search.
 
+// Platform watcher modules are compiled on every OS: their event parsers
+// and delta mappers are pure and fixture-tested everywhere; only the
+// OS-call sections inside are target-gated.
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod walker;
 pub mod watcher;
+pub mod windows;
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -340,18 +345,28 @@ impl VolumeIndex {
     }
 }
 
+/// The live-update source for the OS we're built for. All three expose the
+/// same shape: spawn(root, delta_sender) feeding [`watcher::FsDelta`]s.
+#[cfg(target_os = "macos")]
+type PlatformWatcher = macos::FsEventsWatcher;
+#[cfg(target_os = "linux")]
+type PlatformWatcher = linux::InotifyWatcher;
+#[cfg(target_os = "windows")]
+type PlatformWatcher = windows::DirChangesWatcher;
+
 /// A volume index kept up to date by a platform watcher feeding an
 /// [`watcher::IndexWriter`]. Dropping this stops live updates.
 pub struct LiveIndex {
     pub index: watcher::SharedIndex,
     _writer: watcher::IndexWriter,
-    #[cfg(target_os = "macos")]
-    _watcher: Option<macos::FsEventsWatcher>,
+    _watcher: Option<PlatformWatcher>,
 }
 
-/// Bootstrap an index for `root` and attach live updates where the platform
-/// supports them (macOS today; Windows/Linux watchers are future work — on
-/// those, the index is a static snapshot until restart).
+/// Bootstrap an index for `root` and attach the platform's live watcher
+/// (FSEvents / inotify / ReadDirectoryChangesW). If the watcher can't
+/// start, the index still works as a static snapshot and the failure is
+/// reported, not fatal — search should never be hostage to watch limits
+/// or permissions.
 ///
 /// The watcher starts *before* the bootstrap walk so no event is missed;
 /// deltas queued during the walk replay harmlessly because delta
@@ -363,24 +378,33 @@ pub fn start_live_index(
 ) -> Result<LiveIndex> {
     let (delta_tx, delta_rx) = std::sync::mpsc::channel();
 
-    #[cfg(target_os = "macos")]
-    let fs_watcher = {
-        // FSEvents reports canonical paths; watch the same form we index.
-        let canonical = root.canonicalize()?;
-        match macos::FsEventsWatcher::spawn(&canonical, None, delta_tx) {
-            Ok(watcher) => Some(watcher),
-            Err(err) => {
-                eprintln!("filex: live index updates disabled: {err:#}");
-                None
-            }
+    // Watchers report canonical paths; watch the same form we index.
+    let canonical = root.canonicalize()?;
+    let spawned = {
+        #[cfg(target_os = "macos")]
+        {
+            macos::FsEventsWatcher::spawn(&canonical, None, delta_tx)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            linux::InotifyWatcher::spawn(&canonical, delta_tx)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            windows::DirChangesWatcher::spawn(&canonical, delta_tx)
         }
     };
-    #[cfg(not(target_os = "macos"))]
-    drop(delta_tx); // no watcher yet: writer thread exits immediately
+    let fs_watcher = match spawned {
+        Ok(watcher) => Some(watcher),
+        Err(err) => {
+            eprintln!("filex: live index updates disabled: {err:#}");
+            None
+        }
+    };
 
     let index = {
         use walker::IndexSource as _;
-        walker::FsWalkSource::default().bootstrap(root)?
+        walker::FsWalkSource::default().bootstrap(&canonical)?
     };
     let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
     let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change)?;
@@ -388,7 +412,6 @@ pub fn start_live_index(
     Ok(LiveIndex {
         index: shared,
         _writer: writer,
-        #[cfg(target_os = "macos")]
         _watcher: fs_watcher,
     })
 }

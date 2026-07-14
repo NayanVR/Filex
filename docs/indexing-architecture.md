@@ -107,6 +107,17 @@ A single **index-writer thread** drains the channel, applies deltas in batches
 (debounced ~50ms), then publishes a new index snapshot (§3). The UI is only ever
 notified "index generation changed"; it never blocks.
 
+> **Status:** all three platform watchers below exist behind the shared
+> `FsDelta` channel (`index::macos` / `index::linux` / `index::windows`).
+> Windows currently ships the *unprivileged* `ReadDirectoryChangesW` watcher
+> — it needs no elevation, works on any filesystem, and pairs with the
+> generic walk bootstrap. The USN Journal watcher below is implemented
+> together with the `FSCTL_ENUM_USN_DATA` bootstrap (both need the
+> FRN-keyed index and elevation). Linux ships the budgeted-inotify
+> fallback; fanotify remains the privileged upgrade. Only macOS has been
+> executed live; Linux/Windows are type-checked per-target and their
+> parsers/mappers are fixture-tested on every OS.
+
 ### Windows — USN Journal (the good one)
 
 - `FSCTL_READ_USN_JOURNAL` on the same volume handle, blocking-read loop on a

@@ -3,10 +3,22 @@ name = "filex"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["app"]
+# The GPUI application. The index library builds without it, so indexing
+# logic can be cross-checked/tested for other platforms without pulling in
+# UI toolchains (cargo check --no-default-features --target ...).
+app = ["dep:gpui", "dep:futures"]
+
+[[bin]]
+name = "filex"
+path = "src/main.rs"
+required-features = ["app"]
+
 [dependencies]
 anyhow = "1.0.103"
-futures = "0.3.32"
-gpui = "0.2"
+futures = { version = "0.3.32", optional = true }
+gpui = { version = "0.2", optional = true }
 jwalk = "0.8.1"
 memchr = "2.8.3"
 rayon = "1.12.0"
@@ -23,3 +35,14 @@ tempfile = "3.27.0"
 dispatch2 = "0.3"
 objc2-core-foundation = "0.3.2"
 objc2-core-services = { version = "0.3.2", features = ["FSEvents", "dispatch2"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
