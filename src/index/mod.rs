@@ -12,6 +12,7 @@
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod persist;
 pub mod walker;
 pub mod watcher;
 pub mod windows;
@@ -354,44 +355,142 @@ type PlatformWatcher = linux::InotifyWatcher;
 #[cfg(target_os = "windows")]
 type PlatformWatcher = windows::DirChangesWatcher;
 
-/// A volume index kept up to date by a platform watcher feeding an
-/// [`watcher::IndexWriter`]. Dropping this stops live updates.
-pub struct LiveIndex {
-    pub index: watcher::SharedIndex,
-    _writer: watcher::IndexWriter,
-    _watcher: Option<PlatformWatcher>,
+/// How the shutdown snapshot learns its checkpoint.
+enum CheckpointSource {
+    /// macOS with a live FSEvents stream: the shared latest-event-id.
+    /// Read after the watcher is dropped and the writer joined, it is the
+    /// exact id through which every event has been applied.
+    #[cfg(target_os = "macos")]
+    FsEventsId(std::sync::Arc<std::sync::atomic::AtomicU64>),
+    /// Walk-based platforms with a live watcher: record the save time;
+    /// the next start reconciles with a rescan regardless.
+    #[cfg(not(target_os = "macos"))]
+    Reconcile,
+    /// The watcher never started — the index may have silently missed
+    /// changes; the next start must not trust any journal position.
+    Untracked,
 }
 
-/// Bootstrap an index for `root` and attach the platform's live watcher
-/// (FSEvents / inotify / ReadDirectoryChangesW). If the watcher can't
-/// start, the index still works as a static snapshot and the failure is
-/// reported, not fatal — search should never be hostage to watch limits
-/// or permissions.
-///
-/// The watcher starts *before* the bootstrap walk so no event is missed;
-/// deltas queued during the walk replay harmlessly because delta
-/// application is idempotent. `on_change` fires from the writer thread
-/// after each applied batch.
+struct Persistence {
+    path: PathBuf,
+    source: CheckpointSource,
+}
+
+impl Persistence {
+    fn checkpoint(&self) -> persist::Checkpoint {
+        match &self.source {
+            #[cfg(target_os = "macos")]
+            CheckpointSource::FsEventsId(id) => persist::Checkpoint::FsEvents {
+                last_event_id: id.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            #[cfg(not(target_os = "macos"))]
+            CheckpointSource::Reconcile => persist::Checkpoint::WalkedAt {
+                unix_seconds: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            },
+            CheckpointSource::Untracked => persist::Checkpoint::None,
+        }
+    }
+}
+
+/// A volume index kept up to date by a platform watcher feeding an
+/// [`watcher::IndexWriter`]. Dropping this stops live updates and writes
+/// the snapshot (watcher first, then writer join, then save — an order
+/// that guarantees the persisted checkpoint covers exactly the applied
+/// events, losing none).
+pub struct LiveIndex {
+    pub index: watcher::SharedIndex,
+    watcher: Option<PlatformWatcher>,
+    writer: Option<watcher::IndexWriter>,
+    persistence: Option<Persistence>,
+}
+
+impl Drop for LiveIndex {
+    fn drop(&mut self) {
+        drop(self.watcher.take()); // stop events; delta senders close
+        drop(self.writer.take()); // join: every sent delta is now applied
+        if let Some(persistence) = self.persistence.take() {
+            let index = self
+                .index
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(err) = persist::save(&index, persistence.checkpoint(), &persistence.path) {
+                eprintln!("filex: failed to save index snapshot: {err:#}");
+            }
+        }
+    }
+}
+
+/// [`start_live_index_with_snapshot`] with the default per-root snapshot
+/// location in the platform data directory.
 pub fn start_live_index(
     root: &Path,
     on_change: impl Fn() + Send + 'static,
 ) -> Result<LiveIndex> {
-    let (delta_tx, delta_rx) = std::sync::mpsc::channel();
+    let snapshot_path = persist::default_snapshot_path(root);
+    start_live_index_with_snapshot(root, snapshot_path, on_change)
+}
 
+/// Bootstrap an index for `root` and attach the platform's live watcher
+/// (FSEvents / inotify / ReadDirectoryChangesW).
+///
+/// Startup strategy, fastest first:
+/// - Valid snapshot + FSEvents checkpoint (macOS): load and *replay the
+///   journal gap* — no walk at all. If the OS purged the history, the
+///   stream reports `MustScanSubDirs` which becomes a root rescan.
+/// - Valid snapshot, no replayable journal (Linux/Windows, or a dead
+///   watcher): load for instant-but-stale search and queue a root rescan;
+///   the writer rebuilds off-lock and swaps, so queries never block on it.
+/// - No/invalid snapshot: full bootstrap walk.
+///
+/// If the watcher can't start (permissions, watch limits), the index still
+/// works as a static snapshot — search is never hostage to live updates.
+/// The watcher starts *before* any walk so no event is missed; replayed or
+/// double-seen deltas are absorbed by idempotent application. `on_change`
+/// fires from the writer thread after each applied batch.
+pub fn start_live_index_with_snapshot(
+    root: &Path,
+    snapshot_path: Option<PathBuf>,
+    on_change: impl Fn() + Send + 'static,
+) -> Result<LiveIndex> {
     // Watchers report canonical paths; watch the same form we index.
     let canonical = root.canonicalize()?;
+    let (delta_tx, delta_rx) = std::sync::mpsc::channel();
+
+    let loaded = snapshot_path.as_ref().and_then(|path| {
+        if !path.exists() {
+            return None;
+        }
+        match persist::load(path, &canonical) {
+            Ok(snapshot) => Some(snapshot),
+            Err(err) => {
+                eprintln!("filex: ignoring unusable index snapshot: {err:#}");
+                None
+            }
+        }
+    });
+
+    let resume_from = match loaded.as_ref().map(|s| s.checkpoint) {
+        Some(persist::Checkpoint::FsEvents { last_event_id }) => Some(last_event_id),
+        _ => None,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = resume_from; // only FSEvents supports replay today
+
     let spawned = {
         #[cfg(target_os = "macos")]
         {
-            macos::FsEventsWatcher::spawn(&canonical, None, delta_tx)
+            macos::FsEventsWatcher::spawn(&canonical, resume_from, delta_tx.clone())
         }
         #[cfg(target_os = "linux")]
         {
-            linux::InotifyWatcher::spawn(&canonical, delta_tx)
+            linux::InotifyWatcher::spawn(&canonical, delta_tx.clone())
         }
         #[cfg(target_os = "windows")]
         {
-            windows::DirChangesWatcher::spawn(&canonical, delta_tx)
+            windows::DirChangesWatcher::spawn(&canonical, delta_tx.clone())
         }
     };
     let fs_watcher = match spawned {
@@ -402,17 +501,44 @@ pub fn start_live_index(
         }
     };
 
-    let index = {
-        use walker::IndexSource as _;
-        walker::FsWalkSource::default().bootstrap(&canonical)?
+    let index = match loaded {
+        Some(snapshot) => {
+            let replaying =
+                cfg!(target_os = "macos") && fs_watcher.is_some() && resume_from.is_some();
+            if !replaying {
+                // Loaded state is stale-but-searchable; reconcile off-lock.
+                delta_tx
+                    .send(vec![watcher::FsDelta::Rescan { path: canonical.clone() }])
+                    .ok();
+            }
+            snapshot.index
+        }
+        None => {
+            use walker::IndexSource as _;
+            walker::FsWalkSource::default().bootstrap(&canonical)?
+        }
     };
+    drop(delta_tx); // the watcher holds the only remaining sender
+
     let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
     let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change)?;
 
+    let persistence = snapshot_path.map(|path| Persistence {
+        path,
+        source: match &fs_watcher {
+            #[cfg(target_os = "macos")]
+            Some(watcher) => CheckpointSource::FsEventsId(watcher.latest_event_id_handle()),
+            #[cfg(not(target_os = "macos"))]
+            Some(_) => CheckpointSource::Reconcile,
+            None => CheckpointSource::Untracked,
+        },
+    });
+
     Ok(LiveIndex {
         index: shared,
-        _writer: writer,
-        _watcher: fs_watcher,
+        watcher: fs_watcher,
+        writer: Some(writer),
+        persistence,
     })
 }
 
@@ -527,6 +653,61 @@ mod tests {
         assert!(index.generation() > g1);
     }
 
+    /// Full persistence cycle: index, shut down (snapshot written), change
+    /// the filesystem while "down", restart from the snapshot, converge —
+    /// via FSEvents replay on macOS, via the startup rescan elsewhere.
+    /// Runs on every OS with a live watcher.
+    #[test]
+    fn restart_from_snapshot_catches_up_with_offline_changes() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let snap_dir = tempfile::tempdir().unwrap();
+        let snap = Some(snap_dir.path().join("test.fxidx"));
+        std::fs::write(dir.path().join("keep.txt"), b"x").unwrap();
+        std::fs::write(dir.path().join("doomed.txt"), b"x").unwrap();
+
+        // First run: bootstrap walk, then clean shutdown -> snapshot.
+        {
+            let live =
+                start_live_index_with_snapshot(dir.path(), snap.clone(), || {}).unwrap();
+            let index = live.index.read().unwrap();
+            assert_eq!(index.search("keep", 10).len(), 1);
+            drop(index);
+        }
+        assert!(snap.as_ref().unwrap().exists(), "snapshot not written");
+
+        // Changes while the index is down.
+        std::fs::write(dir.path().join("offline-new.txt"), b"x").unwrap();
+        std::fs::remove_file(dir.path().join("doomed.txt")).unwrap();
+
+        // Second run: loads the snapshot (instant search on stale data),
+        // then converges via replay or rescan.
+        let (notify_tx, notify_rx) = mpsc::channel();
+        let live = start_live_index_with_snapshot(dir.path(), snap, move || {
+            notify_tx.send(()).ok();
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            {
+                let index = live.index.read().unwrap();
+                let converged = index.search("offline-new", 10).len() == 1
+                    && index.search("doomed", 10).is_empty()
+                    && index.search("keep", 10).len() == 1;
+                if converged {
+                    break;
+                }
+            }
+            if Instant::now() > deadline {
+                panic!("index never converged with offline changes");
+            }
+            notify_rx.recv_timeout(Duration::from_millis(250)).ok();
+        }
+    }
+
     /// End-to-end: bootstrap + FSEvents watcher + writer thread. A file
     /// created after startup becomes searchable without any rescan call.
     #[cfg(target_os = "macos")]
@@ -536,7 +717,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-        let live = start_live_index(dir.path(), move || {
+        // No snapshot path: tests must not touch the real user data dir.
+        let live = start_live_index_with_snapshot(dir.path(), None, move || {
             notify_tx.send(()).ok();
         })
         .unwrap();

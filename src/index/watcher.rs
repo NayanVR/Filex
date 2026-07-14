@@ -138,10 +138,12 @@ fn ensure_dirs(index: &mut VolumeIndex, rel: &Path) -> Result<EntryId> {
 }
 
 /// Owns the thread that applies deltas to the shared index. The thread
-/// exits when every delta sender has been dropped; it is detached rather
-/// than joined on drop so tearing down the UI never blocks on it.
+/// exits when every delta sender has been dropped, and Drop *joins* it:
+/// dropping the watcher(s) and then the writer guarantees every delta the
+/// watcher ever sent has been applied — which is what makes a
+/// checkpoint-then-save shutdown lose no events.
 pub struct IndexWriter {
-    _handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
 }
 
 /// How long the writer waits for more deltas before applying a batch —
@@ -159,6 +161,10 @@ impl IndexWriter {
         let handle = std::thread::Builder::new()
             .name("filex-index-writer".into())
             .spawn(move || {
+                let root = match index.read() {
+                    Ok(guard) => guard.root_path().to_path_buf(),
+                    Err(poisoned) => poisoned.into_inner().root_path().to_path_buf(),
+                };
                 while let Ok(first) = deltas.recv() {
                     let mut batch = first;
                     while batch.len() < MAX_BATCH {
@@ -167,6 +173,34 @@ impl IndexWriter {
                             Err(_) => break,
                         }
                     }
+
+                    // A whole-root rescan (startup reconcile, queue overflow)
+                    // is rebuilt *outside* the lock so searches keep answering
+                    // from the old index during the walk, then swapped in.
+                    // The rest of the batch is dropped: the fresh walk already
+                    // reflects those events, and later batches apply on top.
+                    let root_rescan = batch
+                        .iter()
+                        .any(|d| matches!(d, FsDelta::Rescan { path } if *path == root));
+                    if root_rescan {
+                        use super::walker::IndexSource as _;
+                        match super::walker::FsWalkSource::default().bootstrap(&root) {
+                            Ok(rebuilt) => {
+                                let mut guard = match index.write() {
+                                    Ok(guard) => guard,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
+                                *guard = rebuilt;
+                                drop(guard);
+                                on_change();
+                            }
+                            Err(err) => {
+                                eprintln!("filex: root rescan of {} failed: {err:#}", root.display());
+                            }
+                        }
+                        continue;
+                    }
+
                     let mut applied_any = false;
                     {
                         let mut index = match index.write() {
@@ -187,7 +221,18 @@ impl IndexWriter {
                     }
                 }
             })?;
-        Ok(Self { _handle: handle })
+        Ok(Self { handle: Some(handle) })
+    }
+}
+
+impl Drop for IndexWriter {
+    fn drop(&mut self) {
+        // Blocks until the delta channel is closed AND drained. Callers must
+        // drop all senders (watchers) first or this deadlocks by design —
+        // LiveIndex's Drop encodes the correct order.
+        if let Some(handle) = self.handle.take() {
+            handle.join().ok();
+        }
     }
 }
 
@@ -344,5 +389,10 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("writer never signaled a change");
         assert_eq!(shared.read().unwrap().search("from-writer", 10).len(), 1);
+
+        // IndexWriter's Drop joins its thread, which only exits once every
+        // sender is gone — drop the sender first or this test deadlocks
+        // (LiveIndex encodes this order for the real wiring).
+        drop(delta_tx);
     }
 }

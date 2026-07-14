@@ -64,7 +64,12 @@ impl FsEventsWatcher {
             .to_str()
             .ok_or_else(|| anyhow!("non-UTF-8 watch root {}", root.display()))?;
 
-        let latest_event_id = Arc::new(AtomicU64::new(0));
+        // Seed the checkpoint so a save-before-any-event is still correct:
+        // resuming streams continue from the persisted id; fresh streams
+        // from the journal's current head.
+        // SAFETY: trivial query with no arguments.
+        let initial_id = since.unwrap_or_else(|| unsafe { fse::FSEventsGetCurrentEventId() });
+        let latest_event_id = Arc::new(AtomicU64::new(initial_id));
         let state = Box::into_raw(Box::new(CallbackState {
             deltas,
             latest_event_id: latest_event_id.clone(),
@@ -130,6 +135,13 @@ impl FsEventsWatcher {
     /// rescanning. Zero until the first event arrives.
     pub fn latest_event_id(&self) -> u64 {
         self.latest_event_id.load(Ordering::Relaxed)
+    }
+
+    /// Shared handle to the latest event id that outlives the watcher —
+    /// read *after* dropping the watcher and joining the writer, it is the
+    /// exact checkpoint for which every event has been applied.
+    pub fn latest_event_id_handle(&self) -> Arc<AtomicU64> {
+        self.latest_event_id.clone()
     }
 }
 
