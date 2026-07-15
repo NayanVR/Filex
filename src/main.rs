@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use futures::StreamExt as _;
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, FocusHandle, KeyBinding, KeyDownEvent,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*,
-    px, rgb, size, uniform_list,
+    ScrollStrategy, SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, actions, div, prelude::*, px, rgb, size, uniform_list,
 };
 
 use filex::index::watcher::SharedIndex;
@@ -23,6 +23,33 @@ const TEXT: u32 = 0xd7dae0;
 const TEXT_DIM: u32 = 0x8b929e;
 const ACCENT: u32 = 0x5ac8fa;
 const WARN: u32 = 0xe5c07b;
+const BG_SELECTED: u32 = 0x37404d;
+
+/// Open a file with the platform's default application. Detached — the
+/// launched app owns its own lifetime.
+fn open_with_default_app(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(path);
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        // `start` is a cmd builtin; the empty string is the window title
+        // slot so paths with spaces aren't misparsed as a title.
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        command
+    };
+    command.spawn().map(drop)
+}
 
 const SEARCH_RESULT_LIMIT: usize = 500;
 
@@ -90,6 +117,11 @@ struct Workspace {
     query: String,
     results: Vec<SearchRow>,
     search_generation: u64,
+    /// Index into the active list (search results while searching,
+    /// directory entries otherwise).
+    selected: Option<usize>,
+    browse_scroll: UniformListScrollHandle,
+    results_scroll: UniformListScrollHandle,
 }
 
 impl Workspace {
@@ -125,6 +157,9 @@ impl Workspace {
             query: String::new(),
             results: Vec::new(),
             search_generation: 0,
+            selected: None,
+            browse_scroll: UniformListScrollHandle::new(),
+            results_scroll: UniformListScrollHandle::new(),
         };
         this.load_dir(&cwd);
         // Windows probes for the elevated index service first and only
@@ -397,11 +432,72 @@ impl Workspace {
                 self.cwd = path.to_path_buf();
                 self.entries = entries;
                 self.load_error = None;
+                self.selected = None;
+                self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
             }
             Err(err) => {
                 self.load_error = Some(format!("{err:#}").into());
             }
         }
+    }
+
+    /// Length of whichever list selection currently applies to.
+    fn active_list_len(&self) -> usize {
+        if self.query.is_empty() { self.entries.len() } else { self.results.len() }
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = self.active_list_len();
+        if len == 0 {
+            self.selected = None;
+            return;
+        }
+        let next = match self.selected {
+            Some(ix) => ix.saturating_add_signed(delta).min(len - 1),
+            None if delta > 0 => 0,
+            None => len - 1,
+        };
+        self.selected = Some(next);
+        let handle = if self.query.is_empty() { &self.browse_scroll } else { &self.results_scroll };
+        handle.scroll_to_item(next, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    /// Enter / double-click: directories navigate, files open with the
+    /// platform's default application.
+    fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let (path, is_dir, from_search) = if self.query.is_empty() {
+            let Some(entry) = self.entries.get(ix) else { return };
+            (entry.path.clone(), entry.is_dir, false)
+        } else {
+            let Some(row) = self.results.get(ix) else { return };
+            (row.target.clone(), row.is_dir, true)
+        };
+        if is_dir {
+            self.navigate(path, cx);
+            if from_search {
+                self.clear_search(cx);
+            }
+        } else {
+            if let Err(err) = open_with_default_app(&path) {
+                self.notice = Some(format!("couldn't open {}: {err}", path.display()).into());
+            }
+            if from_search {
+                self.clear_search(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    fn activate_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(ix) = self.selected {
+            self.activate(ix, cx);
+        }
+    }
+
+    fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.selected = Some(ix);
+        cx.notify();
     }
 
     fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -438,6 +534,9 @@ impl Workspace {
                 }
             }
             "escape" => self.clear_search(cx),
+            "up" => self.move_selection(-1, cx),
+            "down" => self.move_selection(1, cx),
+            "enter" => self.activate_selected(cx),
             _ => {
                 if let Some(text) = &keystroke.key_char
                     && !text.chars().any(char::is_control)
@@ -458,6 +557,7 @@ impl Workspace {
 
         if self.query.is_empty() {
             self.results.clear();
+            self.selected = None;
             return;
         }
 
@@ -486,6 +586,7 @@ impl Workspace {
                                     target: hit.path,
                                 })
                                 .collect();
+                            this.select_first_result();
                             cx.notify();
                         }
                         Err(err) => {
@@ -525,6 +626,7 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 if this.search_generation == generation {
                     this.results = rows;
+                    this.select_first_result();
                     cx.notify();
                 }
             })
@@ -533,16 +635,11 @@ impl Workspace {
         .detach();
     }
 
-    fn open_search_result(&mut self, row_target: PathBuf, is_dir: bool, cx: &mut Context<Self>) {
-        let destination = if is_dir {
-            Some(row_target)
-        } else {
-            row_target.parent().map(Path::to_path_buf)
-        };
-        if let Some(destination) = destination {
-            self.navigate(destination, cx);
-        }
-        self.clear_search(cx);
+    /// New results select the first hit (Spotlight-style), so Enter
+    /// immediately opens the top match.
+    fn select_first_result(&mut self) {
+        self.selected = (!self.results.is_empty()).then_some(0);
+        self.results_scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
     fn any_root_ready(&self) -> bool {
@@ -586,6 +683,13 @@ impl Workspace {
         };
         if failed > 0 {
             text.push_str(&format!(" · {failed} failed"));
+        }
+        let degraded = self.roots.iter().any(|slot| match &slot.state {
+            RootState::Ready { live, .. } => live.coverage_degraded(),
+            _ => false,
+        });
+        if degraded {
+            text.push_str(" · partial watch coverage");
         }
         text.into()
     }
@@ -840,8 +944,8 @@ impl Workspace {
                 range
                     .filter_map(|ix| {
                         let entry = this.entries.get(ix)?;
-                        let path = entry.path.clone();
                         let is_dir = entry.is_dir;
+                        let is_selected = this.selected == Some(ix);
                         Some(
                             div()
                                 .id(ix)
@@ -851,7 +955,8 @@ impl Workspace {
                                 .h(px(28.))
                                 .px_3()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(rgb(BG_HOVER)))
+                                .when(is_selected, |s| s.bg(rgb(BG_SELECTED)))
+                                .when(!is_selected, |s| s.hover(|s| s.bg(rgb(BG_HOVER))))
                                 .child(
                                     div()
                                         .w(px(16.))
@@ -866,9 +971,11 @@ impl Workspace {
                                         format_size(entry.size)
                                     },
                                 ))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                    if is_dir {
-                                        this.navigate(path.clone(), cx);
+                                .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                                    if event.click_count() >= 2 {
+                                        this.activate(ix, cx);
+                                    } else {
+                                        this.select(ix, cx);
                                     }
                                 })),
                         )
@@ -876,6 +983,7 @@ impl Workspace {
                     .collect()
             }),
         )
+        .track_scroll(self.browse_scroll.clone())
         .flex_1()
     }
 
@@ -887,8 +995,8 @@ impl Workspace {
                 range
                     .filter_map(|ix| {
                         let row = this.results.get(ix)?;
-                        let target = row.target.clone();
                         let is_dir = row.is_dir;
+                        let is_selected = this.selected == Some(ix);
                         Some(
                             div()
                                 .id(ix)
@@ -898,7 +1006,8 @@ impl Workspace {
                                 .h(px(28.))
                                 .px_3()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(rgb(BG_HOVER)))
+                                .when(is_selected, |s| s.bg(rgb(BG_SELECTED)))
+                                .when(!is_selected, |s| s.hover(|s| s.bg(rgb(BG_HOVER))))
                                 .child(
                                     div()
                                         .w(px(16.))
@@ -914,14 +1023,19 @@ impl Workspace {
                                         .overflow_hidden()
                                         .child(row.path_label.clone()),
                                 )
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                    this.open_search_result(target.clone(), is_dir, cx);
+                                .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                                    if event.click_count() >= 2 {
+                                        this.activate(ix, cx);
+                                    } else {
+                                        this.select(ix, cx);
+                                    }
                                 })),
                         )
                     })
                     .collect()
             }),
         )
+        .track_scroll(self.results_scroll.clone())
         .flex_1()
     }
 

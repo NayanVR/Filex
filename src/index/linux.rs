@@ -380,6 +380,15 @@ mod imp {
             }
             InotifyWatcher::spawn(root, deltas).map(Self::Inotify)
         }
+
+        /// Whether live coverage is partial (inotify budget exhausted).
+        /// fanotify has no budget and is never degraded.
+        pub fn is_degraded(&self) -> bool {
+            match self {
+                Self::Fanotify(_) => false,
+                Self::Inotify(watcher) => watcher.is_degraded(),
+            }
+        }
     }
 
     // fanotify_init flags (linux/fanotify.h).
@@ -598,6 +607,7 @@ mod imp {
     /// Dropping stops both threads and closes the instance.
     pub struct InotifyWatcher {
         shutdown: Arc<AtomicBool>,
+        degraded: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
         reconcile_thread: Option<JoinHandle<()>>,
     }
@@ -667,6 +677,7 @@ mod imp {
                 .name("filex-reconcile".into())
                 .spawn({
                     let shutdown = shutdown.clone();
+                    let degraded = degraded.clone();
                     move || {
                         let tick = std::time::Duration::from_millis(500).min(reconcile_interval);
                         let mut elapsed = std::time::Duration::ZERO;
@@ -690,9 +701,16 @@ mod imp {
 
             Ok(Self {
                 shutdown,
+                degraded,
                 thread: Some(thread),
                 reconcile_thread: Some(reconcile_thread),
             })
+        }
+
+        /// Whether watch coverage is partial (budget exhausted at some
+        /// point) — surfaced in the UI so degraded mode isn't silent.
+        pub fn is_degraded(&self) -> bool {
+            self.degraded.load(Ordering::Relaxed)
         }
     }
 

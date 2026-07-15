@@ -589,6 +589,22 @@ pub struct LiveIndex {
     persistence: Option<Persistence>,
 }
 
+impl LiveIndex {
+    /// Whether the live watcher's coverage is partial (Linux inotify with
+    /// an exhausted watch budget). The index still converges via periodic
+    /// reconcile rescans, but changes may lag — worth surfacing in the UI.
+    pub fn coverage_degraded(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.watcher.as_ref().is_some_and(linux::LinuxWatcher::is_degraded)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
 impl Drop for LiveIndex {
     fn drop(&mut self) {
         drop(self.saver.take()); // stop marker source; its sender closes
