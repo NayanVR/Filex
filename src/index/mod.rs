@@ -12,6 +12,7 @@
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod manager;
 pub mod persist;
 pub mod usn;
 pub mod walker;
@@ -81,6 +82,9 @@ pub enum MatchKind {
 pub struct SearchHit {
     pub id: EntryId,
     pub kind: MatchKind,
+    /// Folded-name length — the ranking tiebreak, exposed so hits from
+    /// multiple indexes can be merged without re-deriving it.
+    pub name_len: u16,
 }
 
 #[derive(Debug)]
@@ -395,7 +399,7 @@ impl VolumeIndex {
         hits.par_sort_unstable_by_key(|&(kind, len, id)| (kind, len, id.0));
         hits.truncate(limit);
         hits.into_iter()
-            .map(|(kind, _, id)| SearchHit { id, kind })
+            .map(|(kind, name_len, id)| SearchHit { id, kind, name_len })
             .collect()
     }
 }

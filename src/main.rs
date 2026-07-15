@@ -9,12 +9,8 @@ use gpui::{
 };
 
 use filex::index::watcher::SharedIndex;
-use filex::index::{LiveIndex, VolumeIndex, start_live_index};
+use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_size, read_dir_sorted};
-
-fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
-    index.read().unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
 
@@ -26,13 +22,44 @@ const BORDER: u32 = 0x363c45;
 const TEXT: u32 = 0xd7dae0;
 const TEXT_DIM: u32 = 0x8b929e;
 const ACCENT: u32 = 0x5ac8fa;
+const WARN: u32 = 0xe5c07b;
 
 const SEARCH_RESULT_LIMIT: usize = 500;
 
-enum IndexStatus {
+fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
+    index.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+enum RootState {
     Building,
-    Ready { files: usize },
+    Ready { live: LiveIndex, files: usize },
     Failed(SharedString),
+}
+
+/// One indexed root: its own LiveIndex (watcher + writer + snapshot).
+struct RootSlot {
+    /// Canonical path — the identity used to route async updates.
+    path: PathBuf,
+    label: SharedString,
+    state: RootState,
+}
+
+impl RootSlot {
+    fn new(path: PathBuf) -> Self {
+        let label: SharedString = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+            .into();
+        Self { path, label, state: RootState::Building }
+    }
+
+    fn ready_index(&self) -> Option<SharedIndex> {
+        match &self.state {
+            RootState::Ready { live, .. } => Some(live.index.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// A search hit prepared for display (paths pre-materialized off-thread).
@@ -48,10 +75,12 @@ struct Workspace {
     cwd: PathBuf,
     entries: Vec<Entry>,
     load_error: Option<SharedString>,
-    index: Option<SharedIndex>,
-    /// Keeps the watcher + writer threads alive; dropping stops live updates.
-    live: Option<LiveIndex>,
-    index_status: IndexStatus,
+    roots: Vec<RootSlot>,
+    roots_file: Option<PathBuf>,
+    /// Transient user-facing message (e.g. why a root couldn't be added).
+    notice: Option<SharedString>,
+    #[cfg(target_os = "macos")]
+    fda_missing: bool,
     query: String,
     results: Vec<SearchRow>,
     search_generation: u64,
@@ -60,67 +89,107 @@ struct Workspace {
 impl Workspace {
     fn new(cx: &mut Context<Self>) -> Self {
         let cwd = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let roots_file = manager::default_roots_file();
+        let mut configured = roots_file
+            .as_deref()
+            .map(manager::load_roots)
+            .unwrap_or_default();
+        if configured.is_empty() {
+            configured.push(cwd.clone());
+        }
+
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
             entries: Vec::new(),
             load_error: None,
-            index: None,
-            live: None,
-            index_status: IndexStatus::Building,
+            roots: Vec::new(),
+            roots_file,
+            notice: None,
+            #[cfg(target_os = "macos")]
+            fda_missing: false,
             query: String::new(),
             results: Vec::new(),
             search_generation: 0,
         };
         this.load_dir(&cwd);
-        this.spawn_bootstrap_index(cwd, cx);
+        for path in configured {
+            this.add_root_slot(path, cx);
+        }
+        this.spawn_fda_check(cx);
         this
     }
 
-    /// Build the volume index (with live FS watching where supported) on the
-    /// background executor, then keep listening for change notifications from
-    /// the writer thread. The UI thread never blocks on any of it.
-    fn spawn_bootstrap_index(&self, root: PathBuf, cx: &mut Context<Self>) {
+    /// Canonicalize, create the slot, and start indexing. Invalid paths
+    /// become Failed slots so the config line stays visible rather than
+    /// silently vanishing.
+    fn add_root_slot(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match path.canonicalize() {
+            Ok(canonical) => {
+                if self.roots.iter().any(|slot| slot.path == canonical) {
+                    return;
+                }
+                self.roots.push(RootSlot::new(canonical.clone()));
+                self.spawn_root(canonical, cx);
+            }
+            Err(err) => {
+                let mut slot = RootSlot::new(path.clone());
+                slot.state = RootState::Failed(format!("{}: {err}", path.display()).into());
+                self.roots.push(slot);
+            }
+        }
+    }
+
+    fn slot_mut(&mut self, path: &Path) -> Option<&mut RootSlot> {
+        self.roots.iter_mut().find(|slot| slot.path == path)
+    }
+
+    /// Index one root on the background executor, then keep listening for
+    /// its writer's change notifications. The UI thread never blocks.
+    fn spawn_root(&self, path: PathBuf, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let (change_tx, mut change_rx) = futures::channel::mpsc::unbounded::<()>();
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    start_live_index(&root, move || {
-                        change_tx.unbounded_send(()).ok();
-                    })
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        start_live_index(&path, move || {
+                            change_tx.unbounded_send(()).ok();
+                        })
+                        .map(|live| {
+                            let files = read_index(&live.index).len();
+                            (live, files)
+                        })
+                    }
                 })
                 .await;
 
-            let live = match result {
-                Ok(live) => live,
-                Err(err) => {
-                    this.update(cx, |this, cx| {
-                        this.index_status = IndexStatus::Failed(format!("{err:#}").into());
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
-
             let updated = this.update(cx, |this, cx| {
-                this.index = Some(live.index.clone());
-                this.live = Some(live);
-                this.refresh_index_stats(cx);
-                // A query typed while indexing can now be answered.
-                this.update_search(cx);
+                let Some(slot) = this.slot_mut(&path) else {
+                    return; // root was removed while indexing
+                };
+                match result {
+                    Ok((live, files)) => {
+                        slot.state = RootState::Ready { live, files };
+                        // A query typed while indexing can now be answered.
+                        this.update_search(cx);
+                    }
+                    Err(err) => {
+                        slot.state = RootState::Failed(format!("{err:#}").into());
+                    }
+                }
+                cx.notify();
             });
             if updated.is_err() {
                 return; // workspace is gone
             }
 
-            // Live-update loop: each writer batch refreshes the file count
-            // and re-runs the active query so results track the filesystem.
+            // Live-update loop for this root.
             while change_rx.next().await.is_some() {
                 while change_rx.try_recv().is_ok() {} // drain bursts
                 let alive = this.update(cx, |this, cx| {
-                    this.refresh_index_stats(cx);
+                    this.refresh_root_stats(path.clone(), cx);
                     if !this.query.is_empty() {
                         this.update_search(cx);
                     }
@@ -133,9 +202,9 @@ impl Workspace {
         .detach();
     }
 
-    /// Recompute the indexed-file count off-thread (it walks the arena).
-    fn refresh_index_stats(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.index.clone() else {
+    /// Recompute one root's file count off-thread (it walks the arena).
+    fn refresh_root_stats(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(index) = self.slot_mut(&path).and_then(|s| s.ready_index()) else {
             return;
         };
         cx.spawn(async move |this, cx| {
@@ -144,12 +213,65 @@ impl Workspace {
                 .spawn(async move { read_index(&index).len() })
                 .await;
             this.update(cx, |this, cx| {
-                this.index_status = IndexStatus::Ready { files };
+                if let Some(slot) = this.slot_mut(&path)
+                    && let RootState::Ready { files: slot_files, .. } = &mut slot.state
+                {
+                    *slot_files = files;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn spawn_fda_check(&self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        cx.spawn(async move |this, cx| {
+            let has_access = cx
+                .background_executor()
+                .spawn(async { filex::index::macos::has_full_disk_access() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.fda_missing = !has_access;
                 cx.notify();
             })
             .ok();
         })
         .detach();
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+    }
+
+    /// Add the directory currently being browsed as a new indexed root.
+    fn add_current_folder(&mut self, cx: &mut Context<Self>) {
+        let existing: Vec<PathBuf> = self.roots.iter().map(|slot| slot.path.clone()).collect();
+        match manager::validate_new_root(&existing, &self.cwd) {
+            Ok(canonical) => {
+                self.notice = None;
+                self.roots.push(RootSlot::new(canonical.clone()));
+                self.persist_roots(cx);
+                self.spawn_root(canonical, cx);
+            }
+            Err(err) => {
+                self.notice = Some(format!("{err:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn persist_roots(&self, cx: &mut Context<Self>) {
+        let Some(file) = self.roots_file.clone() else {
+            return;
+        };
+        let roots: Vec<PathBuf> = self.roots.iter().map(|slot| slot.path.clone()).collect();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(err) = manager::save_roots(&file, &roots) {
+                    eprintln!("filex: failed to save root list: {err:#}");
+                }
+            })
+            .detach();
     }
 
     fn load_dir(&mut self, path: &Path) {
@@ -210,9 +332,8 @@ impl Workspace {
         }
     }
 
-    /// Kick off an index query on the background executor. Stale completions
-    /// (an older keystroke finishing after a newer one) are dropped by
-    /// generation check, keeping search-as-you-type strictly ordered.
+    /// Kick off a merged query across every ready root on the background
+    /// executor. Stale completions are dropped by generation check.
     fn update_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation += 1;
         let generation = self.search_generation;
@@ -222,27 +343,24 @@ impl Workspace {
             self.results.clear();
             return;
         }
-        let Some(index) = self.index.clone() else {
-            return; // still building; bootstrap completion re-runs the query
-        };
+        let indexes: Vec<SharedIndex> =
+            self.roots.iter().filter_map(RootSlot::ready_index).collect();
+        if indexes.is_empty() {
+            return; // still building; root readiness re-runs the query
+        }
         let query = self.query.clone();
 
         cx.spawn(async move |this, cx| {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
-                    let index = read_index(&index);
-                    index
-                        .search(&query, SEARCH_RESULT_LIMIT)
+                    manager::search_all(&indexes, &query, SEARCH_RESULT_LIMIT)
                         .into_iter()
-                        .filter_map(|hit| {
-                            let path = index.path_of(hit.id)?;
-                            Some(SearchRow {
-                                name: index.name_of(hit.id)?.to_string().into(),
-                                path_label: path.display().to_string().into(),
-                                is_dir: index.is_dir(hit.id)?,
-                                target: path,
-                            })
+                        .map(|hit| SearchRow {
+                            name: hit.name.into(),
+                            path_label: hit.path.display().to_string().into(),
+                            is_dir: hit.is_dir,
+                            target: hit.path,
                         })
                         .collect::<Vec<_>>()
                 })
@@ -268,6 +386,38 @@ impl Workspace {
             self.navigate(destination, cx);
         }
         self.clear_search(cx);
+    }
+
+    fn any_root_ready(&self) -> bool {
+        self.roots
+            .iter()
+            .any(|slot| matches!(slot.state, RootState::Ready { .. }))
+    }
+
+    fn index_status_text(&self) -> SharedString {
+        let total = self.roots.len();
+        let mut ready = 0usize;
+        let mut failed = 0usize;
+        let mut files = 0usize;
+        for slot in &self.roots {
+            match &slot.state {
+                RootState::Ready { files: f, .. } => {
+                    ready += 1;
+                    files += f;
+                }
+                RootState::Failed(_) => failed += 1,
+                RootState::Building => {}
+            }
+        }
+        let mut text = if ready == total {
+            format!("{files} files · {total} root{}", if total == 1 { "" } else { "s" })
+        } else {
+            format!("indexing {ready}/{total} roots · {files} files")
+        };
+        if failed > 0 {
+            text.push_str(&format!(" · {failed} failed"));
+        }
+        text.into()
     }
 
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -322,6 +472,47 @@ impl Workspace {
             )
     }
 
+    // `use<>`: the built element owns its data; without opting out of
+    // lifetime capture it couldn't be collected across loop iterations.
+    fn render_root_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let slot = &self.roots[ix];
+        let path = slot.path.clone();
+        // Clicking a healthy root navigates to it; clicking a failed one
+        // surfaces why it failed in the status bar.
+        let failure: Option<SharedString> = match &slot.state {
+            RootState::Failed(err) => Some(err.clone()),
+            _ => None,
+        };
+        let (marker, marker_color) = match &slot.state {
+            RootState::Building => ("…", TEXT_DIM),
+            RootState::Ready { .. } => ("●", ACCENT),
+            RootState::Failed(_) => ("✕", WARN),
+        };
+        div()
+            .id(("root", ix))
+            .flex()
+            .items_center()
+            .gap_2()
+            .mx_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .hover(|s| s.bg(rgb(BG_HOVER)))
+            .child(div().text_xs().text_color(rgb(marker_color)).child(marker))
+            .child(div().flex_1().overflow_hidden().child(slot.label.clone()))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                match &failure {
+                    Some(err) => {
+                        this.notice = Some(err.clone());
+                        cx.notify();
+                    }
+                    None => this.navigate(path.clone(), cx),
+                }
+            }))
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let places: Vec<(&str, PathBuf)> = [
             ("Home", std::env::home_dir()),
@@ -331,10 +522,14 @@ impl Workspace {
         .filter_map(|(label, path)| Some((label, path?)))
         .collect();
 
-        div()
+        let root_rows: Vec<_> = (0..self.roots.len())
+            .map(|ix| self.render_root_row(ix, cx))
+            .collect();
+
+        let mut sidebar = div()
             .flex()
             .flex_col()
-            .w(px(180.))
+            .w(px(200.))
             .h_full()
             .py_2()
             .border_r_1()
@@ -350,7 +545,7 @@ impl Workspace {
             )
             .children(places.into_iter().enumerate().map(|(ix, (label, path))| {
                 div()
-                    .id(ix)
+                    .id(("place", ix))
                     .mx_2()
                     .px_2()
                     .py_1()
@@ -363,6 +558,54 @@ impl Workspace {
                         this.navigate(path.clone(), cx);
                     }))
             }))
+            .child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(rgb(TEXT_DIM))
+                    .child("INDEXED"),
+            )
+            .children(root_rows)
+            .child(
+                div()
+                    .id("add-root")
+                    .mx_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(rgb(TEXT_DIM))
+                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .child("+ index current folder")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.add_current_folder(cx);
+                    })),
+            );
+
+        #[cfg(target_os = "macos")]
+        if self.fda_missing {
+            sidebar = sidebar.child(div().flex_1()).child(
+                div()
+                    .id("fda-banner")
+                    .mx_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(WARN))
+                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .child("⚠ Grant Full Disk Access for complete indexing")
+                    .on_click(|_: &ClickEvent, _window, _cx| {
+                        filex::index::macos::open_full_disk_access_settings();
+                    }),
+            );
+        }
+
+        sidebar
     }
 
     fn render_file_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -459,7 +702,7 @@ impl Workspace {
     }
 
     fn render_search_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if let IndexStatus::Building = self.index_status {
+        if !self.any_root_ready() {
             return div()
                 .flex_1()
                 .p_4()
@@ -481,20 +724,19 @@ impl Workspace {
     }
 
     fn render_status_bar(&self) -> impl IntoElement {
-        let left: SharedString = match &self.load_error {
-            Some(err) => format!("error — {err}").into(),
-            None if self.query.is_empty() => format!("{} items", self.entries.len()).into(),
-            None => format!(
+        let left: SharedString = if let Some(notice) = &self.notice {
+            notice.clone()
+        } else if let Some(err) = &self.load_error {
+            format!("error — {err}").into()
+        } else if self.query.is_empty() {
+            format!("{} items", self.entries.len()).into()
+        } else {
+            format!(
                 "{} result{}",
                 self.results.len(),
                 if self.results.len() == 1 { "" } else { "s" }
             )
-            .into(),
-        };
-        let right: SharedString = match &self.index_status {
-            IndexStatus::Building => "indexing…".into(),
-            IndexStatus::Ready { files } => format!("{files} files indexed").into(),
-            IndexStatus::Failed(err) => format!("index failed — {err}").into(),
+            .into()
         };
         div()
             .flex()
@@ -508,7 +750,7 @@ impl Workspace {
             .text_xs()
             .text_color(rgb(TEXT_DIM))
             .child(left)
-            .child(right)
+            .child(self.index_status_text())
     }
 }
 

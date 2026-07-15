@@ -229,6 +229,41 @@ pub fn canonical_watch_root(root: &Path) -> Result<PathBuf> {
         .with_context(|| format!("canonicalizing watch root {}", root.display()))
 }
 
+/// Whether this process can read TCC-protected locations (Full Disk
+/// Access). Probed by attempting to list directories macOS only exposes
+/// with FDA; without it the index silently misses Mail, Messages, etc.
+/// "No protected dir exists to probe" counts as access (nothing to miss).
+pub fn has_full_disk_access() -> bool {
+    let Some(home) = std::env::home_dir() else {
+        return true;
+    };
+    let candidates = [
+        home.join("Library/Mail"),
+        home.join("Library/Messages"),
+        home.join("Library/Safari"),
+    ];
+    let mut any_denied = false;
+    for dir in candidates {
+        match std::fs::read_dir(&dir) {
+            Ok(_) => return true,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                any_denied = true;
+            }
+            Err(_) => {} // doesn't exist: no signal
+        }
+    }
+    !any_denied
+}
+
+/// Open System Settings at the Full Disk Access pane so the user can
+/// grant it (takes effect after relaunching filex).
+pub fn open_full_disk_access_settings() {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn()
+        .ok();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
