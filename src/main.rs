@@ -81,43 +81,154 @@ struct Workspace {
     notice: Option<SharedString>,
     #[cfg(target_os = "macos")]
     fda_missing: bool,
+    /// Connection to filex-indexd, when the elevated service is running.
+    /// Searches go over IPC and no local indexing happens.
+    #[cfg(target_os = "windows")]
+    service: Option<std::sync::Arc<filex::index::ipc::ServiceClient>>,
+    #[cfg(target_os = "windows")]
+    service_status: Vec<filex::index::ipc::RootStatus>,
     query: String,
     results: Vec<SearchRow>,
     search_generation: u64,
 }
 
 impl Workspace {
-    fn new(cx: &mut Context<Self>) -> Self {
-        let cwd = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        let roots_file = manager::default_roots_file();
-        let mut configured = roots_file
+    fn configured_roots() -> Vec<PathBuf> {
+        let mut configured = manager::default_roots_file()
             .as_deref()
             .map(manager::load_roots)
             .unwrap_or_default();
-        if configured.is_empty() {
-            configured.push(cwd.clone());
+        if configured.is_empty()
+            && let Some(home) = std::env::home_dir()
+        {
+            configured.push(home);
         }
+        configured
+    }
 
+    fn new(cx: &mut Context<Self>) -> Self {
+        let cwd = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
             entries: Vec::new(),
             load_error: None,
             roots: Vec::new(),
-            roots_file,
+            roots_file: manager::default_roots_file(),
             notice: None,
             #[cfg(target_os = "macos")]
             fda_missing: false,
+            #[cfg(target_os = "windows")]
+            service: None,
+            #[cfg(target_os = "windows")]
+            service_status: Vec::new(),
             query: String::new(),
             results: Vec::new(),
             search_generation: 0,
         };
         this.load_dir(&cwd);
-        for path in configured {
+        // Windows probes for the elevated index service first and only
+        // falls back to in-process indexing if it's absent; elsewhere
+        // indexing is always in-process.
+        #[cfg(target_os = "windows")]
+        this.spawn_service_probe(cx);
+        #[cfg(not(target_os = "windows"))]
+        for path in Self::configured_roots() {
             this.add_root_slot(path, cx);
         }
         this.spawn_fda_check(cx);
         this
+    }
+
+    /// Probe for filex-indexd; on success run in service mode, otherwise
+    /// start local indexing. Runs off-thread — the UI shows "indexing
+    /// 0/0" briefly while probing.
+    #[cfg(target_os = "windows")]
+    fn spawn_service_probe(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let client = cx
+                .background_executor()
+                .spawn(async { filex::index::ipc::ServiceClient::try_connect().ok() })
+                .await;
+            this.update(cx, |this, cx| {
+                match client {
+                    Some(client) => {
+                        this.service = Some(std::sync::Arc::new(client));
+                        this.spawn_service_status_poll(cx);
+                    }
+                    None => {
+                        for path in Self::configured_roots() {
+                            this.add_root_slot(path, cx);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Keep the service's root/file counts fresh; on IPC failure fall
+    /// back to local indexing so search keeps working.
+    #[cfg(target_os = "windows")]
+    fn spawn_service_status_poll(&self, cx: &mut Context<Self>) {
+        let Some(client) = self.service.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            loop {
+                let status = cx
+                    .background_executor()
+                    .spawn({
+                        let client = client.clone();
+                        async move { client.status() }
+                    })
+                    .await;
+                let keep_polling = this.update(cx, |this, cx| match status {
+                    Ok(status) => {
+                        this.service_status = status.roots;
+                        cx.notify();
+                        true
+                    }
+                    Err(err) => {
+                        eprintln!("filex: index service lost ({err:#}); indexing locally");
+                        this.service_disconnected(cx);
+                        false
+                    }
+                });
+                if !matches!(keep_polling, Ok(true)) {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn service_disconnected(&mut self, cx: &mut Context<Self>) {
+        self.service = None;
+        self.service_status.clear();
+        if self.roots.is_empty() {
+            for path in Self::configured_roots() {
+                self.add_root_slot(path, cx);
+            }
+        }
+        self.update_search(cx);
+        cx.notify();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn service_mode(&self) -> bool {
+        self.service.is_some()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn service_mode(&self) -> bool {
+        false
     }
 
     /// Canonicalize, create the slot, and start indexing. Invalid paths
@@ -245,6 +356,12 @@ impl Workspace {
 
     /// Add the directory currently being browsed as a new indexed root.
     fn add_current_folder(&mut self, cx: &mut Context<Self>) {
+        if self.service_mode() {
+            self.notice =
+                Some("roots are managed by the filex index service (filex-indexd)".into());
+            cx.notify();
+            return;
+        }
         let existing: Vec<PathBuf> = self.roots.iter().map(|slot| slot.path.clone()).collect();
         match manager::validate_new_root(&existing, &self.cwd) {
             Ok(canonical) => {
@@ -343,6 +460,46 @@ impl Workspace {
             self.results.clear();
             return;
         }
+
+        // Service mode: the query goes over IPC; a failed roundtrip falls
+        // back to local indexing and re-runs.
+        #[cfg(target_os = "windows")]
+        if let Some(client) = self.service.clone() {
+            let query = self.query.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { client.search(&query, SEARCH_RESULT_LIMIT as u32) })
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.search_generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(hits) => {
+                            this.results = hits
+                                .into_iter()
+                                .map(|hit| SearchRow {
+                                    name: hit.name.into(),
+                                    path_label: hit.path.display().to_string().into(),
+                                    is_dir: hit.is_dir,
+                                    target: hit.path,
+                                })
+                                .collect();
+                            cx.notify();
+                        }
+                        Err(err) => {
+                            eprintln!("filex: service search failed ({err:#})");
+                            this.service_disconnected(cx);
+                        }
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+
         let indexes: Vec<SharedIndex> =
             self.roots.iter().filter_map(RootSlot::ready_index).collect();
         if indexes.is_empty() {
@@ -389,12 +546,25 @@ impl Workspace {
     }
 
     fn any_root_ready(&self) -> bool {
+        if self.service_mode() {
+            return true;
+        }
         self.roots
             .iter()
             .any(|slot| matches!(slot.state, RootState::Ready { .. }))
     }
 
     fn index_status_text(&self) -> SharedString {
+        #[cfg(target_os = "windows")]
+        if self.service_mode() {
+            let files: u64 = self.service_status.iter().map(|r| r.files).sum();
+            let roots = self.service_status.len();
+            return format!(
+                "service · {files} files · {roots} root{}",
+                if roots == 1 { "" } else { "s" }
+            )
+            .into();
+        }
         let total = self.roots.len();
         let mut ready = 0usize;
         let mut failed = 0usize;
@@ -472,6 +642,41 @@ impl Workspace {
             )
     }
 
+    /// A row for one service-managed root (service mode has no local
+    /// slots; state comes from the status poll).
+    #[cfg(target_os = "windows")]
+    fn render_service_root_row(
+        &self,
+        ix: usize,
+        root: &filex::index::ipc::RootStatus,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let path = PathBuf::from(&root.path);
+        let label: SharedString = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.path.clone())
+            .into();
+        div()
+            .id(("service-root", ix))
+            .flex()
+            .items_center()
+            .gap_2()
+            .mx_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .hover(|s| s.bg(rgb(BG_HOVER)))
+            .child(div().text_xs().text_color(rgb(ACCENT)).child("◆"))
+            .child(div().flex_1().overflow_hidden().child(label))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                this.navigate(path.clone(), cx);
+            }))
+            .into_any_element()
+    }
+
     // `use<>`: the built element owns its data; without opting out of
     // lifetime capture it couldn't be collected across loop iterations.
     fn render_root_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -522,9 +727,24 @@ impl Workspace {
         .filter_map(|(label, path)| Some((label, path?)))
         .collect();
 
-        let root_rows: Vec<_> = (0..self.roots.len())
-            .map(|ix| self.render_root_row(ix, cx))
-            .collect();
+        let root_rows: Vec<gpui::AnyElement> = {
+            #[cfg(target_os = "windows")]
+            if self.service_mode() {
+                self.service_status
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, root)| self.render_service_root_row(ix, root, cx))
+                    .collect()
+            } else {
+                (0..self.roots.len())
+                    .map(|ix| self.render_root_row(ix, cx).into_any_element())
+                    .collect()
+            }
+            #[cfg(not(target_os = "windows"))]
+            (0..self.roots.len())
+                .map(|ix| self.render_root_row(ix, cx).into_any_element())
+                .collect()
+        };
 
         let sidebar = div()
             .flex()

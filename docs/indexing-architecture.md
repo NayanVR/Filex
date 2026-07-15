@@ -123,10 +123,14 @@ notified "index generation changed"; it never blocks.
 > elevated and serves search/status over the named pipe
 > `\\.\pipe\filex-index` (versioned length-prefixed frames; see
 > `index::ipc`), registered for v1 via Task Scheduler (`schtasks
-> /RL HIGHEST` — an SCM-native wrapper is planned). The UI does not yet
-> auto-connect to the service — that backend seam is the remaining piece;
-> until then the elevated path means running filex itself as
-> Administrator.
+> /RL HIGHEST` — an SCM-native wrapper is planned). On startup the Windows UI
+> probes the pipe and runs in service mode when filex-indexd is present
+> (searches over IPC, no local indexing), falling back to in-process
+> indexing — and back again mid-session if the service dies. Live
+> indexes snapshot themselves every 5 minutes via PersistNow markers
+> through the delta channel (enqueue-time checkpoints keep replay
+> exact), and a degraded inotify watcher reconciles with periodic root
+> rescans instead of going silently stale.
 
 ### Windows — USN Journal (the good one)
 
