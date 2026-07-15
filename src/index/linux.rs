@@ -446,10 +446,16 @@ mod imp {
             }
 
             // Directory handles resolve relative to any fd on the same
-            // filesystem; the root itself is the natural anchor.
-            // SAFETY: NUL-terminated path; O_PATH needs no read perms.
-            let mount_fd =
-                unsafe { libc::open(c_root.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+            // filesystem; the root itself is the natural anchor. A real
+            // O_RDONLY fd, not O_PATH — open_by_handle_at does not
+            // reliably accept O_PATH descriptors as mount_fd.
+            // SAFETY: NUL-terminated path.
+            let mount_fd = unsafe {
+                libc::open(
+                    c_root.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
             if mount_fd < 0 {
                 bail!(
                     "opening {} as handle-resolution anchor: {}",
@@ -500,6 +506,9 @@ mod imp {
         shutdown: &AtomicBool,
     ) {
         let mut buf = vec![0u8; 64 * 1024];
+        // Handle-resolution failures are silent event drops; log the first
+        // few so a misbehaving kernel/filesystem is diagnosable from logs.
+        let mut resolve_failures_logged = 0u32;
         while !shutdown.load(Ordering::Relaxed) {
             let mut pollfd = libc::pollfd { fd: fan.0, events: libc::POLLIN, revents: 0 };
             // SAFETY: pollfd points at one valid struct for the call.
@@ -515,10 +524,25 @@ mod imp {
 
             let mut batch = Vec::new();
             for event in parse_fanotify_events(&buf[..n as usize]) {
-                let dir = resolve_dir_handle(mount.0, &event.dir_handle)
-                    // The filesystem mark sees the whole fs; keep only
-                    // events under our root.
-                    .filter(|dir| dir.starts_with(root));
+                let dir = match resolve_dir_handle(mount.0, &event.dir_handle) {
+                    Ok(dir) => {
+                        // The filesystem mark sees the whole fs; keep only
+                        // events under our root.
+                        if dir.starts_with(root) { Some(dir) } else { None }
+                    }
+                    Err(err) if err.raw_os_error() == Some(libc::ESTALE) => None,
+                    Err(err) => {
+                        if resolve_failures_logged < 3 {
+                            resolve_failures_logged += 1;
+                            eprintln!(
+                                "filex: fanotify handle resolution failed \
+                                 (mask {:#x}): {err}",
+                                event.mask
+                            );
+                        }
+                        None
+                    }
+                };
                 if let Some(delta) = fanotify_event_to_delta(root, dir.as_deref(), &event) {
                     batch.push(delta);
                 }
@@ -531,10 +555,10 @@ mod imp {
 
     /// Resolve a raw `struct file_handle` (as captured from the event) to
     /// the directory's current path via open_by_handle_at + /proc/self/fd.
-    /// Requires CAP_DAC_READ_SEARCH. None for stale handles (dir deleted).
-    fn resolve_dir_handle(mount_fd: i32, raw_handle: &[u8]) -> Option<PathBuf> {
+    /// Requires CAP_DAC_READ_SEARCH. ESTALE means the dir was deleted.
+    fn resolve_dir_handle(mount_fd: i32, raw_handle: &[u8]) -> std::io::Result<PathBuf> {
         if raw_handle.len() < 8 {
-            return None;
+            return Err(std::io::Error::other("event carried no file handle"));
         }
         // Copy into an 8-aligned buffer: file_handle starts with two u32s
         // and the kernel requires natural alignment.
@@ -546,8 +570,7 @@ mod imp {
         aligned_bytes.copy_from_slice(raw_handle);
 
         // SAFETY: open_by_handle_at reads handle_bytes from the struct we
-        // built from kernel-provided bytes; O_PATH avoids permission-heavy
-        // opens.
+        // built from kernel-provided bytes; O_PATH suffices for readlink.
         let fd = unsafe {
             libc::syscall(
                 libc::SYS_open_by_handle_at,
@@ -557,11 +580,10 @@ mod imp {
             )
         } as i32;
         if fd < 0 {
-            return None; // ESTALE (deleted) or permissions
+            return Err(std::io::Error::last_os_error());
         }
         let guard = FdGuard(fd);
-        let path = std::fs::read_link(format!("/proc/self/fd/{}", guard.0)).ok()?;
-        Some(path)
+        std::fs::read_link(format!("/proc/self/fd/{}", guard.0))
     }
 
     /// Watches a directory tree via one inotify instance with a watch per

@@ -418,12 +418,17 @@ mod imp {
         Ok(UsnBootstrap { index, journal })
     }
 
-    /// Tails the USN journal via blocking `FSCTL_READ_USN_JOURNAL` reads on
+    /// Tails the USN journal via bounded `FSCTL_READ_USN_JOURNAL` reads on
     /// a dedicated thread, translating records into native-keyed deltas.
-    /// Journal truncation/deletion degrades to a root rescan. Dropping
-    /// cancels the pending read and closes the handle.
+    /// Journal truncation/deletion degrades to a root rescan.
+    ///
+    /// Reads use the ioctl's own Timeout (1s) rather than blocking
+    /// indefinitely: a synchronous journal read parked in the kernel is
+    /// not reliably cancellable with CancelIoEx, so shutdown works by
+    /// flagging and letting the loop wake — Drop then joins within ~1s.
     pub struct UsnJournalWatcher {
         handle: Arc<VolumeHandle>,
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<JoinHandle<()>>,
         journal_id: u64,
         next_usn: Arc<AtomicU64>,
@@ -440,14 +445,16 @@ mod imp {
                 bail!("USN journal watcher requires a volume root");
             };
             let handle = Arc::new(open_volume(drive)?);
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let next_usn = Arc::new(AtomicU64::new(start_usn as u64));
             let thread = std::thread::Builder::new().name("filex-usn-journal".into()).spawn({
                 let handle = handle.clone();
+                let shutdown = shutdown.clone();
                 let next_usn = next_usn.clone();
                 let root = root.to_path_buf();
-                move || journal_loop(&handle, &root, journal_id, &next_usn, &deltas)
+                move || journal_loop(&handle, &root, journal_id, &next_usn, &deltas, &shutdown)
             })?;
-            Ok(Self { handle, thread: Some(thread), journal_id, next_usn })
+            Ok(Self { handle, shutdown, thread: Some(thread), journal_id, next_usn })
         }
 
         pub fn journal_id(&self) -> u64 {
@@ -464,8 +471,10 @@ mod imp {
 
     impl Drop for UsnJournalWatcher {
         fn drop(&mut self) {
-            // SAFETY: cancelling/closing our own handle; the blocked read
-            // aborts and the loop exits.
+            self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Best-effort nudge; the loop exits on its own within one
+            // read timeout even if the cancel is ignored.
+            // SAFETY: cancelling I/O on our own handle.
             unsafe { CancelIoEx(self.handle.0, None).ok() };
             if let Some(thread) = self.thread.take() {
                 thread.join().ok();
@@ -479,15 +488,16 @@ mod imp {
         journal_id: u64,
         next_usn: &AtomicU64,
         deltas: &Sender<Vec<FsDelta>>,
+        shutdown: &std::sync::atomic::AtomicBool,
     ) {
         let mut buf = vec![0u8; 256 * 1024];
-        loop {
+        while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             let input = READ_USN_JOURNAL_DATA_V0 {
                 StartUsn: next_usn.load(Ordering::Relaxed) as i64,
                 ReasonMask: JOURNAL_REASON_MASK,
                 ReturnOnlyOnClose: 0,
-                Timeout: 0,
-                BytesToWaitFor: 1, // block until at least one record
+                Timeout: 1,        // seconds; bounds each read so the
+                BytesToWaitFor: 1, // shutdown flag is honored promptly
                 UsnJournalID: journal_id,
             };
             let mut bytes = 0u32;
@@ -713,12 +723,19 @@ mod tests {
             );
         }
 
-        /// Requires elevation: tails the real USN journal on C: and
-        /// verifies a file created in %TEMP% (which lives on C:) arrives
-        /// as a native-keyed delta.
+        /// Requires elevation: tails the real USN journal on whichever
+        /// volume hosts %TEMP% (not necessarily C: — CI runners map temp
+        /// to D:) and verifies a created file arrives as a native delta.
         #[test]
         fn usn_journal_reports_real_file_creation() {
-            let root = Path::new(r"C:\").canonicalize().unwrap();
+            let temp = std::env::temp_dir().canonicalize().unwrap();
+            // Prefix + RootDir components = the volume root of %TEMP%.
+            let root: PathBuf = temp.components().take(2).collect();
+            assert!(
+                volume_root_drive(&root).is_some(),
+                "could not derive a volume root from {}",
+                temp.display()
+            );
             let info = match query_usn_journal(&root) {
                 Ok(info) => info,
                 Err(err) => {
@@ -732,7 +749,7 @@ mod tests {
                 UsnJournalWatcher::spawn(&root, info.journal_id, info.next_usn, tx).unwrap();
 
             let name = format!("usn-smoke-{}.txt", std::process::id());
-            let target = std::env::temp_dir().join(&name);
+            let target = temp.join(&name);
             fs::write(&target, b"x").unwrap();
 
             let seen = wait_for(&rx, Duration::from_secs(20), |d| {
