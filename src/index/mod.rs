@@ -9,6 +9,7 @@
 // Platform watcher modules are compiled on every OS: their event parsers
 // and delta mappers are pure and fixture-tested everywhere; only the
 // OS-call sections inside are target-gated.
+pub mod ipc;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;

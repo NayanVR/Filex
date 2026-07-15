@@ -119,9 +119,14 @@ notified "index generation changed"; it never blocks.
 > fanotify remains the privileged upgrade. Only macOS has been executed
 > live; Linux/Windows are type-checked per-target and their
 > parsers/mappers/builders are fixture-tested on every OS. The
-> Everything-style split (elevated indexing service + unelevated UI over
-> IPC) remains the plan of record for shipping; today's elevated path
-> requires running filex itself as Administrator.
+> Everything-style split now exists: `filex-indexd` hosts the indexes
+> elevated and serves search/status over the named pipe
+> `\\.\pipe\filex-index` (versioned length-prefixed frames; see
+> `index::ipc`), registered for v1 via Task Scheduler (`schtasks
+> /RL HIGHEST` — an SCM-native wrapper is planned). The UI does not yet
+> auto-connect to the service — that backend seam is the remaining piece;
+> until then the elevated path means running filex itself as
+> Administrator.
 
 ### Windows — USN Journal (the good one)
 

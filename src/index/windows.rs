@@ -101,8 +101,8 @@ pub fn event_to_delta(
 
 #[cfg(target_os = "windows")]
 pub use imp::{
-    DirChangesWatcher, UsnBootstrap, UsnJournalInfo, UsnJournalWatcher, query_usn_journal,
-    usn_bootstrap, volume_root_drive,
+    DirChangesWatcher, UsnBootstrap, UsnJournalInfo, UsnJournalWatcher, connect_index_pipe,
+    query_usn_journal, run_pipe_server, usn_bootstrap, volume_root_drive,
 };
 
 #[cfg(target_os = "windows")]
@@ -305,6 +305,94 @@ mod imp {
                 break; // receiver gone: shutting down
             }
         }
+    }
+
+    // ---- named-pipe transport for the index service (ipc module) ----
+
+    /// Serve [`crate::index::ipc`] clients over a named pipe, one pipe
+    /// instance (and thread) per connection, until `accept_limit`
+    /// connections have been served (None = forever). The pipe's default
+    /// security descriptor already restricts writing to the creating user
+    /// and administrators, which is the intended audience.
+    pub fn run_pipe_server(
+        pipe_name: &str,
+        host: std::sync::Arc<dyn crate::index::ipc::IndexHost>,
+        accept_limit: Option<usize>,
+    ) -> Result<()> {
+        use std::os::windows::io::FromRawHandle as _;
+        use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+            PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        };
+
+        let mut served = 0usize;
+        while accept_limit.is_none_or(|limit| served < limit) {
+            // SAFETY: standard named-pipe creation; name outlives the call.
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    &HSTRING::from(pipe_name),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    64 * 1024,
+                    64 * 1024,
+                    0,
+                    None,
+                )
+            };
+            if handle.is_invalid() {
+                return Err(windows::core::Error::from_thread())
+                    .with_context(|| format!("creating named pipe {pipe_name}"));
+            }
+            // SAFETY: freshly created, unconnected pipe instance.
+            let connected = unsafe { ConnectNamedPipe(handle, None) };
+            if let Err(err) = connected
+                && err.code() != ERROR_PIPE_CONNECTED.to_hresult()
+            {
+                // SAFETY: closing the instance we just created.
+                unsafe { CloseHandle(handle).ok() };
+                return Err(err).context("waiting for a pipe client");
+            }
+            served += 1;
+
+            // SAFETY: ownership of the connected instance moves into the
+            // File, whose Drop closes it when the connection ends.
+            let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+            let host = host.clone();
+            std::thread::Builder::new().name("filex-ipc".into()).spawn(move || {
+                let reader = match stream.try_clone() {
+                    Ok(reader) => reader,
+                    Err(err) => {
+                        eprintln!("filex: pipe clone failed: {err}");
+                        return;
+                    }
+                };
+                if let Err(err) = crate::index::ipc::serve_connection(reader, stream, &*host) {
+                    eprintln!("filex: ipc connection ended with error: {err:#}");
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Connect to the index service's pipe, retrying briefly while all
+    /// instances are busy. Returns a duplex stream for
+    /// [`crate::index::ipc::RemoteIndex::connect`].
+    pub fn connect_index_pipe(pipe_name: &str) -> Result<std::fs::File> {
+        let mut last_err = None;
+        for _ in 0..20 {
+            match std::fs::File::options().read(true).write(true).open(pipe_name) {
+                Ok(file) => return Ok(file),
+                Err(err) => {
+                    last_err = Some(err);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+        Err(last_err.expect("at least one attempt"))
+            .with_context(|| format!("connecting to the index service at {pipe_name}"))
     }
 
     // ---- USN fast path (requires Administrator; volume roots only) ----
@@ -840,6 +928,39 @@ mod tests {
             });
             fs::remove_file(&target).ok();
             assert!(seen, "no NativeUpsert from the USN journal for {name}");
+        }
+
+        /// Real named-pipe roundtrip: server thread + client in-process,
+        /// exercising the exact transport the elevated service uses.
+        #[test]
+        fn index_service_pipe_roundtrip() {
+            use crate::index::ipc::{IndexHost, MultiRootHost, RemoteIndex};
+            use crate::index::{ROOT, VolumeIndex};
+            use std::sync::{Arc, RwLock};
+
+            let mut index = VolumeIndex::new(r"C:\vol");
+            index.insert(ROOT, "pipe-hit.txt", false).unwrap();
+            let host: Arc<dyn IndexHost> = Arc::new(MultiRootHost {
+                roots: vec![(PathBuf::from(r"C:\vol"), Arc::new(RwLock::new(index)))],
+            });
+
+            let pipe_name = format!(r"\\.\pipe\filex-test-{}", std::process::id());
+            let server = std::thread::spawn({
+                let pipe_name = pipe_name.clone();
+                move || run_pipe_server(&pipe_name, host, Some(1))
+            });
+
+            let stream = connect_index_pipe(&pipe_name).unwrap();
+            let reader = stream.try_clone().unwrap();
+            let mut client = RemoteIndex::connect(reader, stream).unwrap();
+
+            let hits = client.search("pipe-hit", 10).unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].name, "pipe-hit.txt");
+            assert_eq!(client.status().unwrap().roots[0].files, 1);
+
+            drop(client);
+            server.join().unwrap().unwrap();
         }
 
         /// Requires elevation and enumerates the whole C: MFT — minutes of
