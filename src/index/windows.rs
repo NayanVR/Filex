@@ -191,7 +191,10 @@ mod imp {
     }
 
     fn reader_loop(handle: &DirHandle, root: &Path, deltas: &Sender<Vec<FsDelta>>) {
-        let mut buf = vec![0u8; 64 * 1024];
+        // u64-backed: ReadDirectoryChangesW fails with ERROR_NOACCESS if
+        // the buffer is not DWORD-aligned; Vec<u8> alignment is luck.
+        let mut buf = vec![0u64; 8 * 1024]; // 64 KiB
+        let buf_len_bytes = (buf.len() * size_of::<u64>()) as u32;
         loop {
             let mut bytes_returned = 0u32;
             // SAFETY: buf outlives the synchronous call; no OVERLAPPED means
@@ -200,7 +203,7 @@ mod imp {
                 ReadDirectoryChangesW(
                     handle.0,
                     buf.as_mut_ptr() as *mut _,
-                    buf.len() as u32,
+                    buf_len_bytes,
                     true, // recursive
                     FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME,
                     Some(&mut bytes_returned),
@@ -214,20 +217,41 @@ mod imp {
                     // Too many changes for the OS to enumerate: rescan.
                     vec![FsDelta::Rescan { path: root.to_path_buf() }]
                 }
-                Err(_) => break, // cancelled (drop) or handle closed
+                Err(err) => {
+                    // Cancellation (drop) is expected; anything else must
+                    // be visible — a silent break means silent staleness.
+                    use windows::Win32::Foundation::ERROR_OPERATION_ABORTED;
+                    if err.code() != ERROR_OPERATION_ABORTED.to_hresult() {
+                        eprintln!(
+                            "filex: ReadDirectoryChangesW on {} failed: {err}",
+                            root.display()
+                        );
+                    }
+                    break;
+                }
                 Ok(()) if bytes_returned == 0 => {
                     // Our buffer overflowed; changes were dropped.
                     vec![FsDelta::Rescan { path: root.to_path_buf() }]
                 }
-                Ok(()) => parse_notify_buffer(&buf[..bytes_returned as usize])
-                    .iter()
-                    .filter_map(|event| {
-                        let presence = std::fs::symlink_metadata(root.join(&event.relative_path))
-                            .ok()
-                            .map(|m| m.is_dir());
-                        event_to_delta(root, event, presence)
-                    })
-                    .collect(),
+                Ok(()) => {
+                    // SAFETY: the kernel wrote bytes_returned bytes.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            buf.as_ptr() as *const u8,
+                            bytes_returned as usize,
+                        )
+                    };
+                    parse_notify_buffer(bytes)
+                        .iter()
+                        .filter_map(|event| {
+                            let presence =
+                                std::fs::symlink_metadata(root.join(&event.relative_path))
+                                    .ok()
+                                    .map(|m| m.is_dir());
+                            event_to_delta(root, event, presence)
+                        })
+                        .collect()
+                }
             };
 
             if !batch.is_empty() && deltas.send(batch).is_err() {
@@ -379,7 +403,9 @@ mod imp {
             LowUsn: 0,
             HighUsn: journal.next_usn,
         };
-        let mut buf = vec![0u8; 1 << 20];
+        // u64-backed: USN output buffers must be DWORD64-aligned.
+        let mut buf = vec![0u64; (1 << 20) / size_of::<u64>()];
+        let buf_len_bytes = (buf.len() * size_of::<u64>()) as u32;
         loop {
             let mut bytes = 0u32;
             // SAFETY: valid handle; in/out buffers live across the call.
@@ -390,14 +416,18 @@ mod imp {
                     Some(&input as *const _ as *const _),
                     size_of::<MFT_ENUM_DATA_V0>() as u32,
                     Some(buf.as_mut_ptr() as *mut _),
-                    buf.len() as u32,
+                    buf_len_bytes,
                     Some(&mut bytes),
                     None,
                 )
             };
             match result {
                 Ok(()) => {
-                    let (next_frn, batch) = parse_usn_output(&buf[..bytes as usize]);
+                    // SAFETY: the kernel wrote `bytes` bytes.
+                    let out = unsafe {
+                        std::slice::from_raw_parts(buf.as_ptr() as *const u8, bytes as usize)
+                    };
+                    let (next_frn, batch) = parse_usn_output(out);
                     if batch.is_empty() {
                         break; // defensive: no forward progress
                     }
@@ -490,7 +520,9 @@ mod imp {
         deltas: &Sender<Vec<FsDelta>>,
         shutdown: &std::sync::atomic::AtomicBool,
     ) {
-        let mut buf = vec![0u8; 256 * 1024];
+        // u64-backed: USN output buffers must be DWORD64-aligned.
+        let mut buf = vec![0u64; (256 * 1024) / size_of::<u64>()];
+        let buf_len_bytes = (buf.len() * size_of::<u64>()) as u32;
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             let input = READ_USN_JOURNAL_DATA_V0 {
                 StartUsn: next_usn.load(Ordering::Relaxed) as i64,
@@ -509,14 +541,18 @@ mod imp {
                     Some(&input as *const _ as *const _),
                     size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
                     Some(buf.as_mut_ptr() as *mut _),
-                    buf.len() as u32,
+                    buf_len_bytes,
                     Some(&mut bytes),
                     None,
                 )
             };
             match result {
                 Ok(()) if bytes as usize >= 8 => {
-                    let (next, records) = parse_usn_output(&buf[..bytes as usize]);
+                    // SAFETY: the kernel wrote `bytes` bytes.
+                    let out = unsafe {
+                        std::slice::from_raw_parts(buf.as_ptr() as *const u8, bytes as usize)
+                    };
+                    let (next, records) = parse_usn_output(out);
                     next_usn.store(next, Ordering::Relaxed);
                     let batch: Vec<FsDelta> =
                         records.iter().filter_map(journal_record_to_delta).collect();
