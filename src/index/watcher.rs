@@ -34,6 +34,21 @@ pub enum FsDelta {
     /// The watcher lost precision (event coalescing / queue overflow);
     /// reconcile the subtree at `path` against the real filesystem.
     Rescan { path: PathBuf },
+    /// Journal-sourced upsert addressed by platform-native keys (NTFS
+    /// FRNs): `key` now exists under `parent_key` with `name`. Covers
+    /// creates and renames/moves — the index entry is re-pointed, and
+    /// descendants follow automatically through parent links. A
+    /// `parent_key` unknown to the index means the event is outside the
+    /// indexed subtree; it (and, for moves, the entry) is dropped.
+    NativeUpsert {
+        key: u64,
+        parent_key: u64,
+        name: String,
+        is_dir: bool,
+    },
+    /// Journal-sourced removal by native key. Unknown keys are no-ops
+    /// (deletes outside the subtree, or replays of applied events).
+    NativeRemove { key: u64 },
 }
 
 /// Apply one delta to the index. Idempotent: replaying an event whose
@@ -44,6 +59,42 @@ pub fn apply(index: &mut VolumeIndex, delta: &FsDelta) -> Result<()> {
         FsDelta::Upsert { path, is_dir } => upsert(index, path, *is_dir),
         FsDelta::Remove { path } => remove(index, path),
         FsDelta::Rescan { path } => rescan(index, path),
+        FsDelta::NativeUpsert { key, parent_key, name, is_dir } => {
+            native_upsert(index, *key, *parent_key, name, *is_dir)
+        }
+        FsDelta::NativeRemove { key } => match index.entry_by_native_key(*key) {
+            Some(id) => index.remove(id),
+            None => Ok(()), // outside the subtree, or already applied
+        },
+    }
+}
+
+fn native_upsert(
+    index: &mut VolumeIndex,
+    key: u64,
+    parent_key: u64,
+    name: &str,
+    is_dir: bool,
+) -> Result<()> {
+    let parent = index.entry_by_native_key(parent_key);
+    let existing = index.entry_by_native_key(key);
+    match (existing, parent) {
+        // A move out of the indexed subtree: the entry leaves the index.
+        (Some(id), None) => index.remove(id),
+        // Rename/move within the subtree: re-point the entry; children
+        // follow via parent links. A type flip means the FRN was recycled
+        // mid-window — rebuild the entry instead.
+        (Some(id), Some(parent)) => {
+            if index.is_dir(id) == Some(is_dir) {
+                index.rename(id, parent, name)
+            } else {
+                index.remove(id)?;
+                index.insert_with_key(parent, name, is_dir, key).map(|_| ())
+            }
+        }
+        (None, Some(parent)) => index.insert_with_key(parent, name, is_dir, key).map(|_| ()),
+        // Entirely outside the indexed subtree.
+        (None, None) => Ok(()),
     }
 }
 
@@ -366,6 +417,88 @@ mod tests {
         let path = root(&index).join("existing");
         apply(&mut index, &FsDelta::Rescan { path }).unwrap();
         assert_eq!(index.len(), 0);
+    }
+
+    /// Keyed fixture: root(frn 5)/{docs(10)/{a.txt(11)}, b.txt(20)}
+    fn keyed_index() -> VolumeIndex {
+        let mut index = VolumeIndex::new_with_root_key("/vol", 5);
+        let docs = index.insert_with_key(crate::index::ROOT, "docs", true, 10).unwrap();
+        index.insert_with_key(docs, "a.txt", false, 11).unwrap();
+        index.insert_with_key(crate::index::ROOT, "b.txt", false, 20).unwrap();
+        index
+    }
+
+    #[test]
+    fn native_upsert_inserts_under_keyed_parent() {
+        let mut index = keyed_index();
+        apply(
+            &mut index,
+            &FsDelta::NativeUpsert { key: 12, parent_key: 10, name: "new.txt".into(), is_dir: false },
+        )
+        .unwrap();
+        let hits = index.search("new.txt", 10);
+        assert_eq!(index.path_of(hits[0].id).unwrap(), PathBuf::from("/vol/docs/new.txt"));
+    }
+
+    #[test]
+    fn native_upsert_renames_existing_key_and_children_follow() {
+        let mut index = keyed_index();
+        // docs (frn 10) renamed to "archive" — a.txt must follow.
+        apply(
+            &mut index,
+            &FsDelta::NativeUpsert { key: 10, parent_key: 5, name: "archive".into(), is_dir: true },
+        )
+        .unwrap();
+        let hits = index.search("a.txt", 10);
+        assert_eq!(
+            index.path_of(hits[0].id).unwrap(),
+            PathBuf::from("/vol/archive/a.txt")
+        );
+        assert!(index.resolve(Path::new("docs")).is_none());
+    }
+
+    #[test]
+    fn native_upsert_to_unknown_parent_removes_moved_out_entry() {
+        let mut index = keyed_index();
+        apply(
+            &mut index,
+            &FsDelta::NativeUpsert { key: 20, parent_key: 999, name: "b.txt".into(), is_dir: false },
+        )
+        .unwrap();
+        assert!(index.search("b.txt", 10).is_empty());
+
+        // Entirely-unknown key + parent: silently ignored.
+        apply(
+            &mut index,
+            &FsDelta::NativeUpsert { key: 777, parent_key: 999, name: "x".into(), is_dir: false },
+        )
+        .unwrap();
+        assert_eq!(index.len(), 2); // docs + a.txt remain
+    }
+
+    #[test]
+    fn native_remove_drops_subtree_and_tolerates_unknown_keys() {
+        let mut index = keyed_index();
+        apply(&mut index, &FsDelta::NativeRemove { key: 10 }).unwrap();
+        assert!(index.search("a.txt", 10).is_empty());
+        assert!(index.entry_by_native_key(11).is_none()); // key map cleaned
+
+        apply(&mut index, &FsDelta::NativeRemove { key: 10 }).unwrap(); // replay: no-op
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn native_upsert_type_flip_rebuilds_recycled_frn() {
+        let mut index = keyed_index();
+        // FRN 20 was b.txt (file); journal now says it's a directory.
+        apply(
+            &mut index,
+            &FsDelta::NativeUpsert { key: 20, parent_key: 5, name: "b".into(), is_dir: true },
+        )
+        .unwrap();
+        let id = index.entry_by_native_key(20).unwrap();
+        assert_eq!(index.is_dir(id), Some(true));
+        assert!(index.search("b.txt", 10).is_empty());
     }
 
     #[test]

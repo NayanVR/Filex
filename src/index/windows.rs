@@ -100,23 +100,38 @@ pub fn event_to_delta(
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::DirChangesWatcher;
+pub use imp::{
+    DirChangesWatcher, UsnBootstrap, UsnJournalInfo, UsnJournalWatcher, query_usn_journal,
+    usn_bootstrap, volume_root_drive,
+};
 
 #[cfg(target_os = "windows")]
 mod imp {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::Sender;
     use std::thread::JoinHandle;
 
-    use anyhow::{Context as _, Result};
-    use windows::Win32::Foundation::{CloseHandle, ERROR_NOTIFY_ENUM_DIR, HANDLE};
-    use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME,
-        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING, ReadDirectoryChangesW,
+    use anyhow::{Context as _, Result, bail};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_HANDLE_EOF, ERROR_NOTIFY_ENUM_DIR, GENERIC_READ, HANDLE,
     };
-    use windows::Win32::System::IO::CancelIoEx;
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+        FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+        ReadDirectoryChangesW,
+    };
+    use windows::Win32::System::IO::{CancelIoEx, DeviceIoControl};
+    use windows::Win32::System::Ioctl::{
+        FSCTL_ENUM_USN_DATA, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, MFT_ENUM_DATA_V0,
+        READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
+    };
     use windows::core::HSTRING;
+
+    use crate::index::usn::{JOURNAL_REASON_MASK, MftEntry, journal_record_to_delta, parse_usn_output};
+    use crate::index::VolumeIndex;
 
     /// Sendable wrapper: HANDLEs are agile; this one is only used for
     /// ReadDirectoryChangesW on the reader thread and CancelIoEx/CloseHandle
@@ -217,6 +232,302 @@ mod imp {
 
             if !batch.is_empty() && deltas.send(batch).is_err() {
                 break; // receiver gone: shutting down
+            }
+        }
+    }
+
+    // ---- USN fast path (requires Administrator; volume roots only) ----
+
+    /// If `path` is a volume root (`C:\`, including the `\\?\C:\` verbatim
+    /// form canonicalize produces), return its drive letter. The USN fast
+    /// path is only offered for volume roots: with the whole volume
+    /// indexed, every journal record's FRN and parent FRN resolve, so
+    /// renames/moves never leave dangling subtrees.
+    pub fn volume_root_drive(path: &Path) -> Option<u8> {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        let drive = match components.next()? {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => d,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if !matches!(components.next(), Some(Component::RootDir)) {
+            return None;
+        }
+        components.next().is_none().then_some(drive)
+    }
+
+    /// Owned volume handle, closed on drop.
+    struct VolumeHandle(HANDLE);
+    unsafe impl Send for VolumeHandle {}
+    unsafe impl Sync for VolumeHandle {}
+
+    impl Drop for VolumeHandle {
+        fn drop(&mut self) {
+            // SAFETY: closing a handle we own.
+            unsafe { CloseHandle(self.0).ok() };
+        }
+    }
+
+    /// Open `\\.\X:` for USN ioctls. Requires Administrator (or Backup
+    /// Operators); without elevation this fails with ACCESS_DENIED and the
+    /// caller falls back to the unprivileged path.
+    fn open_volume(drive: u8) -> Result<VolumeHandle> {
+        let device = format!(r"\\.\{}:", drive as char);
+        // SAFETY: standard volume-device open.
+        let handle = unsafe {
+            CreateFileW(
+                &HSTRING::from(device.as_str()),
+                GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                Default::default(),
+                None,
+            )
+        }
+        .with_context(|| {
+            format!("opening volume {device} for USN access (requires Administrator)")
+        })?;
+        Ok(VolumeHandle(handle))
+    }
+
+    /// The FRN of a directory, read from its open handle. Assumes NTFS
+    /// 64-bit file ids (the volume-root gate guarantees a local NTFS-style
+    /// drive; ReFS 128-bit ids fail the USN record parse instead).
+    fn frn_of_directory(path: &Path) -> Result<u64> {
+        // SAFETY: standard directory-handle open + info query.
+        let handle = unsafe {
+            CreateFileW(
+                &HSTRING::from(path.as_os_str()),
+                0, // attributes only
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+        }
+        .with_context(|| format!("opening {} to read its file id", path.display()))?;
+        let guard = VolumeHandle(handle);
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: valid handle and out-pointer.
+        unsafe { GetFileInformationByHandle(guard.0, &mut info) }
+            .with_context(|| format!("querying file id of {}", path.display()))?;
+        Ok((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+    }
+
+    /// Current journal identity/position — consulted for checkpoint replay
+    /// validation and captured before bootstrap enumeration.
+    #[derive(Debug, Clone, Copy)]
+    pub struct UsnJournalInfo {
+        pub journal_id: u64,
+        pub first_usn: i64,
+        pub next_usn: i64,
+    }
+
+    pub fn query_usn_journal(root: &Path) -> Result<UsnJournalInfo> {
+        let drive = volume_root_drive(root)
+            .ok_or_else(|| anyhow::anyhow!("{} is not a volume root", root.display()))?;
+        let volume = open_volume(drive)?;
+        let mut data = USN_JOURNAL_DATA_V0::default();
+        let mut bytes = 0u32;
+        // SAFETY: valid handle; out-buffer sized for USN_JOURNAL_DATA_V0.
+        unsafe {
+            DeviceIoControl(
+                volume.0,
+                FSCTL_QUERY_USN_JOURNAL,
+                None,
+                0,
+                Some(&mut data as *mut _ as *mut _),
+                size_of::<USN_JOURNAL_DATA_V0>() as u32,
+                Some(&mut bytes),
+                None,
+            )
+        }
+        .context("querying the USN journal (is the volume NTFS with journaling enabled?)")?;
+        Ok(UsnJournalInfo {
+            journal_id: data.UsnJournalID,
+            first_usn: data.FirstUsn,
+            next_usn: data.NextUsn,
+        })
+    }
+
+    pub struct UsnBootstrap {
+        pub index: VolumeIndex,
+        pub journal: UsnJournalInfo,
+    }
+
+    /// Build the index by enumerating the volume's MFT via
+    /// `FSCTL_ENUM_USN_DATA` — the "Everything" bootstrap. Seconds for
+    /// millions of files, versus minutes of directory walking. The journal
+    /// position is captured *before* enumeration so events raced by the
+    /// enumeration replay through the watcher (idempotently) afterwards.
+    pub fn usn_bootstrap(root: &Path) -> Result<UsnBootstrap> {
+        let Some(drive) = volume_root_drive(root) else {
+            bail!("USN bootstrap requires a volume root, got {}", root.display());
+        };
+        let journal = query_usn_journal(root)?;
+        let root_frn = frn_of_directory(root)?;
+        let volume = open_volume(drive)?;
+
+        let mut records: Vec<MftEntry> = Vec::new();
+        let mut input = MFT_ENUM_DATA_V0 {
+            StartFileReferenceNumber: 0,
+            LowUsn: 0,
+            HighUsn: journal.next_usn,
+        };
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let mut bytes = 0u32;
+            // SAFETY: valid handle; in/out buffers live across the call.
+            let result = unsafe {
+                DeviceIoControl(
+                    volume.0,
+                    FSCTL_ENUM_USN_DATA,
+                    Some(&input as *const _ as *const _),
+                    size_of::<MFT_ENUM_DATA_V0>() as u32,
+                    Some(buf.as_mut_ptr() as *mut _),
+                    buf.len() as u32,
+                    Some(&mut bytes),
+                    None,
+                )
+            };
+            match result {
+                Ok(()) => {
+                    let (next_frn, batch) = parse_usn_output(&buf[..bytes as usize]);
+                    if batch.is_empty() {
+                        break; // defensive: no forward progress
+                    }
+                    records.extend(batch.iter().map(MftEntry::from));
+                    input.StartFileReferenceNumber = next_frn;
+                }
+                Err(err) if err.code() == ERROR_HANDLE_EOF.to_hresult() => break,
+                Err(err) => {
+                    return Err(err).context("enumerating the MFT (FSCTL_ENUM_USN_DATA)");
+                }
+            }
+        }
+
+        let (index, orphans) = crate::index::usn::build_index_from_mft(root, root_frn, &records);
+        if orphans > 0 {
+            eprintln!("filex: MFT enumeration produced {orphans} unreachable records (skipped)");
+        }
+        Ok(UsnBootstrap { index, journal })
+    }
+
+    /// Tails the USN journal via blocking `FSCTL_READ_USN_JOURNAL` reads on
+    /// a dedicated thread, translating records into native-keyed deltas.
+    /// Journal truncation/deletion degrades to a root rescan. Dropping
+    /// cancels the pending read and closes the handle.
+    pub struct UsnJournalWatcher {
+        handle: Arc<VolumeHandle>,
+        thread: Option<JoinHandle<()>>,
+        journal_id: u64,
+        next_usn: Arc<AtomicU64>,
+    }
+
+    impl UsnJournalWatcher {
+        pub fn spawn(
+            root: &Path,
+            journal_id: u64,
+            start_usn: i64,
+            deltas: Sender<Vec<FsDelta>>,
+        ) -> Result<Self> {
+            let Some(drive) = volume_root_drive(root) else {
+                bail!("USN journal watcher requires a volume root");
+            };
+            let handle = Arc::new(open_volume(drive)?);
+            let next_usn = Arc::new(AtomicU64::new(start_usn as u64));
+            let thread = std::thread::Builder::new().name("filex-usn-journal".into()).spawn({
+                let handle = handle.clone();
+                let next_usn = next_usn.clone();
+                let root = root.to_path_buf();
+                move || journal_loop(&handle, &root, journal_id, &next_usn, &deltas)
+            })?;
+            Ok(Self { handle, thread: Some(thread), journal_id, next_usn })
+        }
+
+        pub fn journal_id(&self) -> u64 {
+            self.journal_id
+        }
+
+        /// Shared USN position; read after the watcher is dropped and the
+        /// writer joined, it is the exact checkpoint through which every
+        /// record has been applied.
+        pub fn next_usn_handle(&self) -> Arc<AtomicU64> {
+            self.next_usn.clone()
+        }
+    }
+
+    impl Drop for UsnJournalWatcher {
+        fn drop(&mut self) {
+            // SAFETY: cancelling/closing our own handle; the blocked read
+            // aborts and the loop exits.
+            unsafe { CancelIoEx(self.handle.0, None).ok() };
+            if let Some(thread) = self.thread.take() {
+                thread.join().ok();
+            }
+        }
+    }
+
+    fn journal_loop(
+        handle: &VolumeHandle,
+        root: &Path,
+        journal_id: u64,
+        next_usn: &AtomicU64,
+        deltas: &Sender<Vec<FsDelta>>,
+    ) {
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let input = READ_USN_JOURNAL_DATA_V0 {
+                StartUsn: next_usn.load(Ordering::Relaxed) as i64,
+                ReasonMask: JOURNAL_REASON_MASK,
+                ReturnOnlyOnClose: 0,
+                Timeout: 0,
+                BytesToWaitFor: 1, // block until at least one record
+                UsnJournalID: journal_id,
+            };
+            let mut bytes = 0u32;
+            // SAFETY: valid handle; buffers live across the blocking call.
+            let result = unsafe {
+                DeviceIoControl(
+                    handle.0,
+                    FSCTL_READ_USN_JOURNAL,
+                    Some(&input as *const _ as *const _),
+                    size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
+                    Some(buf.as_mut_ptr() as *mut _),
+                    buf.len() as u32,
+                    Some(&mut bytes),
+                    None,
+                )
+            };
+            match result {
+                Ok(()) if bytes as usize >= 8 => {
+                    let (next, records) = parse_usn_output(&buf[..bytes as usize]);
+                    next_usn.store(next, Ordering::Relaxed);
+                    let batch: Vec<FsDelta> =
+                        records.iter().filter_map(journal_record_to_delta).collect();
+                    if !batch.is_empty() && deltas.send(batch).is_err() {
+                        break; // receiver gone: shutting down
+                    }
+                }
+                Ok(()) => break, // defensive: no continuation returned
+                Err(err) => {
+                    // Cancellation (drop) is silent; anything else —
+                    // journal deleted, truncated past our USN, resized —
+                    // means records were lost: reconcile with a rescan.
+                    use windows::Win32::Foundation::ERROR_OPERATION_ABORTED;
+                    if err.code() != ERROR_OPERATION_ABORTED.to_hresult() {
+                        eprintln!("filex: USN journal read failed ({err}); rescanning");
+                        deltas
+                            .send(vec![FsDelta::Rescan { path: root.to_path_buf() }])
+                            .ok();
+                    }
+                    break;
+                }
             }
         }
     }

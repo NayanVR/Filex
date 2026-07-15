@@ -109,14 +109,19 @@ notified "index generation changed"; it never blocks.
 
 > **Status:** all three platform watchers below exist behind the shared
 > `FsDelta` channel (`index::macos` / `index::linux` / `index::windows`).
-> Windows currently ships the *unprivileged* `ReadDirectoryChangesW` watcher
-> — it needs no elevation, works on any filesystem, and pairs with the
-> generic walk bootstrap. The USN Journal watcher below is implemented
-> together with the `FSCTL_ENUM_USN_DATA` bootstrap (both need the
-> FRN-keyed index and elevation). Linux ships the budgeted-inotify
-> fallback; fanotify remains the privileged upgrade. Only macOS has been
-> executed live; Linux/Windows are type-checked per-target and their
-> parsers/mappers are fixture-tested on every OS.
+> Windows has both tiers in-tree: the elevated USN fast path
+> (`FSCTL_ENUM_USN_DATA` MFT bootstrap + USN Journal tail with
+> checkpoint replay, FRN-keyed index, **volume roots only** — that
+> constraint is what keeps native-keyed moves always resolvable) and the
+> unprivileged `ReadDirectoryChangesW` fallback for subtree roots,
+> non-NTFS volumes, and non-admin users; startup picks the fastest
+> viable tier automatically. Linux ships the budgeted-inotify fallback;
+> fanotify remains the privileged upgrade. Only macOS has been executed
+> live; Linux/Windows are type-checked per-target and their
+> parsers/mappers/builders are fixture-tested on every OS. The
+> Everything-style split (elevated indexing service + unelevated UI over
+> IPC) remains the plan of record for shipping; today's elevated path
+> requires running filex itself as Administrator.
 
 ### Windows — USN Journal (the good one)
 

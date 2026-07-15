@@ -297,6 +297,7 @@ mod tests {
             let hit = batch.iter().any(|delta| match delta {
                 FsDelta::Upsert { path, .. } | FsDelta::Remove { path } => path == &target,
                 FsDelta::Rescan { path } => target.starts_with(path),
+                FsDelta::NativeUpsert { .. } | FsDelta::NativeRemove { .. } => false,
             });
             if hit {
                 return;

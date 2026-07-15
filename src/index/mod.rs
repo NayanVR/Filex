@@ -13,6 +13,7 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod persist;
+pub mod usn;
 pub mod walker;
 pub mod watcher;
 pub mod windows;
@@ -51,6 +52,10 @@ struct FileEntry {
     name_lower: NameRef,
     parent: EntryId,
     flags: u8,
+    /// Platform-native identity: NTFS file reference number (FRN) on
+    /// Windows, 0 elsewhere / when unknown. Lets journal-based delta
+    /// sources (USN) address entries without any path resolution.
+    native_key: u64,
 }
 
 impl FileEntry {
@@ -86,6 +91,8 @@ pub struct VolumeIndex {
     name_pool_lower: Vec<u8>,
     /// Child lists, used for browse-style listing and path resolution.
     children: HashMap<EntryId, Vec<EntryId>>,
+    /// Native key (FRN) → entry, for journal-based delta sources.
+    by_native_key: HashMap<u64, EntryId>,
     /// Bumped on every mutation; lets async consumers detect staleness.
     generation: u64,
 }
@@ -93,12 +100,19 @@ pub struct VolumeIndex {
 impl VolumeIndex {
     /// Create an index whose root entry represents `root_path`.
     pub fn new(root_path: impl Into<PathBuf>) -> Self {
+        Self::new_with_root_key(root_path, 0)
+    }
+
+    /// Like [`VolumeIndex::new`], additionally registering the root's
+    /// native key (e.g. the FRN of the root directory on NTFS).
+    pub fn new_with_root_key(root_path: impl Into<PathBuf>, root_key: u64) -> Self {
         let mut index = Self {
             root_path: root_path.into(),
             entries: Vec::new(),
             name_pool: Vec::new(),
             name_pool_lower: Vec::new(),
             children: HashMap::new(),
+            by_native_key: HashMap::new(),
             generation: 0,
         };
         // Root points at itself; its name is empty (path comes from root_path).
@@ -108,7 +122,11 @@ impl VolumeIndex {
             name_lower: name,
             parent: ROOT,
             flags: FLAG_DIR,
+            native_key: root_key,
         });
+        if root_key != 0 {
+            index.by_native_key.insert(root_key, ROOT);
+        }
         index
     }
 
@@ -168,8 +186,24 @@ impl VolumeIndex {
     /// bootstrap feeds are already unique per directory; delta sources must
     /// resolve first (see `resolve_child`).
     pub fn insert(&mut self, parent: EntryId, name: &str, is_dir: bool) -> Result<EntryId> {
+        self.insert_with_key(parent, name, is_dir, 0)
+    }
+
+    /// [`VolumeIndex::insert`] with a platform-native key (NTFS FRN).
+    /// Key 0 means "no native identity". Duplicate keys are rejected —
+    /// callers resolve via [`VolumeIndex::entry_by_native_key`] first.
+    pub fn insert_with_key(
+        &mut self,
+        parent: EntryId,
+        name: &str,
+        is_dir: bool,
+        native_key: u64,
+    ) -> Result<EntryId> {
         if name.len() > u16::MAX as usize {
             bail!("file name longer than {} bytes: {name:?}", u16::MAX);
+        }
+        if native_key != 0 && self.by_native_key.contains_key(&native_key) {
+            bail!("native key {native_key:#x} already present");
         }
         let parent_entry = self
             .entry(parent)
@@ -186,10 +220,27 @@ impl VolumeIndex {
             name_lower: lower_ref,
             parent,
             flags: if is_dir { FLAG_DIR } else { 0 },
+            native_key,
         });
         self.children.entry(parent).or_default().push(id);
+        if native_key != 0 {
+            self.by_native_key.insert(native_key, id);
+        }
         self.generation += 1;
         Ok(id)
+    }
+
+    /// Look up a live entry by its platform-native key (NTFS FRN).
+    pub fn entry_by_native_key(&self, native_key: u64) -> Option<EntryId> {
+        if native_key == 0 {
+            return None;
+        }
+        self.by_native_key.get(&native_key).copied()
+    }
+
+    /// The platform-native key recorded for an entry (0 if none).
+    pub fn native_key_of(&self, id: EntryId) -> Option<u64> {
+        self.entry(id).map(|e| e.native_key)
     }
 
     /// Tombstone an entry and all its descendants. Pool bytes and arena slots
@@ -205,6 +256,9 @@ impl VolumeIndex {
                 bail!("remove of unknown entry {current:?}");
             };
             entry.flags |= FLAG_TOMBSTONE;
+            if entry.native_key != 0 {
+                self.by_native_key.remove(&entry.native_key);
+            }
             if let Some(children) = self.children.remove(&current) {
                 stack.extend(children);
             }
@@ -346,14 +400,20 @@ impl VolumeIndex {
     }
 }
 
-/// The live-update source for the OS we're built for. All three expose the
-/// same shape: spawn(root, delta_sender) feeding [`watcher::FsDelta`]s.
+/// The live-update source for the OS we're built for, feeding
+/// [`watcher::FsDelta`]s into the shared channel.
 #[cfg(target_os = "macos")]
 type PlatformWatcher = macos::FsEventsWatcher;
 #[cfg(target_os = "linux")]
 type PlatformWatcher = linux::InotifyWatcher;
+/// Windows has two sources: the USN journal (elevated fast path, volume
+/// roots) and ReadDirectoryChangesW (unprivileged fallback, any subtree).
 #[cfg(target_os = "windows")]
-type PlatformWatcher = windows::DirChangesWatcher;
+#[allow(dead_code)] // fields are RAII guards: dropping them stops the watcher
+enum PlatformWatcher {
+    Usn(windows::UsnJournalWatcher),
+    Rdcw(windows::DirChangesWatcher),
+}
 
 /// How the shutdown snapshot learns its checkpoint.
 enum CheckpointSource {
@@ -362,8 +422,16 @@ enum CheckpointSource {
     /// exact id through which every event has been applied.
     #[cfg(target_os = "macos")]
     FsEventsId(std::sync::Arc<std::sync::atomic::AtomicU64>),
-    /// Walk-based platforms with a live watcher: record the save time;
-    /// the next start reconciles with a rescan regardless.
+    /// Windows with a live USN journal watcher: journal identity plus the
+    /// shared next-USN position (same read-after-join contract as
+    /// FsEventsId).
+    #[cfg(target_os = "windows")]
+    UsnPos {
+        journal_id: u64,
+        next_usn: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    },
+    /// Walk-based watchers (inotify/RDCW): record the save time; the next
+    /// start reconciles with a rescan regardless.
     #[cfg(not(target_os = "macos"))]
     Reconcile,
     /// The watcher never started — the index may have silently missed
@@ -383,6 +451,13 @@ impl Persistence {
             CheckpointSource::FsEventsId(id) => persist::Checkpoint::FsEvents {
                 last_event_id: id.load(std::sync::atomic::Ordering::Relaxed),
             },
+            #[cfg(target_os = "windows")]
+            CheckpointSource::UsnPos { journal_id, next_usn } => {
+                persist::Checkpoint::UsnJournal {
+                    journal_id: *journal_id,
+                    next_usn: next_usn.load(std::sync::atomic::Ordering::Relaxed),
+                }
+            }
             #[cfg(not(target_os = "macos"))]
             CheckpointSource::Reconcile => persist::Checkpoint::WalkedAt {
                 unix_seconds: std::time::SystemTime::now()
@@ -457,8 +532,6 @@ pub fn start_live_index_with_snapshot(
 ) -> Result<LiveIndex> {
     // Watchers report canonical paths; watch the same form we index.
     let canonical = root.canonicalize()?;
-    let (delta_tx, delta_rx) = std::sync::mpsc::channel();
-
     let loaded = snapshot_path.as_ref().and_then(|path| {
         if !path.exists() {
             return None;
@@ -471,6 +544,49 @@ pub fn start_live_index_with_snapshot(
             }
         }
     });
+    platform_start(canonical, snapshot_path, loaded, on_change)
+}
+
+/// Assemble the writer/persistence tail shared by every platform start.
+fn assemble_live_index(
+    canonical: PathBuf,
+    snapshot_path: Option<PathBuf>,
+    watcher: Option<PlatformWatcher>,
+    index: VolumeIndex,
+    needs_rescan: bool,
+    source: CheckpointSource,
+    delta_tx: std::sync::mpsc::Sender<Vec<watcher::FsDelta>>,
+    delta_rx: std::sync::mpsc::Receiver<Vec<watcher::FsDelta>>,
+    on_change: impl Fn() + Send + 'static,
+) -> Result<LiveIndex> {
+    if needs_rescan {
+        // Loaded state is stale-but-searchable; reconcile off-lock.
+        delta_tx
+            .send(vec![watcher::FsDelta::Rescan { path: canonical }])
+            .ok();
+    }
+    drop(delta_tx); // the watcher holds the only remaining sender
+
+    let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
+    let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change)?;
+    let persistence = snapshot_path.map(|path| Persistence { path, source });
+
+    Ok(LiveIndex {
+        index: shared,
+        watcher,
+        writer: Some(writer),
+        persistence,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_start(
+    canonical: PathBuf,
+    snapshot_path: Option<PathBuf>,
+    loaded: Option<persist::Snapshot>,
+    on_change: impl Fn() + Send + 'static,
+) -> Result<LiveIndex> {
+    let (delta_tx, delta_rx) = std::sync::mpsc::channel();
 
     let resume_from = match loaded.as_ref().map(|s| s.checkpoint) {
         Some(persist::Checkpoint::FsEvents { last_event_id }) => Some(last_event_id),
@@ -488,10 +604,6 @@ pub fn start_live_index_with_snapshot(
         {
             linux::InotifyWatcher::spawn(&canonical, delta_tx.clone())
         }
-        #[cfg(target_os = "windows")]
-        {
-            windows::DirChangesWatcher::spawn(&canonical, delta_tx.clone())
-        }
     };
     let fs_watcher = match spawned {
         Ok(watcher) => Some(watcher),
@@ -501,45 +613,155 @@ pub fn start_live_index_with_snapshot(
         }
     };
 
-    let index = match loaded {
-        Some(snapshot) => {
-            let replaying =
-                cfg!(target_os = "macos") && fs_watcher.is_some() && resume_from.is_some();
-            if !replaying {
-                // Loaded state is stale-but-searchable; reconcile off-lock.
-                delta_tx
-                    .send(vec![watcher::FsDelta::Rescan { path: canonical.clone() }])
-                    .ok();
-            }
-            snapshot.index
-        }
+    let replaying = cfg!(target_os = "macos") && fs_watcher.is_some() && resume_from.is_some();
+    let (index, needs_rescan) = match loaded {
+        Some(snapshot) => (snapshot.index, !replaying),
         None => {
             use walker::IndexSource as _;
-            walker::FsWalkSource::default().bootstrap(&canonical)?
+            (walker::FsWalkSource::default().bootstrap(&canonical)?, false)
         }
     };
-    drop(delta_tx); // the watcher holds the only remaining sender
 
-    let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
-    let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change)?;
+    let source = match &fs_watcher {
+        #[cfg(target_os = "macos")]
+        Some(watcher) => CheckpointSource::FsEventsId(watcher.latest_event_id_handle()),
+        #[cfg(not(target_os = "macos"))]
+        Some(_) => CheckpointSource::Reconcile,
+        None => CheckpointSource::Untracked,
+    };
+    assemble_live_index(
+        canonical, snapshot_path, fs_watcher, index, needs_rescan, source, delta_tx, delta_rx,
+        on_change,
+    )
+}
 
-    let persistence = snapshot_path.map(|path| Persistence {
-        path,
-        source: match &fs_watcher {
-            #[cfg(target_os = "macos")]
-            Some(watcher) => CheckpointSource::FsEventsId(watcher.latest_event_id_handle()),
-            #[cfg(not(target_os = "macos"))]
-            Some(_) => CheckpointSource::Reconcile,
-            None => CheckpointSource::Untracked,
-        },
-    });
+/// Windows startup, fastest viable tier first:
+/// 1. Snapshot + valid USN checkpoint (volume root, elevated): load and
+///    tail the journal from the saved USN — replay, no walk, no MFT pass.
+/// 2. Elevated on a volume root: MFT enumeration bootstrap + journal tail.
+/// 3. Anything else (unelevated, subtree root, non-NTFS): RDCW watcher
+///    with snapshot-plus-rescan or a fresh walk.
+#[cfg(target_os = "windows")]
+fn platform_start(
+    canonical: PathBuf,
+    snapshot_path: Option<PathBuf>,
+    loaded: Option<persist::Snapshot>,
+    on_change: impl Fn() + Send + 'static,
+) -> Result<LiveIndex> {
+    let (delta_tx, delta_rx) = std::sync::mpsc::channel();
+    let mut loaded = loaded;
 
-    Ok(LiveIndex {
-        index: shared,
-        watcher: fs_watcher,
-        writer: Some(writer),
-        persistence,
-    })
+    if windows::volume_root_drive(&canonical).is_some() {
+        // Tier 1: journal replay from the persisted checkpoint.
+        if let Some(snapshot) = loaded.as_ref()
+            && let persist::Checkpoint::UsnJournal { journal_id, next_usn } = snapshot.checkpoint
+        {
+            let valid = match windows::query_usn_journal(&canonical) {
+                Ok(info) => {
+                    info.journal_id == journal_id
+                        && (next_usn as i64) >= info.first_usn
+                        && (next_usn as i64) <= info.next_usn
+                }
+                Err(err) => {
+                    eprintln!("filex: USN journal query failed: {err:#}");
+                    false
+                }
+            };
+            if valid {
+                match windows::UsnJournalWatcher::spawn(
+                    &canonical,
+                    journal_id,
+                    next_usn as i64,
+                    delta_tx.clone(),
+                ) {
+                    Ok(watcher) => {
+                        let source = CheckpointSource::UsnPos {
+                            journal_id: watcher.journal_id(),
+                            next_usn: watcher.next_usn_handle(),
+                        };
+                        let index = loaded.take().expect("checked above").index;
+                        return assemble_live_index(
+                            canonical,
+                            snapshot_path,
+                            Some(PlatformWatcher::Usn(watcher)),
+                            index,
+                            false,
+                            source,
+                            delta_tx,
+                            delta_rx,
+                            on_change,
+                        );
+                    }
+                    Err(err) => eprintln!("filex: USN journal watcher failed: {err:#}"),
+                }
+            }
+        }
+
+        // Tier 2: fresh MFT-enumeration bootstrap.
+        match windows::usn_bootstrap(&canonical) {
+            Ok(boot) => {
+                let (watcher, source) = match windows::UsnJournalWatcher::spawn(
+                    &canonical,
+                    boot.journal.journal_id,
+                    boot.journal.next_usn,
+                    delta_tx.clone(),
+                ) {
+                    Ok(watcher) => {
+                        let source = CheckpointSource::UsnPos {
+                            journal_id: watcher.journal_id(),
+                            next_usn: watcher.next_usn_handle(),
+                        };
+                        (Some(PlatformWatcher::Usn(watcher)), source)
+                    }
+                    Err(err) => {
+                        eprintln!("filex: USN journal watcher failed: {err:#}");
+                        (None, CheckpointSource::Untracked)
+                    }
+                };
+                return assemble_live_index(
+                    canonical,
+                    snapshot_path,
+                    watcher,
+                    boot.index,
+                    false,
+                    source,
+                    delta_tx,
+                    delta_rx,
+                    on_change,
+                );
+            }
+            Err(err) => {
+                // Expected without elevation: fall through to RDCW.
+                eprintln!(
+                    "filex: USN fast path unavailable ({err:#}); using directory watching"
+                );
+            }
+        }
+    }
+
+    // Tier 3: unprivileged fallback — RDCW plus snapshot-or-walk.
+    let fs_watcher = match windows::DirChangesWatcher::spawn(&canonical, delta_tx.clone()) {
+        Ok(watcher) => Some(PlatformWatcher::Rdcw(watcher)),
+        Err(err) => {
+            eprintln!("filex: live index updates disabled: {err:#}");
+            None
+        }
+    };
+    let (index, needs_rescan) = match loaded {
+        Some(snapshot) => (snapshot.index, true),
+        None => {
+            use walker::IndexSource as _;
+            (walker::FsWalkSource::default().bootstrap(&canonical)?, false)
+        }
+    };
+    let source = match &fs_watcher {
+        Some(_) => CheckpointSource::Reconcile,
+        None => CheckpointSource::Untracked,
+    };
+    assemble_live_index(
+        canonical, snapshot_path, fs_watcher, index, needs_rescan, source, delta_tx, delta_rx,
+        on_change,
+    )
 }
 
 #[cfg(test)]

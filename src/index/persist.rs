@@ -19,7 +19,9 @@ use anyhow::{Context as _, Result, bail, ensure};
 use super::{EntryId, FLAG_TOMBSTONE, FileEntry, NameRef, ROOT, VolumeIndex};
 
 const MAGIC: &[u8; 8] = b"FXIDX\0\0\0";
-pub const FORMAT_VERSION: u32 = 1;
+/// v2: entries carry a native key (NTFS FRN); older snapshots are
+/// rejected and rebuilt by a fresh walk.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Where the platform journal stood when the snapshot was written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +81,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-const ENTRY_ENCODED_LEN: usize = 17; // 4+2 + 4+2 + 4 + 1
+const ENTRY_ENCODED_LEN: usize = 25; // 4+2 + 4+2 + 4 + 1 + 8
 
 /// Write a snapshot atomically (temp file + rename in the same directory).
 pub fn save(index: &VolumeIndex, checkpoint: Checkpoint, path: &Path) -> Result<()> {
@@ -115,6 +117,7 @@ pub fn save(index: &VolumeIndex, checkpoint: Checkpoint, path: &Path) -> Result<
         buf.extend_from_slice(&entry.name_lower.len.to_le_bytes());
         buf.extend_from_slice(&entry.parent.0.to_le_bytes());
         buf.push(entry.flags);
+        buf.extend_from_slice(&entry.native_key.to_le_bytes());
     }
 
     let parent = path.parent().context("snapshot path has no parent dir")?;
@@ -212,6 +215,7 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
         let name_lower = NameRef { offset: r.u32()?, len: r.u16()? };
         let parent = EntryId(r.u32()?);
         let flags = r.u8()?;
+        let native_key = r.u64()?;
 
         let name_end = name.offset as usize + name.len as usize;
         let lower_end = name_lower.offset as usize + name_lower.len as usize;
@@ -225,11 +229,16 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
             "entry {i}: parent {} out of range",
             parent.0
         );
-        entries.push(FileEntry { name, name_lower, parent, flags });
+        entries.push(FileEntry { name, name_lower, parent, flags, native_key });
     }
 
-    // Rebuild the children map from parent links; validate the hierarchy.
+    // Rebuild the children and native-key maps from the entry table;
+    // validate the hierarchy and key uniqueness.
     let mut children: HashMap<EntryId, Vec<EntryId>> = HashMap::new();
+    let mut by_native_key: HashMap<u64, EntryId> = HashMap::new();
+    if entries[0].native_key != 0 {
+        by_native_key.insert(entries[0].native_key, ROOT);
+    }
     for (i, entry) in entries.iter().enumerate().skip(1) {
         if entry.is_tombstone() {
             continue;
@@ -243,6 +252,13 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
             .entry(entry.parent)
             .or_default()
             .push(EntryId(i as u32));
+        if entry.native_key != 0 {
+            ensure!(
+                by_native_key.insert(entry.native_key, EntryId(i as u32)).is_none(),
+                "entry {i}: duplicate native key {:#x}",
+                entry.native_key
+            );
+        }
     }
     ensure!(entries[0].parent == ROOT, "root entry has a parent");
     ensure!(
@@ -256,6 +272,7 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
         name_pool,
         name_pool_lower,
         children,
+        by_native_key,
         generation: 0,
     };
     Ok(Snapshot { index, checkpoint })
@@ -382,11 +399,34 @@ mod tests {
         }
 
         // Flip the last entry's parent to an out-of-range id.
+        // Entry tail layout: parent u32, flags u8, native_key u64.
         let mut corrupt = bytes.clone();
-        let parent_field = corrupt.len() - 5; // parent u32 + flags u8 at tail
+        let parent_field = corrupt.len() - 13;
         corrupt[parent_field..parent_field + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         std::fs::write(&path, &corrupt).unwrap();
         assert!(load(&path, Path::new("/vol")).is_err());
+    }
+
+    #[test]
+    fn native_keys_roundtrip_and_duplicates_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = tmp_snapshot_path(&dir);
+        let mut index = VolumeIndex::new_with_root_key("/vol", 5);
+        let docs = index.insert_with_key(ROOT, "docs", true, 10).unwrap();
+        index.insert_with_key(docs, "a.txt", false, 11).unwrap();
+        save(&index, Checkpoint::UsnJournal { journal_id: 1, next_usn: 2 }, &path).unwrap();
+
+        let loaded = load(&path, Path::new("/vol")).unwrap().index;
+        assert_eq!(loaded.entry_by_native_key(5), Some(ROOT));
+        assert_eq!(loaded.entry_by_native_key(10), loaded.resolve(Path::new("docs")));
+        assert_eq!(loaded.entry_by_native_key(11), loaded.resolve(Path::new("docs/a.txt")));
+
+        // Corrupt: give the last entry the same key as the root (5).
+        let mut bytes = std::fs::read(&path).unwrap();
+        let key_field = bytes.len() - 8;
+        bytes[key_field..].copy_from_slice(&5u64.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(load(&path, Path::new("/vol")).unwrap_err().to_string().contains("duplicate"));
     }
 
     #[test]
