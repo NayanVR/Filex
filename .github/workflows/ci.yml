@@ -1,10 +1,14 @@
 # Windows + Linux validation. macOS is validated on a dev machine (it has
 # its own live FSEvents tests), so no macOS job — by design, don't add one.
 #
-# Tests run with --no-default-features: that builds the index library and
-# platform watchers without GPUI, so runners exercise the real inotify /
-# ReadDirectoryChangesW / USN-journal code paths (Windows runners are
-# elevated, so the USN live tests run for real) without UI toolchain deps.
+# Two layers:
+# - test: the index library without GPUI (--no-default-features), so
+#   runners exercise the real inotify / fanotify / RDCW / USN-journal code
+#   paths (Windows runners are elevated, so USN live tests run for real)
+#   without UI toolchain deps. Fast; runs the whole suite.
+# - build-app: compiles the actual GPUI application per platform — the
+#   only place the shipped binary is built for Windows/Linux. Slower
+#   (first run compiles gpui; cached after), catches UI-side breakage.
 name: CI
 
 on:
@@ -29,9 +33,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run index library tests (fixtures + live watcher smoke tests)
-        run: cargo test --no-default-features
+        run: cargo test --locked --no-default-features
+      # Benches aren't built by `cargo test`; keep them compiling too.
+      - name: Check all library targets (incl. benches)
+        run: cargo check --locked --all-targets --no-default-features
       # fanotify needs CAP_SYS_ADMIN; rerun its live test elevated so the
       # privileged fast path is actually exercised (it self-skips above).
       - name: fanotify live test (privileged)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo -E "$(command -v cargo)" test --no-default-features fanotify_live -- --nocapture
+        run: sudo -E "$(command -v cargo)" test --locked --no-default-features fanotify_live -- --nocapture
+
+  build-app:
+    name: build app (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GPUI system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libwayland-dev libvulkan-dev
+      - name: Build the GPUI application
+        run: cargo build --locked
