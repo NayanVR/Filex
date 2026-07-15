@@ -735,10 +735,15 @@ mod imp {
         add_watch(fd, dir, registry)?;
         let walk = jwalk::WalkDir::new(dir).skip_hidden(false).follow_links(false);
         for dirent in walk.into_iter().flatten() {
-            if registry.at_capacity() {
-                break;
-            }
             if dirent.file_type().is_dir() && dirent.depth() > 0 {
+                // Record degradation *here*, at the moment a directory
+                // needed a watch and the budget refused it — breaking
+                // early without noting it would leave the reconcile
+                // thread believing coverage is complete.
+                if registry.at_capacity() {
+                    registry.note_degraded();
+                    break;
+                }
                 add_watch(fd, &dirent.path(), registry)?;
             }
         }
