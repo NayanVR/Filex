@@ -353,6 +353,42 @@ impl<R: Read, W: Write> RemoteIndex<R, W> {
     }
 }
 
+/// Thread-safe handle to a running index service over the named pipe —
+/// what the UI holds when `filex-indexd` is present. Requests serialize
+/// on an internal mutex (each roundtrip is sub-millisecond); call from
+/// background threads only.
+#[cfg(target_os = "windows")]
+pub struct ServiceClient {
+    inner: std::sync::Mutex<RemoteIndex<std::fs::File, std::fs::File>>,
+}
+
+#[cfg(target_os = "windows")]
+impl ServiceClient {
+    /// Fast liveness probe: one connection attempt + handshake. Not-found
+    /// simply means no service is installed — callers fall back to
+    /// in-process indexing.
+    pub fn try_connect() -> Result<Self> {
+        let stream = super::windows::connect_index_pipe(PIPE_NAME, 1)?;
+        let reader = stream.try_clone().context("cloning pipe stream")?;
+        let client = RemoteIndex::connect(reader, stream)?;
+        Ok(Self { inner: std::sync::Mutex::new(client) })
+    }
+
+    pub fn search(&self, query: &str, limit: u32) -> Result<Vec<RemoteHit>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .search(query, limit)
+    }
+
+    pub fn status(&self) -> Result<HostStatus> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

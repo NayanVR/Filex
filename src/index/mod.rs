@@ -79,6 +79,48 @@ pub enum MatchKind {
     Substring,
 }
 
+/// Keeps the best `limit` ranked items seen so far: a max-heap where the
+/// root is the *worst* kept item, evicted when something better arrives.
+/// Rayon folds one per chunk, then merges — memory is O(limit) per task
+/// instead of O(matches) total.
+struct TopK {
+    limit: usize,
+    heap: std::collections::BinaryHeap<(MatchKind, u16, u32)>,
+}
+
+impl TopK {
+    fn new(limit: usize) -> Self {
+        Self { limit, heap: std::collections::BinaryHeap::with_capacity(limit + 1) }
+    }
+
+    fn push(mut self, item: (MatchKind, u16, u32)) -> Self {
+        if self.heap.len() < self.limit {
+            self.heap.push(item);
+        } else if let Some(mut worst) = self.heap.peek_mut()
+            && item < *worst
+        {
+            *worst = item;
+        }
+        self
+    }
+
+    fn merge(self, other: Self) -> Self {
+        let (mut acc, source) = if self.heap.len() >= other.heap.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        for item in source.heap {
+            acc = acc.push(item);
+        }
+        acc
+    }
+
+    fn into_sorted(self) -> Vec<(MatchKind, u16, u32)> {
+        self.heap.into_sorted_vec()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub id: EntryId,
@@ -364,8 +406,10 @@ impl VolumeIndex {
 
     /// Case-insensitive substring search over all live entries, ranked
     /// exact > prefix > word-boundary > substring, then by name length.
-    /// Runs as a rayon parallel scan over the entry arena; at
-    /// millions-of-entries scale this is milliseconds (see benches/).
+    /// Runs as a rayon parallel scan over the entry arena with bounded
+    /// per-chunk top-K heaps, so cost is scan-dominated even for
+    /// single-character queries that match nearly everything — no
+    /// all-matches allocation, no global sort (see benches/).
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         if query.is_empty() || limit == 0 {
             return Vec::new();
@@ -373,7 +417,7 @@ impl VolumeIndex {
         let needle = query.to_lowercase();
         let finder = memmem::Finder::new(needle.as_bytes());
 
-        let mut hits: Vec<(MatchKind, u16, EntryId)> = self
+        let top = self
             .entries
             .par_iter()
             .enumerate()
@@ -393,14 +437,14 @@ impl VolumeIndex {
                 } else {
                     MatchKind::Substring
                 };
-                Some((kind, entry.name_lower.len, EntryId(ix as u32)))
+                Some((kind, entry.name_lower.len, ix as u32))
             })
-            .collect();
+            .fold(|| TopK::new(limit), TopK::push)
+            .reduce(|| TopK::new(limit), TopK::merge);
 
-        hits.par_sort_unstable_by_key(|&(kind, len, id)| (kind, len, id.0));
-        hits.truncate(limit);
-        hits.into_iter()
-            .map(|(kind, name_len, id)| SearchHit { id, kind, name_len })
+        top.into_sorted()
+            .into_iter()
+            .map(|(kind, name_len, id)| SearchHit { id: EntryId(id), kind, name_len })
             .collect()
     }
 }
@@ -421,6 +465,7 @@ enum PlatformWatcher {
 }
 
 /// How the shutdown snapshot learns its checkpoint.
+#[derive(Clone)]
 enum CheckpointSource {
     /// macOS with a live FSEvents stream: the shared latest-event-id.
     /// Read after the watcher is dropped and the writer joined, it is the
@@ -444,9 +489,65 @@ enum CheckpointSource {
     Untracked,
 }
 
+#[derive(Clone)]
 struct Persistence {
     path: PathBuf,
     source: CheckpointSource,
+}
+
+/// How often a live index snapshots itself (via a PersistNow marker
+/// through the delta channel — see [`watcher::FsDelta::PersistNow`] for
+/// why that ordering makes the checkpoint safe). Bounds how much walk
+/// work a crash can cost; a clean shutdown still saves precisely.
+const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Ticks the snapshot interval and enqueues PersistNow markers. Owning a
+/// delta sender, it must be stopped *before* the writer is joined.
+struct SnapshotSaver {
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SnapshotSaver {
+    fn spawn(
+        interval: std::time::Duration,
+        persistence: Persistence,
+        deltas: std::sync::mpsc::Sender<Vec<watcher::FsDelta>>,
+    ) -> Result<Self> {
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = std::thread::Builder::new().name("filex-snapshot".into()).spawn({
+            let shutdown = shutdown.clone();
+            move || {
+                use std::sync::atomic::Ordering;
+                let tick = std::time::Duration::from_millis(500);
+                let mut elapsed = std::time::Duration::ZERO;
+                while !shutdown.load(Ordering::Relaxed) {
+                    std::thread::sleep(tick);
+                    elapsed += tick;
+                    if elapsed < interval {
+                        continue;
+                    }
+                    elapsed = std::time::Duration::ZERO;
+                    let marker = watcher::FsDelta::PersistNow {
+                        checkpoint: persistence.checkpoint(),
+                    };
+                    if deltas.send(vec![marker]).is_err() {
+                        break; // writer gone: shutting down
+                    }
+                }
+            }
+        })?;
+        Ok(Self { shutdown, thread: Some(thread) })
+    }
+}
+
+impl Drop for SnapshotSaver {
+    fn drop(&mut self) {
+        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok(); // wakes within one tick
+        }
+    }
 }
 
 impl Persistence {
@@ -482,6 +583,7 @@ impl Persistence {
 /// events, losing none).
 pub struct LiveIndex {
     pub index: watcher::SharedIndex,
+    saver: Option<SnapshotSaver>,
     watcher: Option<PlatformWatcher>,
     writer: Option<watcher::IndexWriter>,
     persistence: Option<Persistence>,
@@ -489,6 +591,7 @@ pub struct LiveIndex {
 
 impl Drop for LiveIndex {
     fn drop(&mut self) {
+        drop(self.saver.take()); // stop marker source; its sender closes
         drop(self.watcher.take()); // stop events; delta senders close
         drop(self.writer.take()); // join: every sent delta is now applied
         if let Some(persistence) = self.persistence.take() {
@@ -570,14 +673,42 @@ fn assemble_live_index(
             .send(vec![watcher::FsDelta::Rescan { path: canonical }])
             .ok();
     }
-    drop(delta_tx); // the watcher holds the only remaining sender
+
+    let persistence = snapshot_path.map(|path| Persistence { path, source });
+    // Periodic saves: the writer saves when it processes a PersistNow
+    // marker; the saver thread enqueues one every SNAPSHOT_INTERVAL.
+    // Skipped when nothing changed since the last save.
+    let save_hook: Option<watcher::SaveHook> = persistence.as_ref().map(|p| {
+        let path = p.path.clone();
+        let last_generation = std::sync::atomic::AtomicU64::new(u64::MAX);
+        Box::new(move |index: &VolumeIndex, checkpoint: persist::Checkpoint| {
+            use std::sync::atomic::Ordering;
+            if last_generation.swap(index.generation(), Ordering::Relaxed)
+                == index.generation()
+            {
+                return; // unchanged since the last periodic save
+            }
+            if let Err(err) = persist::save(index, checkpoint, &path) {
+                eprintln!("filex: periodic snapshot save failed: {err:#}");
+            }
+        }) as watcher::SaveHook
+    });
+    let saver = match &persistence {
+        Some(p) => Some(SnapshotSaver::spawn(
+            SNAPSHOT_INTERVAL,
+            p.clone(),
+            delta_tx.clone(),
+        )?),
+        None => None,
+    };
+    drop(delta_tx); // watcher + saver hold the remaining senders
 
     let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
-    let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change)?;
-    let persistence = snapshot_path.map(|path| Persistence { path, source });
+    let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change, save_hook)?;
 
     Ok(LiveIndex {
         index: shared,
+        saver,
         watcher,
         writer: Some(writer),
         persistence,
@@ -878,6 +1009,35 @@ mod tests {
         let g1 = index.generation();
         index.remove(report).unwrap();
         assert!(index.generation() > g1);
+    }
+
+    /// The saver ticks PersistNow markers into the delta channel at its
+    /// interval and stops cleanly on drop.
+    #[test]
+    fn snapshot_saver_enqueues_markers_periodically() {
+        use std::time::{Duration, Instant};
+
+        let (delta_tx, delta_rx) = std::sync::mpsc::channel();
+        let persistence = Persistence {
+            path: PathBuf::from("/nowhere/test.fxidx"),
+            source: CheckpointSource::Untracked,
+        };
+        let saver =
+            SnapshotSaver::spawn(Duration::from_millis(500), persistence, delta_tx).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = 0;
+        while seen < 2 && Instant::now() < deadline {
+            if let Ok(batch) = delta_rx.recv_timeout(Duration::from_millis(250))
+                && batch
+                    .iter()
+                    .any(|d| matches!(d, watcher::FsDelta::PersistNow { .. }))
+            {
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 2, "saver never ticked twice");
+        drop(saver); // must join promptly, not hang
     }
 
     /// Full persistence cycle: index, shut down (snapshot written), change

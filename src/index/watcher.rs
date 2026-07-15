@@ -49,6 +49,12 @@ pub enum FsDelta {
     /// Journal-sourced removal by native key. Unknown keys are no-ops
     /// (deletes outside the subtree, or replays of applied events).
     NativeRemove { key: u64 },
+    /// Writer control marker (never produced by watchers): save a
+    /// snapshot with this checkpoint once every delta queued *before* it
+    /// has been applied. Enqueue-time capture makes the checkpoint safe:
+    /// watchers advance their checkpoint atomics before sending, so all
+    /// events the checkpoint covers precede the marker in the channel.
+    PersistNow { checkpoint: super::persist::Checkpoint },
 }
 
 /// Apply one delta to the index. Idempotent: replaying an event whose
@@ -66,6 +72,7 @@ pub fn apply(index: &mut VolumeIndex, delta: &FsDelta) -> Result<()> {
             Some(id) => index.remove(id),
             None => Ok(()), // outside the subtree, or already applied
         },
+        FsDelta::PersistNow { .. } => Ok(()), // handled by the writer loop
     }
 }
 
@@ -197,6 +204,11 @@ pub struct IndexWriter {
     handle: Option<JoinHandle<()>>,
 }
 
+/// Called by the writer thread (under a read lock) when a PersistNow
+/// marker is processed — every delta enqueued before the marker has been
+/// applied at that point.
+pub type SaveHook = Box<dyn Fn(&VolumeIndex, super::persist::Checkpoint) + Send>;
+
 /// How long the writer waits for more deltas before applying a batch —
 /// coalesces event bursts (large copies, builds) into one lock + one
 /// notification. Adds at most this much staleness, never search latency.
@@ -208,6 +220,7 @@ impl IndexWriter {
         index: SharedIndex,
         deltas: mpsc::Receiver<Vec<FsDelta>>,
         on_change: impl Fn() + Send + 'static,
+        save_hook: Option<SaveHook>,
     ) -> Result<Self> {
         let handle = std::thread::Builder::new()
             .name("filex-index-writer".into())
@@ -252,6 +265,11 @@ impl IndexWriter {
                         continue;
                     }
 
+                    // A batch may carry a PersistNow marker; save with the
+                    // *last* one after applying everything else (deltas
+                    // after the marker being included only means the next
+                    // replay re-applies a few events idempotently).
+                    let mut pending_save = None;
                     let mut applied_any = false;
                     {
                         let mut index = match index.write() {
@@ -259,6 +277,10 @@ impl IndexWriter {
                             Err(poisoned) => poisoned.into_inner(),
                         };
                         for delta in &batch {
+                            if let FsDelta::PersistNow { checkpoint } = delta {
+                                pending_save = Some(*checkpoint);
+                                continue;
+                            }
                             match apply(&mut index, delta) {
                                 Ok(()) => applied_any = true,
                                 Err(err) => {
@@ -267,6 +289,13 @@ impl IndexWriter {
                             }
                         }
                     } // write lock released before notifying
+                    if let (Some(checkpoint), Some(hook)) = (pending_save, &save_hook) {
+                        let index = match index.read() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        hook(&index, checkpoint);
+                    }
                     if applied_any {
                         on_change();
                     }
@@ -508,9 +537,14 @@ mod tests {
         let (delta_tx, delta_rx) = mpsc::channel();
         let (notify_tx, notify_rx) = mpsc::channel();
 
-        let _writer = IndexWriter::spawn(shared.clone(), delta_rx, move || {
-            notify_tx.send(()).ok();
-        })
+        let _writer = IndexWriter::spawn(
+            shared.clone(),
+            delta_rx,
+            move || {
+                notify_tx.send(()).ok();
+            },
+            None,
+        )
         .unwrap();
 
         let path = shared.read().unwrap().root_path().join("from-writer.txt");
@@ -526,6 +560,41 @@ mod tests {
         // IndexWriter's Drop joins its thread, which only exits once every
         // sender is gone — drop the sender first or this test deadlocks
         // (LiveIndex encodes this order for the real wiring).
+        drop(delta_tx);
+    }
+
+    /// The writer must apply everything queued before a PersistNow marker
+    /// and then call the save hook with the marker's checkpoint.
+    #[test]
+    fn writer_saves_on_persist_marker_after_applying_prior_deltas() {
+        use crate::index::persist::Checkpoint;
+
+        let (_dir, index) = indexed_tempdir();
+        let shared: SharedIndex = Arc::new(RwLock::new(index));
+        let (delta_tx, delta_rx) = mpsc::channel();
+        let (save_tx, save_rx) = mpsc::channel();
+
+        let hook: SaveHook = Box::new(move |index, checkpoint| {
+            save_tx
+                .send((index.search("queued-first", 10).len(), checkpoint))
+                .ok();
+        });
+        let _writer = IndexWriter::spawn(shared.clone(), delta_rx, || {}, Some(hook)).unwrap();
+
+        let path = shared.read().unwrap().root_path().join("queued-first.txt");
+        let checkpoint = Checkpoint::FsEvents { last_event_id: 7 };
+        delta_tx
+            .send(vec![
+                FsDelta::Upsert { path, is_dir: false },
+                FsDelta::PersistNow { checkpoint },
+            ])
+            .unwrap();
+
+        let (hits_at_save, saved_checkpoint) = save_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("save hook never ran");
+        assert_eq!(hits_at_save, 1, "delta queued before the marker not applied");
+        assert_eq!(saved_checkpoint, checkpoint);
         drop(delta_tx);
     }
 }

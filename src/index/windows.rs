@@ -377,18 +377,19 @@ mod imp {
         Ok(())
     }
 
-    /// Connect to the index service's pipe, retrying briefly while all
-    /// instances are busy. Returns a duplex stream for
+    /// Connect to the index service's pipe. `attempts` > 1 retries with a
+    /// short sleep (for busy pipe instances or a just-starting service);
+    /// use 1 for a fast liveness probe. Returns a duplex stream for
     /// [`crate::index::ipc::RemoteIndex::connect`].
-    pub fn connect_index_pipe(pipe_name: &str) -> Result<std::fs::File> {
+    pub fn connect_index_pipe(pipe_name: &str, attempts: u32) -> Result<std::fs::File> {
         let mut last_err = None;
-        for _ in 0..20 {
+        for attempt in 0..attempts.max(1) {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             match std::fs::File::options().read(true).write(true).open(pipe_name) {
                 Ok(file) => return Ok(file),
-                Err(err) => {
-                    last_err = Some(err);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
+                Err(err) => last_err = Some(err),
             }
         }
         Err(last_err.expect("at least one attempt"))
@@ -950,7 +951,7 @@ mod tests {
                 move || run_pipe_server(&pipe_name, host, Some(1))
             });
 
-            let stream = connect_index_pipe(&pipe_name).unwrap();
+            let stream = connect_index_pipe(&pipe_name, 20).unwrap();
             let reader = stream.try_clone().unwrap();
             let mut client = RemoteIndex::connect(reader, stream).unwrap();
 

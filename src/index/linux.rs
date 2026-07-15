@@ -586,11 +586,20 @@ mod imp {
         std::fs::read_link(format!("/proc/self/fd/{}", guard.0))
     }
 
+    /// How often the reconcile walk fires while the watch budget is
+    /// exhausted: bounds staleness in unwatched subtrees. The rescan is
+    /// rebuilt off-lock by the writer, so searches never block on it.
+    const RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
     /// Watches a directory tree via one inotify instance with a watch per
-    /// directory. Dropping stops the reader thread and closes the instance.
+    /// directory. While the watch budget is exhausted (coverage is
+    /// partial), a companion thread periodically emits a root rescan so
+    /// unwatched subtrees converge instead of going stale forever.
+    /// Dropping stops both threads and closes the instance.
     pub struct InotifyWatcher {
         shutdown: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
+        reconcile_thread: Option<JoinHandle<()>>,
     }
 
     impl InotifyWatcher {
@@ -598,6 +607,17 @@ mod imp {
         /// registered for every directory up to the budget; new directories
         /// are watched as they appear.
         pub fn spawn(root: &Path, deltas: Sender<Vec<FsDelta>>) -> Result<Self> {
+            Self::spawn_with(root, deltas, None, RECONCILE_INTERVAL)
+        }
+
+        /// [`InotifyWatcher::spawn`] with an explicit watch budget and
+        /// reconcile interval — for tests and tuning.
+        pub fn spawn_with(
+            root: &Path,
+            deltas: Sender<Vec<FsDelta>>,
+            budget_override: Option<usize>,
+            reconcile_interval: std::time::Duration,
+        ) -> Result<Self> {
             // SAFETY: plain syscall, no pointers.
             let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
             if fd < 0 {
@@ -607,19 +627,24 @@ mod imp {
                 );
             }
 
-            let budget = watch_budget(
-                std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
-                    .ok()
-                    .as_deref(),
-            );
+            let budget = budget_override.unwrap_or_else(|| {
+                watch_budget(
+                    std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+                        .ok()
+                        .as_deref(),
+                )
+            });
             let mut registry = WatchRegistry::new(budget);
             let root = root.to_path_buf();
             add_watches_recursive(fd, &root, &mut registry)
                 .with_context(|| format!("registering watches under {}", root.display()))?;
+            let degraded = Arc::new(AtomicBool::new(registry.is_degraded()));
             if registry.is_degraded() {
                 eprintln!(
-                    "filex: inotify watch budget ({budget}) exhausted; live updates \
-                     are partial — raise fs.inotify.max_user_watches for full coverage"
+                    "filex: inotify watch budget ({budget}) exhausted; coverage is \
+                     partial — reconciling every {}s (raise \
+                     fs.inotify.max_user_watches for full coverage)",
+                    reconcile_interval.as_secs()
                 );
             }
 
@@ -628,14 +653,46 @@ mod imp {
                 .name("filex-inotify".into())
                 .spawn({
                     let shutdown = shutdown.clone();
+                    let degraded = degraded.clone();
+                    let deltas = deltas.clone();
+                    let root = root.clone();
                     move || {
-                        reader_loop(fd, &root, registry, &deltas, &shutdown);
+                        reader_loop(fd, &root, registry, &deltas, &shutdown, &degraded);
                         // SAFETY: fd is owned by this thread from here on.
                         unsafe { libc::close(fd) };
                     }
                 })?;
 
-            Ok(Self { shutdown, thread: Some(thread) })
+            let reconcile_thread = std::thread::Builder::new()
+                .name("filex-reconcile".into())
+                .spawn({
+                    let shutdown = shutdown.clone();
+                    move || {
+                        let tick = std::time::Duration::from_millis(500).min(reconcile_interval);
+                        let mut elapsed = std::time::Duration::ZERO;
+                        while !shutdown.load(Ordering::Relaxed) {
+                            std::thread::sleep(tick);
+                            elapsed += tick;
+                            if elapsed < reconcile_interval {
+                                continue;
+                            }
+                            elapsed = std::time::Duration::ZERO;
+                            if !degraded.load(Ordering::Relaxed) {
+                                continue; // full coverage: events suffice
+                            }
+                            let rescan = FsDelta::Rescan { path: root.clone() };
+                            if deltas.send(vec![rescan]).is_err() {
+                                break; // receiver gone: shutting down
+                            }
+                        }
+                    }
+                })?;
+
+            Ok(Self {
+                shutdown,
+                thread: Some(thread),
+                reconcile_thread: Some(reconcile_thread),
+            })
         }
     }
 
@@ -644,6 +701,9 @@ mod imp {
             self.shutdown.store(true, Ordering::Relaxed);
             if let Some(thread) = self.thread.take() {
                 thread.join().ok(); // wakes within one poll timeout
+            }
+            if let Some(thread) = self.reconcile_thread.take() {
+                thread.join().ok(); // wakes within one tick
             }
         }
     }
@@ -691,6 +751,7 @@ mod imp {
         mut registry: WatchRegistry,
         deltas: &Sender<Vec<FsDelta>>,
         shutdown: &AtomicBool,
+        degraded: &AtomicBool,
     ) {
         let mut buf = vec![0u8; 64 * 1024];
         while !shutdown.load(Ordering::Relaxed) {
@@ -721,6 +782,9 @@ mod imp {
                 // attach are indexed either way).
                 if let FsDelta::Upsert { path, is_dir: true } = &delta {
                     add_watches_recursive(fd, path, &mut registry).ok();
+                    if registry.is_degraded() {
+                        degraded.store(true, Ordering::Relaxed);
+                    }
                 }
                 batch.push(delta);
             }
@@ -993,6 +1057,33 @@ mod tests {
                     matches!(d, FsDelta::Remove { path } if path == &target)
                 }),
                 "no Remove for deleted file"
+            );
+        }
+
+        /// An exhausted watch budget must trigger periodic reconcile
+        /// rescans instead of silent permanent staleness.
+        #[test]
+        fn degraded_watcher_emits_periodic_root_rescans() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            // More directories than the budget of 1 can watch.
+            fs::create_dir_all(root.join("a/b")).unwrap();
+            fs::create_dir(root.join("c")).unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            let _watcher = InotifyWatcher::spawn_with(
+                &root,
+                tx,
+                Some(1),
+                Duration::from_millis(300),
+            )
+            .unwrap();
+
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Rescan { path } if path == &root)
+                }),
+                "no reconcile rescan while degraded"
             );
         }
 
