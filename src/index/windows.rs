@@ -118,12 +118,13 @@ mod imp {
         CloseHandle, ERROR_HANDLE_EOF, ERROR_NOTIFY_ENUM_DIR, GENERIC_READ, HANDLE,
     };
     use windows::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
-        FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
-        ReadDirectoryChangesW,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME,
+        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle, OPEN_EXISTING, ReadDirectoryChangesW,
     };
-    use windows::Win32::System::IO::{CancelIoEx, DeviceIoControl};
+    use windows::Win32::System::IO::{CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED};
+    use windows::Win32::System::Threading::CreateEventW;
     use windows::Win32::System::Ioctl::{
         FSCTL_ENUM_USN_DATA, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, MFT_ENUM_DATA_V0,
         READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
@@ -140,8 +141,13 @@ mod imp {
     unsafe impl Send for DirHandle {}
     unsafe impl Sync for DirHandle {}
 
-    /// Watches a directory subtree via a blocking RDCW loop on a dedicated
-    /// thread. Dropping cancels the pending read and closes the handle.
+    /// Watches a directory subtree via an overlapped RDCW loop on a
+    /// dedicated thread. RDCW only tracks changes from the moment a read
+    /// is *pending*, so `spawn` hands the thread an "armed" channel and
+    /// waits for the first read to be queued before returning — callers
+    /// are guaranteed coverage from the instant `spawn` completes (the
+    /// watcher-before-bootstrap ordering depends on this). Dropping
+    /// cancels the pending read and closes the handle.
     pub struct DirChangesWatcher {
         handle: std::sync::Arc<DirHandle>,
         thread: Option<JoinHandle<()>>,
@@ -151,7 +157,8 @@ mod imp {
         /// Start watching `root` (must be canonicalized). Works without
         /// elevation for any directory the user can read.
         pub fn spawn(root: &Path, deltas: Sender<Vec<FsDelta>>) -> Result<Self> {
-            // SAFETY: standard directory-handle open for change notification.
+            // SAFETY: directory-handle open for change notification;
+            // OVERLAPPED so reads are async and cancellable.
             let raw = unsafe {
                 CreateFileW(
                     &HSTRING::from(root.as_os_str()),
@@ -159,19 +166,23 @@ mod imp {
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     None,
                     OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
                     None,
                 )
             }
             .with_context(|| format!("opening {} for change notification", root.display()))?;
 
             let handle = std::sync::Arc::new(DirHandle(raw));
+            let (armed_tx, armed_rx) = std::sync::mpsc::channel();
             let thread = std::thread::Builder::new().name("filex-rdcw".into()).spawn({
                 let handle = handle.clone();
                 let root = root.to_path_buf();
-                move || reader_loop(&handle, &root, &deltas)
+                move || reader_loop(&handle, &root, &deltas, &armed_tx)
             })?;
 
+            armed_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .context("change-notification reader failed to arm (see log)")?;
             Ok(Self { handle, thread: Some(thread) })
         }
     }
@@ -190,28 +201,65 @@ mod imp {
         }
     }
 
-    fn reader_loop(handle: &DirHandle, root: &Path, deltas: &Sender<Vec<FsDelta>>) {
+    fn reader_loop(
+        handle: &DirHandle,
+        root: &Path,
+        deltas: &Sender<Vec<FsDelta>>,
+        armed: &Sender<()>,
+    ) {
+        use windows::Win32::Foundation::ERROR_OPERATION_ABORTED;
+
+        // SAFETY: plain event creation (auto-reset, unnamed, unsignaled).
+        let event = match unsafe { CreateEventW(None, false, false, None) } {
+            Ok(event) => VolumeHandle(event),
+            Err(err) => {
+                eprintln!("filex: CreateEventW for change notification failed: {err}");
+                return;
+            }
+        };
         // u64-backed: ReadDirectoryChangesW fails with ERROR_NOACCESS if
         // the buffer is not DWORD-aligned; Vec<u8> alignment is luck.
         let mut buf = vec![0u64; 8 * 1024]; // 64 KiB
         let buf_len_bytes = (buf.len() * size_of::<u64>()) as u32;
+        let mut first_read = true;
+
         loop {
-            let mut bytes_returned = 0u32;
-            // SAFETY: buf outlives the synchronous call; no OVERLAPPED means
-            // the call blocks until changes arrive or the handle dies.
-            let result = unsafe {
+            let mut overlapped = OVERLAPPED::default();
+            overlapped.hEvent = event.0;
+            // SAFETY: buf and overlapped outlive the pending I/O — both
+            // live until GetOverlappedResult(bWait=true) completes below.
+            let issued = unsafe {
                 ReadDirectoryChangesW(
                     handle.0,
                     buf.as_mut_ptr() as *mut _,
                     buf_len_bytes,
                     true, // recursive
                     FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME,
-                    Some(&mut bytes_returned),
-                    None,
+                    None, // bytes come from GetOverlappedResult
+                    Some(&mut overlapped),
                     None,
                 )
             };
+            if let Err(err) = issued {
+                eprintln!(
+                    "filex: ReadDirectoryChangesW on {} failed to start: {err}",
+                    root.display()
+                );
+                break;
+            }
+            if first_read {
+                first_read = false;
+                // From this point the OS is recording changes; unblock
+                // spawn(). Receiver gone means spawn timed out — keep
+                // running anyway, the watcher itself is healthy.
+                armed.send(()).ok();
+            }
 
+            let mut bytes_returned = 0u32;
+            // SAFETY: waits for the exact I/O issued above.
+            let result = unsafe {
+                GetOverlappedResult(handle.0, &overlapped, &mut bytes_returned, true)
+            };
             let batch = match result {
                 Err(err) if err.code() == ERROR_NOTIFY_ENUM_DIR.to_hresult() => {
                     // Too many changes for the OS to enumerate: rescan.
@@ -220,10 +268,9 @@ mod imp {
                 Err(err) => {
                     // Cancellation (drop) is expected; anything else must
                     // be visible — a silent break means silent staleness.
-                    use windows::Win32::Foundation::ERROR_OPERATION_ABORTED;
                     if err.code() != ERROR_OPERATION_ABORTED.to_hresult() {
                         eprintln!(
-                            "filex: ReadDirectoryChangesW on {} failed: {err}",
+                            "filex: change notification on {} failed: {err}",
                             root.display()
                         );
                     }
