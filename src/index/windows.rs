@@ -649,4 +649,110 @@ mod tests {
         };
         assert_eq!(path, root.join("a").join("b").join("c.txt"));
     }
+
+    /// Live smoke tests against the real Windows APIs — these are what
+    /// CI's Windows runner executes; fixture tests above cover the logic
+    /// on every OS. The USN tests exercise the elevated fast path (CI
+    /// runners are Administrator) and skip gracefully when unelevated.
+    #[cfg(target_os = "windows")]
+    mod live {
+        use super::super::*;
+        use std::fs;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        fn wait_for(
+            rx: &mpsc::Receiver<Vec<FsDelta>>,
+            timeout: Duration,
+            mut pred: impl FnMut(&FsDelta) -> bool,
+        ) -> bool {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if let Ok(batch) = rx.recv_timeout(Duration::from_millis(200)) {
+                    if batch.iter().any(&mut pred) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        #[test]
+        fn volume_root_detection_handles_verbatim_and_plain_forms() {
+            assert_eq!(volume_root_drive(Path::new(r"C:\")), Some(b'C'));
+            assert_eq!(volume_root_drive(Path::new(r"\\?\C:\")), Some(b'C'));
+            assert_eq!(volume_root_drive(Path::new(r"C:\Users")), None);
+            assert_eq!(volume_root_drive(Path::new(r"\\server\share")), None);
+            // The form canonicalize actually produces:
+            let canonical = Path::new(r"C:\").canonicalize().unwrap();
+            assert_eq!(volume_root_drive(&canonical), Some(b'C'));
+        }
+
+        #[test]
+        fn rdcw_reports_real_file_creation_and_removal() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let _watcher = DirChangesWatcher::spawn(&root, tx).unwrap();
+
+            let target = root.join("rdcw-smoke.txt");
+            fs::write(&target, b"x").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Upsert { path, is_dir: false } if path == &target)
+                }),
+                "no Upsert for created file"
+            );
+
+            fs::remove_file(&target).unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Remove { path } if path == &target)
+                }),
+                "no Remove for deleted file"
+            );
+        }
+
+        /// Requires elevation: tails the real USN journal on C: and
+        /// verifies a file created in %TEMP% (which lives on C:) arrives
+        /// as a native-keyed delta.
+        #[test]
+        fn usn_journal_reports_real_file_creation() {
+            let root = Path::new(r"C:\").canonicalize().unwrap();
+            let info = match query_usn_journal(&root) {
+                Ok(info) => info,
+                Err(err) => {
+                    eprintln!("skipping USN live test (needs Administrator): {err:#}");
+                    return;
+                }
+            };
+
+            let (tx, rx) = mpsc::channel();
+            let _watcher =
+                UsnJournalWatcher::spawn(&root, info.journal_id, info.next_usn, tx).unwrap();
+
+            let name = format!("usn-smoke-{}.txt", std::process::id());
+            let target = std::env::temp_dir().join(&name);
+            fs::write(&target, b"x").unwrap();
+
+            let seen = wait_for(&rx, Duration::from_secs(20), |d| {
+                matches!(d, FsDelta::NativeUpsert { name: n, is_dir: false, .. } if *n == name)
+            });
+            fs::remove_file(&target).ok();
+            assert!(seen, "no NativeUpsert from the USN journal for {name}");
+        }
+
+        /// Requires elevation and enumerates the whole C: MFT — minutes of
+        /// wall time on large volumes, so opt-in: run with
+        /// `cargo test -- --ignored` on Windows to validate tier 2.
+        #[test]
+        #[ignore = "full-volume MFT enumeration; run explicitly on Windows"]
+        fn usn_bootstrap_enumerates_the_volume() {
+            let root = Path::new(r"C:\").canonicalize().unwrap();
+            let boot = usn_bootstrap(&root).expect("usn_bootstrap (needs Administrator)");
+            assert!(boot.index.len() > 1000, "suspiciously small volume index");
+            // Windows itself must be findable on any Windows install.
+            assert!(!boot.index.search("notepad", 100).is_empty());
+        }
+    }
 }

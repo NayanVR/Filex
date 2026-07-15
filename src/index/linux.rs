@@ -482,4 +482,83 @@ mod tests {
         assert_eq!(watch_budget(None), DEFAULT_WATCH_BUDGET);
         assert_eq!(watch_budget(Some("100")), 1024); // floor
     }
+
+    /// Live smoke tests against the real inotify API — these are what CI's
+    /// Linux runner executes; fixture tests above cover the logic on
+    /// every OS.
+    #[cfg(target_os = "linux")]
+    mod live {
+        use super::super::*;
+        use std::fs;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        fn wait_for(
+            rx: &mpsc::Receiver<Vec<FsDelta>>,
+            timeout: Duration,
+            mut pred: impl FnMut(&FsDelta) -> bool,
+        ) -> bool {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if let Ok(batch) = rx.recv_timeout(Duration::from_millis(200))
+                    && batch.iter().any(&mut pred)
+                {
+                    return true;
+                }
+            }
+            false
+        }
+
+        #[test]
+        fn reports_real_file_creation_and_removal() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let _watcher = InotifyWatcher::spawn(&root, tx).unwrap();
+
+            let target = root.join("inotify-smoke.txt");
+            fs::write(&target, b"x").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Upsert { path, is_dir: false } if path == &target)
+                }),
+                "no Upsert for created file"
+            );
+
+            fs::remove_file(&target).unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Remove { path } if path == &target)
+                }),
+                "no Remove for deleted file"
+            );
+        }
+
+        #[test]
+        fn watches_directories_created_after_spawn() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let _watcher = InotifyWatcher::spawn(&root, tx).unwrap();
+
+            fs::create_dir(root.join("newdir")).unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Upsert { path, is_dir: true } if path.ends_with("newdir"))
+                }),
+                "no Upsert for created directory"
+            );
+
+            // Events inside the new directory require the recursively
+            // added watch to be in place.
+            let inner = root.join("newdir/inner.txt");
+            fs::write(&inner, b"x").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Upsert { path, .. } if path == &inner)
+                }),
+                "no Upsert from inside the new directory"
+            );
+        }
+    }
 }

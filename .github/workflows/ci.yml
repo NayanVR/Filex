@@ -1,0 +1,32 @@
+# Windows + Linux validation. macOS is validated on a dev machine (it has
+# its own live FSEvents tests), so no macOS job — by design, don't add one.
+#
+# Tests run with --no-default-features: that builds the index library and
+# platform watchers without GPUI, so runners exercise the real inotify /
+# ReadDirectoryChangesW / USN-journal code paths (Windows runners are
+# elevated, so the USN live tests run for real) without UI toolchain deps.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run index library tests (fixtures + live watcher smoke tests)
+        run: cargo test --no-default-features
