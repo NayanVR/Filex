@@ -30,3 +30,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run index library tests (fixtures + live watcher smoke tests)
         run: cargo test --no-default-features
+      # fanotify needs CAP_SYS_ADMIN; rerun its live test elevated so the
+      # privileged fast path is actually exercised (it self-skips above).
+      - name: fanotify live test (privileged)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo -E "$(command -v cargo)" test --no-default-features fanotify_live -- --nocapture

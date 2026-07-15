@@ -1,11 +1,17 @@
-//! Linux live watcher built on inotify.
+//! Linux live watchers: fanotify (privileged fast path) with inotify
+//! fallback.
 //!
-//! Strategy (docs/indexing-architecture.md §2): inotify is per-directory,
-//! so every directory in the tree gets a watch, bounded by a budget derived
-//! from `fs.inotify.max_user_watches`. If the tree outgrows the budget the
-//! watcher degrades to partial coverage (a periodic reconcile walk is
-//! future work; fanotify with `FAN_MARK_FILESYSTEM` is the privileged
-//! upgrade path). Kernel queue overflow is surfaced as a root rescan.
+//! Strategy (docs/indexing-architecture.md §2):
+//! - **fanotify** (`FAN_MARK_FILESYSTEM` + `FAN_REPORT_DFID_NAME`,
+//!   kernel ≥ 5.9): one mark covers the whole filesystem and events carry
+//!   (directory handle, name) — no per-directory bookkeeping, no watch
+//!   budget. Requires `CAP_SYS_ADMIN`, so it's attempted first and
+//!   permission failures fall back to inotify.
+//! - **inotify** is per-directory, so every directory in the tree gets a
+//!   watch, bounded by a budget derived from
+//!   `fs.inotify.max_user_watches`. If the tree outgrows the budget the
+//!   watcher degrades to partial coverage (a periodic reconcile walk is
+//!   future work). Kernel queue overflow is surfaced as a root rescan.
 //!
 //! Assumptions about the OS:
 //! - `struct inotify_event` layout (wd, mask, cookie, len, name[]) is
@@ -211,8 +217,135 @@ pub fn watch_budget(max_user_watches: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_WATCH_BUDGET)
 }
 
+// ---- fanotify: pure event parsing and mapping (fixture-tested on every
+// ---- OS; the syscall loop is Linux-gated below) ----
+
+// Event mask bits from linux/fanotify.h (stable kernel ABI). The dirent
+// bits share values with inotify's, but keep them distinct for clarity.
+pub const FAN_MOVED_FROM: u64 = 0x0000_0040;
+pub const FAN_MOVED_TO: u64 = 0x0000_0080;
+pub const FAN_CREATE: u64 = 0x0000_0100;
+pub const FAN_DELETE: u64 = 0x0000_0200;
+pub const FAN_Q_OVERFLOW: u64 = 0x0000_4000;
+pub const FAN_ONDIR: u64 = 0x4000_0000;
+
+/// The mask we mark the filesystem with: name-changing events only,
+/// including those on directories.
+pub const FANOTIFY_MASK: u64 =
+    FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO | FAN_ONDIR;
+
+/// Info-record type carrying (directory file handle, entry name).
+pub const FAN_EVENT_INFO_TYPE_DFID_NAME: u8 = 2;
+
+/// One decoded fanotify event (from `FAN_REPORT_DFID_NAME` mode).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanotifyEvent {
+    pub mask: u64,
+    /// Raw `struct file_handle` bytes (handle_bytes, handle_type,
+    /// f_handle), exactly as the kernel reported the parent directory —
+    /// resolvable via `open_by_handle_at`. Empty for overflow events.
+    pub dir_handle: Vec<u8>,
+    /// Entry name within that directory (NUL stripped). Empty for
+    /// overflow events.
+    pub name: Vec<u8>,
+}
+
+const FAN_METADATA_LEN: usize = 24;
+const INFO_HEADER_LEN: usize = 4;
+/// fsid (8) + handle_bytes (4) + handle_type (4) precede f_handle.
+const DFID_NAME_FIXED_LEN: usize = 16;
+
+/// Parse a fanotify read(2) buffer: a run of variable-length events, each
+/// a `fanotify_event_metadata` followed by info records up to `event_len`.
+/// Only `FAN_EVENT_INFO_TYPE_DFID_NAME` info is decoded; events without
+/// it (other than overflow) are dropped. Malformed lengths terminate
+/// parsing (kernel output is well-formed; anything else is a fixture bug).
+pub fn parse_fanotify_events(buf: &[u8]) -> Vec<FanotifyEvent> {
+    let mut events = Vec::new();
+    let mut offset = 0usize;
+    while offset + FAN_METADATA_LEN <= buf.len() {
+        let meta = &buf[offset..];
+        let event_len = u32::from_ne_bytes(meta[0..4].try_into().expect("4 bytes")) as usize;
+        let metadata_len = u16::from_ne_bytes(meta[6..8].try_into().expect("2 bytes")) as usize;
+        if event_len < FAN_METADATA_LEN
+            || metadata_len < FAN_METADATA_LEN
+            || metadata_len > event_len
+            || offset + event_len > buf.len()
+        {
+            break;
+        }
+        let mask = u64::from_ne_bytes(meta[8..16].try_into().expect("8 bytes"));
+
+        let mut dir_handle = Vec::new();
+        let mut name = Vec::new();
+        // Walk the info records within this event.
+        let mut info_offset = metadata_len;
+        while info_offset + INFO_HEADER_LEN <= event_len {
+            let info = &meta[info_offset..];
+            let info_type = info[0];
+            let info_len =
+                u16::from_ne_bytes(info[2..4].try_into().expect("2 bytes")) as usize;
+            if info_len < INFO_HEADER_LEN || info_offset + info_len > event_len {
+                break;
+            }
+            if info_type == FAN_EVENT_INFO_TYPE_DFID_NAME
+                && info_len >= INFO_HEADER_LEN + DFID_NAME_FIXED_LEN
+            {
+                let handle_bytes = u32::from_ne_bytes(
+                    info[12..16].try_into().expect("4 bytes"),
+                ) as usize;
+                let handle_end = INFO_HEADER_LEN + DFID_NAME_FIXED_LEN + handle_bytes;
+                if handle_end <= info_len {
+                    // file_handle = handle_bytes + handle_type + f_handle.
+                    dir_handle = info[12..handle_end].to_vec();
+                    name = info[handle_end..info_len]
+                        .split(|&b| b == 0)
+                        .next()
+                        .unwrap_or_default()
+                        .to_vec();
+                }
+            }
+            info_offset += info_len;
+        }
+
+        if mask & FAN_Q_OVERFLOW != 0 || !name.is_empty() {
+            events.push(FanotifyEvent { mask, dir_handle, name });
+        }
+        offset += event_len;
+    }
+    events
+}
+
+/// Translate one fanotify event into a delta. `dir` is the resolved
+/// parent directory (None if the handle couldn't be resolved or lies
+/// outside the indexed root). Removal bits win over creation bits when a
+/// merged event carries both — mirroring the USN sticky-flag policy.
+pub fn fanotify_event_to_delta(
+    root: &Path,
+    dir: Option<&Path>,
+    event: &FanotifyEvent,
+) -> Option<FsDelta> {
+    if event.mask & FAN_Q_OVERFLOW != 0 {
+        return Some(FsDelta::Rescan { path: root.to_path_buf() });
+    }
+    let dir = dir?;
+    let name = std::str::from_utf8(&event.name).ok()?;
+    if name.is_empty() {
+        return None;
+    }
+    let path = dir.join(name);
+    let is_dir = event.mask & FAN_ONDIR != 0;
+    if event.mask & (FAN_DELETE | FAN_MOVED_FROM) != 0 {
+        Some(FsDelta::Remove { path })
+    } else if event.mask & (FAN_CREATE | FAN_MOVED_TO) != 0 {
+        Some(FsDelta::Upsert { path, is_dir })
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
-pub use imp::InotifyWatcher;
+pub use imp::{FanotifyWatcher, InotifyWatcher, LinuxWatcher};
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -225,6 +358,211 @@ mod imp {
     use std::thread::JoinHandle;
 
     use anyhow::{Context as _, Result, bail};
+
+    /// The Linux live-update source: fanotify when this process has
+    /// `CAP_SYS_ADMIN` (whole-filesystem mark, no watch budget), inotify
+    /// otherwise.
+    #[allow(dead_code)] // fields are RAII guards: dropping stops the watcher
+    pub enum LinuxWatcher {
+        Fanotify(FanotifyWatcher),
+        Inotify(InotifyWatcher),
+    }
+
+    impl LinuxWatcher {
+        pub fn spawn(root: &Path, deltas: Sender<Vec<FsDelta>>) -> Result<Self> {
+            match FanotifyWatcher::spawn(root, deltas.clone()) {
+                Ok(watcher) => return Ok(Self::Fanotify(watcher)),
+                Err(err) => {
+                    // EPERM without CAP_SYS_ADMIN is the expected case for
+                    // ordinary users; anything else is still non-fatal.
+                    eprintln!("filex: fanotify unavailable ({err:#}); using inotify");
+                }
+            }
+            InotifyWatcher::spawn(root, deltas).map(Self::Inotify)
+        }
+    }
+
+    // fanotify_init flags (linux/fanotify.h).
+    const FAN_CLOEXEC: u32 = 0x0000_0001;
+    const FAN_NONBLOCK: u32 = 0x0000_0002;
+    const FAN_CLASS_NOTIF: u32 = 0x0000_0000;
+    const FAN_REPORT_DIR_FID: u32 = 0x0000_0400;
+    const FAN_REPORT_NAME: u32 = 0x0000_0800;
+    // fanotify_mark flags.
+    const FAN_MARK_ADD: u32 = 0x0000_0001;
+    const FAN_MARK_FILESYSTEM: u32 = 0x0000_0100;
+
+    /// Whole-filesystem watcher via fanotify (`FAN_MARK_FILESYSTEM` +
+    /// `FAN_REPORT_DFID_NAME`). Requires `CAP_SYS_ADMIN` at spawn and
+    /// `CAP_DAC_READ_SEARCH` to resolve directory handles (root has both).
+    ///
+    /// Assumptions about the OS: kernel ≥ 5.9 for `FAN_REPORT_NAME`; the
+    /// filesystem mark covers exactly the filesystem hosting `root`, so
+    /// events outside the indexed root arrive and are filtered after
+    /// handle resolution; handles of already-deleted directories fail
+    /// with ESTALE and are skipped (the directory's own removal event
+    /// arrives via its parent's handle).
+    pub struct FanotifyWatcher {
+        shutdown: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl FanotifyWatcher {
+        pub fn spawn(root: &Path, deltas: Sender<Vec<FsDelta>>) -> Result<Self> {
+            // SAFETY: plain syscall, no pointers.
+            let fan_fd = unsafe {
+                libc::fanotify_init(
+                    FAN_CLOEXEC | FAN_NONBLOCK | FAN_CLASS_NOTIF | FAN_REPORT_DIR_FID
+                        | FAN_REPORT_NAME,
+                    libc::O_RDONLY as u32,
+                )
+            };
+            if fan_fd < 0 {
+                bail!(
+                    "fanotify_init failed (needs CAP_SYS_ADMIN): {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            let fan_guard = FdGuard(fan_fd);
+
+            let c_root = CString::new(root.as_os_str().as_bytes())
+                .context("root path contains NUL")?;
+            // SAFETY: valid fd and NUL-terminated path.
+            let marked = unsafe {
+                libc::fanotify_mark(
+                    fan_fd,
+                    FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
+                    FANOTIFY_MASK,
+                    libc::AT_FDCWD,
+                    c_root.as_ptr(),
+                )
+            };
+            if marked < 0 {
+                bail!(
+                    "fanotify_mark(FILESYSTEM) failed for {}: {}",
+                    root.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+
+            // Directory handles resolve relative to any fd on the same
+            // filesystem; the root itself is the natural anchor.
+            // SAFETY: NUL-terminated path; O_PATH needs no read perms.
+            let mount_fd =
+                unsafe { libc::open(c_root.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+            if mount_fd < 0 {
+                bail!(
+                    "opening {} as handle-resolution anchor: {}",
+                    root.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+            let mount_guard = FdGuard(mount_fd);
+
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let thread = std::thread::Builder::new()
+                .name("filex-fanotify".into())
+                .spawn({
+                    let shutdown = shutdown.clone();
+                    let root = root.to_path_buf();
+                    move || {
+                        fanotify_loop(&fan_guard, &mount_guard, &root, &deltas, &shutdown);
+                        // guards drop here, closing both fds
+                    }
+                })?;
+
+            Ok(Self { shutdown, thread: Some(thread) })
+        }
+    }
+
+    impl Drop for FanotifyWatcher {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                thread.join().ok(); // wakes within one poll timeout
+            }
+        }
+    }
+
+    struct FdGuard(i32);
+    impl Drop for FdGuard {
+        fn drop(&mut self) {
+            // SAFETY: closing an fd we own.
+            unsafe { libc::close(self.0) };
+        }
+    }
+
+    fn fanotify_loop(
+        fan: &FdGuard,
+        mount: &FdGuard,
+        root: &Path,
+        deltas: &Sender<Vec<FsDelta>>,
+        shutdown: &AtomicBool,
+    ) {
+        let mut buf = vec![0u8; 64 * 1024];
+        while !shutdown.load(Ordering::Relaxed) {
+            let mut pollfd = libc::pollfd { fd: fan.0, events: libc::POLLIN, revents: 0 };
+            // SAFETY: pollfd points at one valid struct for the call.
+            let ready = unsafe { libc::poll(&mut pollfd, 1, 500) };
+            if ready <= 0 {
+                continue; // timeout (shutdown check) or EINTR
+            }
+            // SAFETY: buf is valid for buf.len() writable bytes.
+            let n = unsafe { libc::read(fan.0, buf.as_mut_ptr() as *mut _, buf.len()) };
+            if n <= 0 {
+                continue; // EAGAIN after spurious wakeup
+            }
+
+            let mut batch = Vec::new();
+            for event in parse_fanotify_events(&buf[..n as usize]) {
+                let dir = resolve_dir_handle(mount.0, &event.dir_handle)
+                    // The filesystem mark sees the whole fs; keep only
+                    // events under our root.
+                    .filter(|dir| dir.starts_with(root));
+                if let Some(delta) = fanotify_event_to_delta(root, dir.as_deref(), &event) {
+                    batch.push(delta);
+                }
+            }
+            if !batch.is_empty() && deltas.send(batch).is_err() {
+                break; // receiver gone: shutting down
+            }
+        }
+    }
+
+    /// Resolve a raw `struct file_handle` (as captured from the event) to
+    /// the directory's current path via open_by_handle_at + /proc/self/fd.
+    /// Requires CAP_DAC_READ_SEARCH. None for stale handles (dir deleted).
+    fn resolve_dir_handle(mount_fd: i32, raw_handle: &[u8]) -> Option<PathBuf> {
+        if raw_handle.len() < 8 {
+            return None;
+        }
+        // Copy into an 8-aligned buffer: file_handle starts with two u32s
+        // and the kernel requires natural alignment.
+        let mut aligned = vec![0u64; raw_handle.len().div_ceil(8)];
+        // SAFETY: u64 buffer reinterpreted as bytes for the copy.
+        let aligned_bytes = unsafe {
+            std::slice::from_raw_parts_mut(aligned.as_mut_ptr() as *mut u8, raw_handle.len())
+        };
+        aligned_bytes.copy_from_slice(raw_handle);
+
+        // SAFETY: open_by_handle_at reads handle_bytes from the struct we
+        // built from kernel-provided bytes; O_PATH avoids permission-heavy
+        // opens.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_open_by_handle_at,
+                mount_fd,
+                aligned.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC,
+            )
+        } as i32;
+        if fd < 0 {
+            return None; // ESTALE (deleted) or permissions
+        }
+        let guard = FdGuard(fd);
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", guard.0)).ok()?;
+        Some(path)
+    }
 
     /// Watches a directory tree via one inotify instance with a watch per
     /// directory. Dropping stops the reader thread and closes the instance.
@@ -483,6 +821,108 @@ mod tests {
         assert_eq!(watch_budget(Some("100")), 1024); // floor
     }
 
+    /// Encode a fanotify event the way the kernel lays it out:
+    /// metadata (24B) + one DFID_NAME info record.
+    fn encode_fanotify_event(mask: u64, handle: &[u8], name: &[u8]) -> Vec<u8> {
+        let info_len = INFO_HEADER_LEN + DFID_NAME_FIXED_LEN + handle.len() + name.len() + 1;
+        let event_len = FAN_METADATA_LEN + info_len;
+        let mut buf = Vec::with_capacity(event_len);
+        buf.extend_from_slice(&(event_len as u32).to_ne_bytes());
+        buf.push(3); // FANOTIFY_METADATA_VERSION
+        buf.push(0);
+        buf.extend_from_slice(&(FAN_METADATA_LEN as u16).to_ne_bytes());
+        buf.extend_from_slice(&mask.to_ne_bytes());
+        buf.extend_from_slice(&(-1i32).to_ne_bytes()); // fd = FAN_NOFD
+        buf.extend_from_slice(&0i32.to_ne_bytes()); // pid
+        // Info record: header + fsid + file_handle + NUL-terminated name.
+        buf.push(FAN_EVENT_INFO_TYPE_DFID_NAME);
+        buf.push(0);
+        buf.extend_from_slice(&(info_len as u16).to_ne_bytes());
+        buf.extend_from_slice(&[0u8; 8]); // fsid
+        buf.extend_from_slice(&(handle.len() as u32).to_ne_bytes());
+        buf.extend_from_slice(&1i32.to_ne_bytes()); // handle_type
+        buf.extend_from_slice(handle);
+        buf.extend_from_slice(name);
+        buf.push(0);
+        buf
+    }
+
+    #[test]
+    fn parses_fanotify_dfid_name_events() {
+        let mut buf = encode_fanotify_event(FAN_CREATE, &[0xAA, 0xBB], b"made.txt");
+        buf.extend(encode_fanotify_event(
+            FAN_DELETE | FAN_ONDIR,
+            &[0xCC],
+            b"gonedir",
+        ));
+
+        let events = parse_fanotify_events(&buf);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].mask, FAN_CREATE);
+        assert_eq!(events[0].name, b"made.txt");
+        // file_handle = handle_bytes(2) + handle_type(1) + payload.
+        assert_eq!(events[0].dir_handle[0..4], 2u32.to_ne_bytes());
+        assert_eq!(&events[0].dir_handle[8..], &[0xAA, 0xBB]);
+        assert_eq!(events[1].name, b"gonedir");
+        assert!(events[1].mask & FAN_ONDIR != 0);
+    }
+
+    #[test]
+    fn fanotify_parser_handles_overflow_and_garbage() {
+        // Overflow events carry no info record.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(FAN_METADATA_LEN as u32).to_ne_bytes());
+        buf.push(3);
+        buf.push(0);
+        buf.extend_from_slice(&(FAN_METADATA_LEN as u16).to_ne_bytes());
+        buf.extend_from_slice(&FAN_Q_OVERFLOW.to_ne_bytes());
+        buf.extend_from_slice(&(-1i32).to_ne_bytes());
+        buf.extend_from_slice(&0i32.to_ne_bytes());
+
+        let events = parse_fanotify_events(&buf);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].mask & FAN_Q_OVERFLOW != 0);
+
+        buf.extend_from_slice(&[9, 9, 9]); // torn tail
+        assert_eq!(parse_fanotify_events(&buf).len(), 1);
+    }
+
+    #[test]
+    fn fanotify_mapping_covers_upsert_remove_overflow_and_precedence() {
+        let root = Path::new("/root");
+        let dir = Path::new("/root/sub");
+        let event = |mask: u64, name: &[u8]| FanotifyEvent {
+            mask,
+            dir_handle: vec![],
+            name: name.to_vec(),
+        };
+
+        assert_eq!(
+            fanotify_event_to_delta(root, Some(dir), &event(FAN_CREATE, b"a.txt")),
+            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+        );
+        assert_eq!(
+            fanotify_event_to_delta(root, Some(dir), &event(FAN_MOVED_TO | FAN_ONDIR, b"d")),
+            Some(FsDelta::Upsert { path: dir.join("d"), is_dir: true })
+        );
+        assert_eq!(
+            fanotify_event_to_delta(root, Some(dir), &event(FAN_MOVED_FROM, b"x")),
+            Some(FsDelta::Remove { path: dir.join("x") })
+        );
+        // Merged create+delete: removal wins (final state).
+        assert_eq!(
+            fanotify_event_to_delta(root, Some(dir), &event(FAN_CREATE | FAN_DELETE, b"t")),
+            Some(FsDelta::Remove { path: dir.join("t") })
+        );
+        // Overflow needs no resolved dir.
+        assert_eq!(
+            fanotify_event_to_delta(root, None, &event(FAN_Q_OVERFLOW, b"")),
+            Some(FsDelta::Rescan { path: root.into() })
+        );
+        // Unresolvable handle: dropped.
+        assert_eq!(fanotify_event_to_delta(root, None, &event(FAN_CREATE, b"y")), None);
+    }
+
     /// Live smoke tests against the real inotify API — these are what CI's
     /// Linux runner executes; fixture tests above cover the logic on
     /// every OS.
@@ -517,6 +957,40 @@ mod tests {
             let _watcher = InotifyWatcher::spawn(&root, tx).unwrap();
 
             let target = root.join("inotify-smoke.txt");
+            fs::write(&target, b"x").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Upsert { path, is_dir: false } if path == &target)
+                }),
+                "no Upsert for created file"
+            );
+
+            fs::remove_file(&target).unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(10), |d| {
+                    matches!(d, FsDelta::Remove { path } if path == &target)
+                }),
+                "no Remove for deleted file"
+            );
+        }
+
+        /// Requires CAP_SYS_ADMIN — CI runs this under sudo; unprivileged
+        /// local runs skip gracefully (the fallback path is what they'd
+        /// exercise anyway).
+        #[test]
+        fn fanotify_live_reports_file_creation_and_removal() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let _watcher = match FanotifyWatcher::spawn(&root, tx) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    eprintln!("skipping fanotify live test (needs CAP_SYS_ADMIN): {err:#}");
+                    return;
+                }
+            };
+
+            let target = root.join("fanotify-smoke.txt");
             fs::write(&target, b"x").unwrap();
             assert!(
                 wait_for(&rx, Duration::from_secs(10), |d| {

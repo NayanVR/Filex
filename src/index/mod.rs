@@ -405,7 +405,7 @@ impl VolumeIndex {
 #[cfg(target_os = "macos")]
 type PlatformWatcher = macos::FsEventsWatcher;
 #[cfg(target_os = "linux")]
-type PlatformWatcher = linux::InotifyWatcher;
+type PlatformWatcher = linux::LinuxWatcher;
 /// Windows has two sources: the USN journal (elevated fast path, volume
 /// roots) and ReadDirectoryChangesW (unprivileged fallback, any subtree).
 #[cfg(target_os = "windows")]
@@ -602,7 +602,7 @@ fn platform_start(
         }
         #[cfg(target_os = "linux")]
         {
-            linux::InotifyWatcher::spawn(&canonical, delta_tx.clone())
+            linux::LinuxWatcher::spawn(&canonical, delta_tx.clone())
         }
     };
     let fs_watcher = match spawned {
