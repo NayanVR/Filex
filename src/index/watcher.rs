@@ -299,6 +299,27 @@ impl IndexWriter {
                     if applied_any {
                         on_change();
                     }
+
+                    // Compact when enough of the arena is dead. Built from
+                    // a read guard (searches keep answering), then swapped;
+                    // this thread is the only mutator, so nothing can
+                    // change between the build and the swap.
+                    let compacted = {
+                        let index = match index.read() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        index.needs_compaction().then(|| index.compacted())
+                    };
+                    if let Some(fresh) = compacted {
+                        let mut guard = match index.write() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        *guard = fresh;
+                        drop(guard);
+                        on_change();
+                    }
                 }
             })?;
         Ok(Self { handle: Some(handle) })
@@ -560,6 +581,54 @@ mod tests {
         // IndexWriter's Drop joins its thread, which only exits once every
         // sender is gone — drop the sender first or this test deadlocks
         // (LiveIndex encodes this order for the real wiring).
+        drop(delta_tx);
+    }
+
+    /// Mass deletion pushing dead debt past the threshold must make the
+    /// writer compact: same live content, shrunken arena.
+    #[test]
+    fn writer_compacts_after_mass_deletion() {
+        let mut index = VolumeIndex::new("/vol");
+        let doomed = index.insert(crate::index::ROOT, "doomed", true).unwrap();
+        for i in 0..6000 {
+            index.insert(doomed, &format!("f{i}.txt"), false).unwrap();
+        }
+        index.insert(crate::index::ROOT, "survivor.txt", false).unwrap();
+        let arena_before = 6003; // root + doomed + 6000 + survivor
+
+        let shared: SharedIndex = Arc::new(RwLock::new(index));
+        let (delta_tx, delta_rx) = mpsc::channel();
+        let (notify_tx, notify_rx) = mpsc::channel();
+        let _writer = IndexWriter::spawn(
+            shared.clone(),
+            delta_rx,
+            move || {
+                notify_tx.send(()).ok();
+            },
+            None,
+        )
+        .unwrap();
+
+        delta_tx
+            .send(vec![FsDelta::Remove { path: PathBuf::from("/vol/doomed") }])
+            .unwrap();
+
+        // Two notifications: the removal batch, then the compaction swap.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            notify_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("writer went quiet before compacting");
+            let index = shared.read().unwrap();
+            if index.entries.len() < arena_before {
+                assert_eq!(index.len(), 1); // survivor.txt
+                assert_eq!(index.entries.len(), 2); // root + survivor
+                assert_eq!(index.search("survivor", 10).len(), 1);
+                break;
+            }
+            drop(index);
+            assert!(std::time::Instant::now() < deadline, "never compacted");
+        }
         drop(delta_tx);
     }
 

@@ -79,6 +79,16 @@ pub enum MatchKind {
     Substring,
 }
 
+/// Compaction trigger: at least this many dead units *and* at least a
+/// quarter of the arena dead. The floor keeps small indexes from
+/// compacting constantly; the ratio keeps big ones from carrying
+/// gigabytes of tombstones.
+const COMPACTION_MIN_DEAD: usize = 4096;
+
+fn compaction_due(dead: usize, total_entries: usize) -> bool {
+    dead >= COMPACTION_MIN_DEAD && dead * 4 >= total_entries
+}
+
 /// Keeps the best `limit` ranked items seen so far: a max-heap where the
 /// root is the *worst* kept item, evicted when something better arrives.
 /// Rayon folds one per chunk, then merges — memory is O(limit) per task
@@ -142,6 +152,11 @@ pub struct VolumeIndex {
     by_native_key: HashMap<u64, EntryId>,
     /// Bumped on every mutation; lets async consumers detect staleness.
     generation: u64,
+    /// Approximate count of dead arena units: tombstoned entries plus
+    /// names leaked by renames. Drives compaction (see
+    /// [`VolumeIndex::needs_compaction`]); recomputed as the tombstone
+    /// count when loading a snapshot.
+    dead_debt: usize,
 }
 
 impl VolumeIndex {
@@ -161,6 +176,7 @@ impl VolumeIndex {
             children: HashMap::new(),
             by_native_key: HashMap::new(),
             generation: 0,
+            dead_debt: 0,
         };
         // Root points at itself; its name is empty (path comes from root_path).
         let name = index.intern("");
@@ -290,9 +306,9 @@ impl VolumeIndex {
         self.entry(id).map(|e| e.native_key)
     }
 
-    /// Tombstone an entry and all its descendants. Pool bytes and arena slots
-    /// are leaked until compaction (future work); tombstones are skipped by
-    /// search and listing.
+    /// Tombstone an entry and all its descendants. Pool bytes and arena
+    /// slots are leaked until the writer runs [`VolumeIndex::compacted`];
+    /// tombstones are skipped by search and listing.
     pub fn remove(&mut self, id: EntryId) -> Result<()> {
         if id == ROOT {
             bail!("cannot remove the root entry");
@@ -306,6 +322,7 @@ impl VolumeIndex {
             if entry.native_key != 0 {
                 self.by_native_key.remove(&entry.native_key);
             }
+            self.dead_debt += 1;
             if let Some(children) = self.children.remove(&current) {
                 stack.extend(children);
             }
@@ -340,6 +357,7 @@ impl VolumeIndex {
             }
             self.children.entry(new_parent).or_default().push(id);
         }
+        self.dead_debt += 1; // the old name's pool bytes are now leaked
         self.generation += 1;
         Ok(())
     }
@@ -402,6 +420,39 @@ impl VolumeIndex {
             }
         }
         Some(current)
+    }
+
+    /// Whether enough of the arena is dead (tombstones, leaked rename
+    /// names) that a compaction pass is worth its rebuild cost.
+    pub fn needs_compaction(&self) -> bool {
+        compaction_due(self.dead_debt, self.entries.len())
+    }
+
+    /// Rebuild a fresh index containing only live entries — tombstoned
+    /// arena slots and orphaned name-pool bytes are left behind. Entry
+    /// ids change; names, hierarchy, native keys, and the root are
+    /// preserved. The generation continues (old + 1) so staleness checks
+    /// remain monotonic across the swap.
+    pub fn compacted(&self) -> VolumeIndex {
+        let root_key = self.entries[0].native_key;
+        let mut fresh = VolumeIndex::new_with_root_key(&self.root_path, root_key);
+        // Depth-first copy; children_of yields live entries only.
+        let mut stack: Vec<(EntryId, EntryId)> = vec![(ROOT, ROOT)];
+        while let Some((old_parent, new_parent)) = stack.pop() {
+            for old_child in self.children_of(old_parent) {
+                let Some(name) = self.name_of(old_child) else { continue };
+                let is_dir = self.is_dir(old_child).unwrap_or(false);
+                let key = self.native_key_of(old_child).unwrap_or(0);
+                let Ok(new_child) = fresh.insert_with_key(new_parent, name, is_dir, key) else {
+                    continue; // unreachable on a consistent index
+                };
+                if is_dir {
+                    stack.push((old_child, new_child));
+                }
+            }
+        }
+        fresh.generation = self.generation + 1;
+        fresh
     }
 
     /// Case-insensitive substring search over all live entries, ranked
@@ -1139,6 +1190,44 @@ mod tests {
             }
         }
         panic!("file created after bootstrap never became searchable");
+    }
+
+    #[test]
+    fn compaction_reclaims_dead_space_and_preserves_content() {
+        let mut index = VolumeIndex::new_with_root_key("/vol", 5);
+        let docs = index.insert_with_key(ROOT, "docs", true, 10).unwrap();
+        let keep = index.insert_with_key(docs, "keep.txt", false, 11).unwrap();
+        let doomed = index.insert_with_key(ROOT, "doomed", true, 20).unwrap();
+        index.insert_with_key(doomed, "gone.txt", false, 21).unwrap();
+        index.remove(doomed).unwrap();
+        index.rename(keep, docs, "kept-longer-name.txt").unwrap();
+        let generation = index.generation();
+        let pool_before = index.name_pool.len();
+
+        let fresh = index.compacted();
+
+        // Same live content...
+        assert_eq!(fresh.len(), index.len());
+        assert_eq!(fresh.search("kept-longer", 10).len(), 1);
+        assert!(fresh.search("gone", 10).is_empty());
+        let hit = fresh.search("kept-longer", 10)[0].id;
+        assert_eq!(fresh.path_of(hit).unwrap(), PathBuf::from("/vol/docs/kept-longer-name.txt"));
+        assert_eq!(fresh.entry_by_native_key(5), Some(ROOT));
+        assert_eq!(fresh.entry_by_native_key(11), Some(hit));
+        assert_eq!(fresh.entry_by_native_key(21), None);
+        // ...in a smaller arena, with debt cleared and generation advanced.
+        assert_eq!(fresh.entries.len(), fresh.len() + 1);
+        assert!(fresh.name_pool.len() < pool_before);
+        assert_eq!(fresh.dead_debt, 0);
+        assert_eq!(fresh.generation(), generation + 1);
+    }
+
+    #[test]
+    fn compaction_trigger_needs_both_floor_and_ratio() {
+        assert!(!compaction_due(100, 200)); // ratio met, below floor
+        assert!(!compaction_due(5000, 1_000_000)); // floor met, ratio not
+        assert!(compaction_due(5000, 20_000));
+        assert!(!compaction_due(4095, 4)); // just under the floor
     }
 
     #[test]

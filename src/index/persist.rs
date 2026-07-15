@@ -239,8 +239,12 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
     if entries[0].native_key != 0 {
         by_native_key.insert(entries[0].native_key, ROOT);
     }
+    // Rename-leaked pool bytes aren't recoverable from the file; the
+    // tombstone count is the compaction-debt approximation after a load.
+    let mut dead_debt = 0usize;
     for (i, entry) in entries.iter().enumerate().skip(1) {
         if entry.is_tombstone() {
+            dead_debt += 1;
             continue;
         }
         let parent = &entries[entry.parent.0 as usize];
@@ -274,6 +278,7 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
         children,
         by_native_key,
         generation: 0,
+        dead_debt,
     };
     Ok(Snapshot { index, checkpoint })
 }
@@ -354,6 +359,16 @@ mod tests {
             save(&sample(), checkpoint, &path).unwrap();
             assert_eq!(load(&path, Path::new("/vol")).unwrap().checkpoint, checkpoint);
         }
+    }
+
+    #[test]
+    fn load_recomputes_compaction_debt_from_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = tmp_snapshot_path(&dir);
+        // sample() removes one entry (temp.bin) and renames another.
+        save(&sample(), Checkpoint::None, &path).unwrap();
+        let index = load(&path, Path::new("/vol")).unwrap().index;
+        assert_eq!(index.dead_debt, 1); // the tombstone; rename leak not recoverable
     }
 
     #[test]
