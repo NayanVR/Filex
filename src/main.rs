@@ -526,7 +526,7 @@ impl Workspace {
             .map(|ix| self.render_root_row(ix, cx))
             .collect();
 
-        let mut sidebar = div()
+        let sidebar = div()
             .flex()
             .flex_col()
             .w(px(200.))
@@ -585,9 +585,11 @@ impl Workspace {
                     })),
             );
 
+        // Shadowing rebind (not `mut`): the binding is only extended on
+        // macOS, and an unconditional `mut` breaks -D warnings elsewhere.
         #[cfg(target_os = "macos")]
-        if self.fda_missing {
-            sidebar = sidebar.child(div().flex_1()).child(
+        let sidebar = if self.fda_missing {
+            sidebar.child(div().flex_1()).child(
                 div()
                     .id("fda-banner")
                     .mx_2()
@@ -602,8 +604,10 @@ impl Workspace {
                     .on_click(|_: &ClickEvent, _window, _cx| {
                         filex::index::macos::open_full_disk_access_settings();
                     }),
-            );
-        }
+            )
+        } else {
+            sidebar
+        };
 
         sidebar
     }
