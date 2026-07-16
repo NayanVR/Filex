@@ -71,7 +71,14 @@ pub fn index_subtree(
             continue; // `path` itself is represented by `under`
         }
         let Some(name) = dirent.file_name().to_str() else {
-            continue; // non-UTF-8 name: skip for now (tracked as future work)
+            // Non-UTF-8 names are deliberately excluded from the *index*:
+            // the name pools, case folding, search, and persistence are
+            // UTF-8 throughout, and a lossy copy would produce paths that
+            // don't exist. Browse mode still shows and opens such files
+            // (listing keeps the raw OsString path); only search misses
+            // them. Full support would mean byte-based pools — not worth
+            // it for names that are illegal on macOS and rare elsewhere.
+            continue;
         };
         let parent_path = dirent.parent_path();
         let Some(&parent) = dir_ids.get(parent_path) else {

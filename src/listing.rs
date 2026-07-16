@@ -182,6 +182,27 @@ mod tests {
         assert!(err.to_string().contains("/nonexistent/filex-test"));
     }
 
+    /// Non-UTF-8 filenames must browse correctly: lossy name for display,
+    /// but the untouched OS path for navigation/opening. (The search
+    /// index deliberately skips them — see index::walker.) Linux-only:
+    /// APFS rejects such names outright (EILSEQ), which is exactly why
+    /// the limitation is acceptable — CI's ubuntu runner executes this.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_names_are_displayed_lossily_but_openable() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let raw = std::ffi::OsStr::from_bytes(b"caf\xE9.txt"); // latin-1 é
+        let real_path = dir.path().join(raw);
+        fs::write(&real_path, b"x").unwrap();
+
+        let entries = read_dir_sorted(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "caf\u{FFFD}.txt"); // replacement char
+        assert_eq!(entries[0].path, real_path); // raw bytes preserved
+        assert!(entries[0].path.exists());
+    }
+
     #[test]
     fn file_kinds_classify_by_extension_case_insensitively() {
         assert_eq!(FileKind::of("x", true), FileKind::Directory);
