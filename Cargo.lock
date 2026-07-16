@@ -1808,6 +1808,7 @@ dependencies = [
  "objc2-core-services",
  "rayon",
  "tempfile",
+ "unicode-segmentation",
  "windows 0.62.2",
 ]
 

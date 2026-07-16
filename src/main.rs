@@ -3,14 +3,17 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, FocusHandle, KeyBinding, KeyDownEvent,
-    ScrollStrategy, SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, rgb, size, uniform_list,
+    App, Application, Bounds, ClickEvent, Context, FocusHandle, Focusable as _, KeyBinding,
+    KeyDownEvent, ScrollStrategy, SharedString, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size, uniform_list,
 };
 
 use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_size, read_dir_sorted};
+
+mod search_input;
+use search_input::{SearchInput, SearchInputEvent};
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
 
@@ -114,7 +117,10 @@ struct Workspace {
     service: Option<std::sync::Arc<filex::index::ipc::ServiceClient>>,
     #[cfg(target_os = "windows")]
     service_status: Vec<filex::index::ipc::RootStatus>,
+    /// Mirror of the search input's content (the input entity owns it).
     query: String,
+    search_input: gpui::Entity<SearchInput>,
+    _search_input_subscription: gpui::Subscription,
     results: Vec<SearchRow>,
     search_generation: u64,
     /// Index into the active list (search results while searching,
@@ -140,6 +146,16 @@ impl Workspace {
 
     fn new(cx: &mut Context<Self>) -> Self {
         let cwd = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let search_input = cx.new(SearchInput::new);
+        let subscription = cx.subscribe(&search_input, |this, _input, event, cx| match event {
+            SearchInputEvent::Changed(text) => {
+                if this.query != *text {
+                    this.query = text.clone();
+                    this.update_search(cx);
+                }
+            }
+            SearchInputEvent::BackspaceWhenEmpty => this.go_up(cx),
+        });
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
@@ -155,6 +171,8 @@ impl Workspace {
             #[cfg(target_os = "windows")]
             service_status: Vec::new(),
             query: String::new(),
+            search_input,
+            _search_input_subscription: subscription,
             results: Vec::new(),
             search_generation: 0,
             selected: None,
@@ -512,39 +530,27 @@ impl Workspace {
     }
 
     fn clear_search(&mut self, cx: &mut Context<Self>) {
-        self.query.clear();
-        self.update_search(cx);
+        // The input owns the text; its Changed event clears our mirror
+        // and re-runs the (now empty) search.
+        self.search_input.update(cx, |input, cx| {
+            if !input.is_empty() {
+                input.set_text("", cx);
+            }
+        });
     }
 
-    /// Interim search input: characters are captured from raw key events.
-    /// Replace with a real text input view (gpui-component's Input or an
-    /// EntityInputHandler) once the shell grows edit affordances.
+    /// List-navigation keys. Text editing lives in the SearchInput (which
+    /// is focused); unhandled keys bubble up here.
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform || keystroke.modifiers.control {
             return; // shortcuts are handled by actions
         }
         match keystroke.key.as_str() {
-            "backspace" => {
-                if self.query.is_empty() {
-                    self.go_up(cx);
-                } else {
-                    self.query.pop();
-                    self.update_search(cx);
-                }
-            }
-            "escape" => self.clear_search(cx),
             "up" => self.move_selection(-1, cx),
             "down" => self.move_selection(1, cx),
             "enter" => self.activate_selected(cx),
-            _ => {
-                if let Some(text) = &keystroke.key_char
-                    && !text.chars().any(char::is_control)
-                {
-                    self.query.push_str(text);
-                    self.update_search(cx);
-                }
-            }
+            _ => {}
         }
     }
 
@@ -731,18 +737,15 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .w(px(260.))
                     .px_2()
                     .py_1()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(if searching { ACCENT } else { BORDER }))
                     .text_sm()
-                    .child(if searching {
-                        div().text_color(rgb(TEXT)).child(self.query.clone())
-                    } else {
-                        div().text_color(rgb(TEXT_DIM)).child("type to search")
-                    }),
+                    .text_color(rgb(TEXT))
+                    .child(self.search_input.clone()),
             )
     }
 
@@ -1141,6 +1144,7 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("alt-up", GoUp, None),
         ]);
+        search_input::bind_keys(cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -1162,7 +1166,9 @@ fn main() {
                 cx.activate(true);
                 cx.new(|cx| {
                     let workspace = Workspace::new(cx);
-                    workspace.focus_handle.focus(window);
+                    // Focus the input so typing searches immediately;
+                    // navigation keys bubble up to the workspace.
+                    window.focus(&workspace.search_input.focus_handle(cx));
                     workspace
                 })
             },
