@@ -44,6 +44,62 @@ fn compare_entries(a: &Entry, b: &Entry) -> Ordering {
         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
 }
 
+/// Broad category of a file, derived from its extension — drives the
+/// list icon and decides which files get thumbnails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Directory,
+    Image,
+    Video,
+    Audio,
+    Archive,
+    Code,
+    Document,
+    Other,
+}
+
+impl FileKind {
+    pub fn of(name: &str, is_dir: bool) -> Self {
+        if is_dir {
+            return Self::Directory;
+        }
+        let Some(ext) = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()) else {
+            return Self::Other;
+        };
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" => {
+                Self::Image
+            }
+            "mp4" | "mkv" | "mov" | "avi" | "webm" | "m4v" => Self::Video,
+            "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => Self::Audio,
+            "zip" | "tar" | "gz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "dmg" | "iso" => {
+                Self::Archive
+            }
+            "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "c" | "h" | "cpp" | "hpp" | "go"
+            | "java" | "rb" | "sh" | "swift" | "kt" | "toml" | "yaml" | "yml" | "json"
+            | "html" | "css" | "sql" => Self::Code,
+            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf" => {
+                Self::Document
+            }
+            _ => Self::Other,
+        }
+    }
+
+    /// Emoji glyph shown in list rows (until a real icon set lands).
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Directory => "📁",
+            Self::Image => "🖼",
+            Self::Video => "🎬",
+            Self::Audio => "🎵",
+            Self::Archive => "📦",
+            Self::Code => "⌨",
+            Self::Document => "📄",
+            Self::Other => "·",
+        }
+    }
+}
+
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -124,6 +180,19 @@ mod tests {
     fn missing_directory_reports_path_in_error() {
         let err = read_dir_sorted(Path::new("/nonexistent/filex-test")).unwrap_err();
         assert!(err.to_string().contains("/nonexistent/filex-test"));
+    }
+
+    #[test]
+    fn file_kinds_classify_by_extension_case_insensitively() {
+        assert_eq!(FileKind::of("x", true), FileKind::Directory);
+        assert_eq!(FileKind::of("photo.JPG", false), FileKind::Image);
+        assert_eq!(FileKind::of("song.flac", false), FileKind::Audio);
+        assert_eq!(FileKind::of("clip.mkv", false), FileKind::Video);
+        assert_eq!(FileKind::of("main.rs", false), FileKind::Code);
+        assert_eq!(FileKind::of("notes.md", false), FileKind::Document);
+        assert_eq!(FileKind::of("backup.tar.gz", false), FileKind::Archive);
+        assert_eq!(FileKind::of("Makefile", false), FileKind::Other);
+        assert_eq!(FileKind::of("weird.xyz", false), FileKind::Other);
     }
 
     #[test]

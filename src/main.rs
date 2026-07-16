@@ -13,7 +13,10 @@ use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_size, read_dir_sorted};
 
 mod search_input;
+mod thumbnails;
+use filex::listing::FileKind;
 use search_input::{SearchInput, SearchInputEvent};
+use thumbnails::ThumbnailState;
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
 
@@ -128,6 +131,7 @@ struct Workspace {
     selected: Option<usize>,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
+    thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
 }
 
 impl Workspace {
@@ -178,6 +182,7 @@ impl Workspace {
             selected: None,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
+            thumbnails: std::collections::HashMap::new(),
         };
         this.load_dir(&cwd);
         // Windows probes for the elevated index service first and only
@@ -457,6 +462,70 @@ impl Workspace {
                 self.load_error = Some(format!("{err:#}").into());
             }
         }
+    }
+
+    /// Schedule a thumbnail decode for a visible image row (no-op if
+    /// cached or in flight). Called from the list processor, so only
+    /// rows that actually render ever spawn work.
+    fn request_thumbnail(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.thumbnails.contains_key(&path) {
+            return;
+        }
+        if self.thumbnails.len() >= thumbnails::CACHE_CAP {
+            self.thumbnails.clear(); // visible rows repopulate immediately
+        }
+        self.thumbnails.insert(path.clone(), ThumbnailState::Loading);
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { thumbnails::decode_thumbnail(&path) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let state = match decoded {
+                    Ok(imagery) => ThumbnailState::Ready(imagery),
+                    Err(_) => ThumbnailState::Failed,
+                };
+                this.thumbnails.insert(path, state);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The icon cell for a row: a decoded thumbnail for image files when
+    /// ready, otherwise the kind glyph.
+    fn render_icon_cell(
+        &mut self,
+        name: &str,
+        path: &Path,
+        is_dir: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let kind = FileKind::of(name, is_dir);
+        if kind == FileKind::Image {
+            match self.thumbnails.get(path) {
+                Some(ThumbnailState::Ready(imagery)) => {
+                    return gpui::img(imagery.clone())
+                        .w(px(20.))
+                        .h(px(20.))
+                        .rounded_sm()
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .into_any_element();
+                }
+                Some(_) => {}
+                None => self.request_thumbnail(path.to_path_buf(), cx),
+            }
+        }
+        div()
+            .w(px(20.))
+            .text_sm()
+            .text_color(rgb(if is_dir { ACCENT } else { TEXT_DIM }))
+            .child(kind.glyph())
+            .into_any_element()
     }
 
     /// Length of whichever list selection currently applies to.
@@ -946,9 +1015,14 @@ impl Workspace {
             cx.processor(|this, range: Range<usize>, _window, cx| {
                 range
                     .filter_map(|ix| {
+        // Copy row data out first: the icon cell needs &mut self (it may
+        // schedule a thumbnail decode) while `entry` borrows self.
                         let entry = this.entries.get(ix)?;
                         let is_dir = entry.is_dir;
+                        let size = entry.size;
                         let is_selected = this.selected == Some(ix);
+                        let (name, path) = (entry.name.clone(), entry.path.clone());
+                        let icon = this.render_icon_cell(&name, &path, is_dir, cx);
                         Some(
                             div()
                                 .id(ix)
@@ -960,18 +1034,13 @@ impl Workspace {
                                 .cursor_pointer()
                                 .when(is_selected, |s| s.bg(rgb(BG_SELECTED)))
                                 .when(!is_selected, |s| s.hover(|s| s.bg(rgb(BG_HOVER))))
-                                .child(
-                                    div()
-                                        .w(px(16.))
-                                        .text_color(rgb(if is_dir { ACCENT } else { TEXT_DIM }))
-                                        .child(if is_dir { "▸" } else { "·" }),
-                                )
-                                .child(div().flex_1().text_sm().child(entry.name.clone()))
+                                .child(icon)
+                                .child(div().flex_1().text_sm().child(name))
                                 .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
                                     if is_dir {
                                         "—".to_string()
                                     } else {
-                                        format_size(entry.size)
+                                        format_size(size)
                                     },
                                 ))
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
@@ -1000,6 +1069,9 @@ impl Workspace {
                         let row = this.results.get(ix)?;
                         let is_dir = row.is_dir;
                         let is_selected = this.selected == Some(ix);
+                        let (name, path) = (row.name.clone(), row.target.clone());
+                        let path_label = row.path_label.clone();
+                        let icon = this.render_icon_cell(&name, &path, is_dir, cx);
                         Some(
                             div()
                                 .id(ix)
@@ -1011,20 +1083,15 @@ impl Workspace {
                                 .cursor_pointer()
                                 .when(is_selected, |s| s.bg(rgb(BG_SELECTED)))
                                 .when(!is_selected, |s| s.hover(|s| s.bg(rgb(BG_HOVER))))
-                                .child(
-                                    div()
-                                        .w(px(16.))
-                                        .text_color(rgb(if is_dir { ACCENT } else { TEXT_DIM }))
-                                        .child(if is_dir { "▸" } else { "·" }),
-                                )
-                                .child(div().text_sm().child(row.name.clone()))
+                                .child(icon)
+                                .child(div().text_sm().child(name))
                                 .child(
                                     div()
                                         .flex_1()
                                         .text_xs()
                                         .text_color(rgb(TEXT_DIM))
                                         .overflow_hidden()
-                                        .child(row.path_label.clone()),
+                                        .child(path_label),
                                 )
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                                     if event.click_count() >= 2 {

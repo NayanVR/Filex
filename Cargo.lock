@@ -1801,6 +1801,7 @@ dependencies = [
  "dispatch2",
  "futures",
  "gpui",
+ "image",
  "jwalk",
  "libc",
  "memchr",
