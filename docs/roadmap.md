@@ -30,6 +30,26 @@ Task Scheduler, not yet as an SCM service.
 
 ---
 
+## Standing principle from Phase 2 on: performance AND polish
+
+Decided 2026-07-17: alongside the founding "performance is the product"
+rule, every Phase 2+ feature should also invest in **animations and
+micro-interactions** — the app should feel alive, not just fast. GPUI
+supports this natively (`AnimationExt::with_animation`, easings like
+`pulsating_between`/`bounce`, SVG transforms via `Transformation`), so
+use it:
+
+- Prefer animated SVG assets (spinners, chevrons, state markers) over
+  static glyphs as the icon set matures.
+- Give interactions feedback: hover/press states, pulsing "building"
+  markers, shimmer placeholders while thumbnails decode, smooth
+  progress bars on file-operation jobs, eased expand/collapse on
+  panels and menus.
+- Hard boundary (unchanged): animations stay OFF the latency-critical
+  paths — search-as-you-type, list scrolling, and keyboard navigation
+  are never gated on or slowed by an animation, and nothing
+  layout-animates inside a `uniform_list` row. When in doubt, measure.
+
 ## Phase 2a — Explorer capabilities (primary track, macOS-friendly)
 
 Work in this order; each block is roughly one session.
@@ -92,6 +112,8 @@ Work in this order; each block is roughly one session.
   impossible from the UI).
 - Evaluate gpui-component's menu/popover first; hand-roll an anchored
   popover only if it doesn't fit.
+- Menus/popovers are a natural first home for the polish principle:
+  eased open/close, hover feedback.
 
 ## Phase 2b — Finish the Windows story (parallel track; needs Windows hardware or CI-driven iteration)
 
@@ -132,7 +154,9 @@ service split, perf telemetry).
 
 ## Also on the radar (unscheduled)
 
-- Real icon set replacing emoji glyphs (SVG assets, per-platform look).
+- Real icon set replacing emoji glyphs (SVG assets, per-platform look;
+  design them animation-ready — spinners, rotating chevrons, state
+  transitions — per the polish principle above).
 - Manual UX pass on macOS + release packaging (.app bundle) — dogfood
   feedback should reorder Phase 2a items freely.
 - Thumbnail hard-cancellation + disk cache if profiling ever shows the
