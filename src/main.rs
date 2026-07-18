@@ -1050,12 +1050,13 @@ impl Workspace {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let places: Vec<(&str, PathBuf)> = [
-            ("Home", std::env::home_dir()),
-            ("Root", Some(PathBuf::from("/"))),
+        // Emoji glyphs stand in until the real icon set lands (roadmap).
+        let places: Vec<(&str, &str, PathBuf)> = [
+            ("🏠", "Home", std::env::home_dir()),
+            ("💽", "Root", Some(PathBuf::from("/"))),
         ]
         .into_iter()
-        .filter_map(|(label, path)| Some((label, path?)))
+        .filter_map(|(glyph, label, path)| Some((glyph, label, path?)))
         .collect();
 
         let root_rows: Vec<gpui::AnyElement> = {
@@ -1079,12 +1080,13 @@ impl Workspace {
 
         let sidebar = ui::sidebar::sidebar_panel()
             .child(ui::sidebar::section_header("PLACES"))
-            .children(places.into_iter().enumerate().map(|(ix, (label, path))| {
-                ui::sidebar::sidebar_row(("place", ix)).child(label).on_click(cx.listener(
-                    move |this, _: &ClickEvent, _window, cx| {
+            .children(places.into_iter().enumerate().map(|(ix, (glyph, label, path))| {
+                ui::sidebar::sidebar_row(("place", ix))
+                    .child(ui::sidebar::root_marker(glyph, TEXT_DIM))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         this.navigate(path.clone(), cx);
-                    },
-                ))
+                    }))
             }))
             .child(ui::sidebar::section_header("INDEXED").pt_3())
             .children(root_rows)
