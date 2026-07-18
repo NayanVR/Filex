@@ -13,8 +13,9 @@ use filex::listing::FileKind;
 
 use super::theme::{ACCENT, TEXT_DIM};
 
-/// Width (and height, for thumbnails) of the icon cell.
-const ICON_SIZE: f32 = 20.;
+/// Width (and height, for thumbnails) of the icon cell. Public so the
+/// column header can align its leading spacer with the icon column.
+pub const ICON_SIZE: f32 = 20.;
 
 /// A decoded thumbnail, rendered as a rounded square.
 pub fn thumbnail_icon(imagery: Arc<RenderImage>) -> AnyElement {

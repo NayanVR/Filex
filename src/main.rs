@@ -10,7 +10,8 @@ use gpui::{
 
 use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
-use filex::listing::{Entry, format_size, read_dir_sorted};
+use filex::listing::{Entry, format_modified, format_size, read_dir_sorted};
+use filex::settings::SortBy;
 
 mod settings_store;
 mod thumbnails;
@@ -797,6 +798,21 @@ impl Workspace {
             )
             .child(
                 ui::settings_pane::toggle_row(
+                    "dirs-first",
+                    "Directories first",
+                    "Group folders above files whatever the sort order",
+                    settings.sort.directories_first,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| {
+                            s.sort.directories_first = !s.sort.directories_first;
+                        });
+                    });
+                })),
+            )
+            .child(
+                ui::settings_pane::toggle_row(
                     "thumbnails",
                     "Image thumbnails",
                     "Decode small previews for image files in the list",
@@ -934,6 +950,63 @@ impl Workspace {
         sidebar
     }
 
+    /// Header click: select the column, or flip the direction when it's
+    /// already the sort key. Goes through the settings store, so it
+    /// persists and the Changed event re-sorts the listing.
+    fn set_sort(&mut self, by: SortBy, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| {
+                if settings.sort.by == by {
+                    settings.sort.ascending = !settings.sort.ascending;
+                } else {
+                    settings.sort.by = by;
+                    settings.sort.ascending = true;
+                }
+            });
+        });
+    }
+
+    fn render_column_headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sort = self.settings.read(cx).settings().sort;
+        let active = |by: SortBy| (sort.by == by).then_some(sort.ascending);
+        let on_sort = |by: SortBy| {
+            cx.listener(move |this: &mut Self, _: &ClickEvent, _window, cx| {
+                this.set_sort(by, cx);
+            })
+        };
+        ui::list_row::header_row(ui::icon::ICON_SIZE)
+            .child(
+                ui::list_row::header_cell("sort-name", "Name", active(SortBy::Name))
+                    .flex_1()
+                    .on_click(on_sort(SortBy::Name)),
+            )
+            .child(
+                ui::list_row::header_cell("sort-modified", "Modified", active(SortBy::Modified))
+                    .w(px(ui::list_row::MODIFIED_COL_WIDTH))
+                    .flex_none()
+                    .text_right()
+                    .on_click(on_sort(SortBy::Modified)),
+            )
+            .child(
+                ui::list_row::header_cell("sort-size", "Size", active(SortBy::Size))
+                    .w(px(ui::list_row::SIZE_COL_WIDTH))
+                    .flex_none()
+                    .text_right()
+                    .on_click(on_sort(SortBy::Size)),
+            )
+    }
+
+    fn render_browse_pane(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(self.render_column_headers(cx))
+            .child(self.render_file_list(cx))
+            .into_any_element()
+    }
+
     fn render_file_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         uniform_list(
             "entries",
@@ -946,6 +1019,7 @@ impl Workspace {
                         let entry = this.entries.get(ix)?;
                         let is_dir = entry.is_dir;
                         let size = entry.size;
+                        let modified = entry.modified;
                         let is_selected = this.selected == Some(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let icon = this.render_icon_cell(&name, &path, is_dir, cx);
@@ -953,12 +1027,13 @@ impl Workspace {
                             ui::list_row::list_row(ix, is_selected)
                                 .child(icon)
                                 .child(div().flex_1().text_sm().child(name))
-                                .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
-                                    if is_dir {
-                                        "—".to_string()
-                                    } else {
-                                        format_size(size)
-                                    },
+                                .child(ui::list_row::detail_cell(
+                                    ui::list_row::MODIFIED_COL_WIDTH,
+                                    format_modified(modified, std::time::SystemTime::now()),
+                                ))
+                                .child(ui::list_row::detail_cell(
+                                    ui::list_row::SIZE_COL_WIDTH,
+                                    if is_dir { "—".to_string() } else { format_size(size) },
                                 ))
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                                     if event.click_count() >= 2 {
@@ -1076,7 +1151,7 @@ impl Render for Workspace {
                     } else if self.settings_open {
                         self.render_settings_pane(cx)
                     } else {
-                        self.render_file_list(cx).into_any_element()
+                        self.render_browse_pane(cx)
                     }),
             )
             .child(self.render_status_bar())
