@@ -34,6 +34,53 @@ pub enum FileOp {
     Delete { path: PathBuf },
 }
 
+impl FileOp {
+    /// Where this operation wants to create something — the path a
+    /// conflict check should probe. Deletes create nothing.
+    pub fn destination(&self) -> Option<PathBuf> {
+        match self {
+            Self::Move { to, .. } | Self::Copy { to, .. } => Some(to.clone()),
+            Self::Rename { path, new_name } => rename_target(path, new_name).ok(),
+            Self::Delete { .. } => None,
+        }
+    }
+
+    /// The same operation aimed at a different destination (conflict
+    /// resolution's "keep both"). No-op for deletes.
+    pub fn with_destination(self, dest: PathBuf) -> Self {
+        match self {
+            Self::Move { from, .. } => Self::Move { from, to: dest },
+            Self::Copy { from, .. } => Self::Copy { from, to: dest },
+            Self::Rename { path, .. } => {
+                let new_name =
+                    dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Self::Rename { path, new_name }
+            }
+            op @ Self::Delete { .. } => op,
+        }
+    }
+}
+
+/// First free "name 2.ext"-style variant of an occupied destination
+/// (Finder's convention). Counts up from 2; multi-part extensions
+/// split at the last dot ("x.tar.gz" → "x.tar 2.gz"), same as Finder.
+pub fn next_free_name(dest: &Path) -> Result<PathBuf> {
+    let parent = dest.parent().context("destination has no parent directory")?;
+    let stem = dest.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = dest.extension().map(|e| e.to_string_lossy().into_owned());
+    for n in 2..10_000u32 {
+        let name = match &ext {
+            Some(ext) => format!("{stem} {n}.{ext}"),
+            None => format!("{stem} {n}"),
+        };
+        let candidate = parent.join(name);
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            return Ok(candidate);
+        }
+    }
+    bail!("no free name near {}", dest.display())
+}
+
 /// A completed operation, carrying what undo needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppliedOp {
@@ -447,6 +494,36 @@ mod tests {
         let err = undo(&applied).unwrap_err();
         assert!(err.to_string().contains("already exists"));
         assert_eq!(fs::read_to_string(&from).unwrap(), "squatter");
+    }
+
+    #[test]
+    fn next_free_name_counts_past_occupied_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("doc.txt");
+        write(&dest, "");
+        assert_eq!(next_free_name(&dest).unwrap(), dir.path().join("doc 2.txt"));
+        write(&dir.path().join("doc 2.txt"), "");
+        assert_eq!(next_free_name(&dest).unwrap(), dir.path().join("doc 3.txt"));
+        // Extensionless names and dotfiles.
+        let bare = dir.path().join("Makefile");
+        write(&bare, "");
+        assert_eq!(next_free_name(&bare).unwrap(), dir.path().join("Makefile 2"));
+    }
+
+    #[test]
+    fn destination_and_retarget_line_up() {
+        let op = FileOp::Copy { from: "/a/x.txt".into(), to: "/b/x.txt".into() };
+        assert_eq!(op.destination(), Some(PathBuf::from("/b/x.txt")));
+        let retargeted = op.with_destination("/b/x 2.txt".into());
+        assert_eq!(retargeted.destination(), Some(PathBuf::from("/b/x 2.txt")));
+
+        let rename = FileOp::Rename { path: "/a/x.txt".into(), new_name: "y.txt".into() };
+        assert_eq!(rename.destination(), Some(PathBuf::from("/a/y.txt")));
+        let retargeted = rename.with_destination("/a/y 2.txt".into());
+        assert_eq!(retargeted, FileOp::Rename {
+            path: "/a/x.txt".into(),
+            new_name: "y 2.txt".into()
+        });
     }
 
     /// Exercises the real OS trash. Environments without a usable

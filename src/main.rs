@@ -109,6 +109,13 @@ enum ClipMode {
     Cut,
 }
 
+/// An operation blocked on an occupied destination, awaiting the
+/// user's choice in the conflict dialog.
+struct ConflictState {
+    op: FileOp,
+    dest: PathBuf,
+}
+
 /// A rename-in-place in progress: which browse row is being edited and
 /// the input that owns the edited text (the SearchInput element reused
 /// as a transient editor, per docs/roadmap.md).
@@ -158,6 +165,8 @@ struct Workspace {
     pending_delete: Option<PathBuf>,
     /// Internal file clipboard (cmd-c / cmd-x on a row).
     clipboard: Option<(PathBuf, ClipMode)>,
+    /// Open conflict dialog, if any.
+    conflict: Option<ConflictState>,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
@@ -226,6 +235,7 @@ impl Workspace {
             journal: ops::Journal::default(),
             pending_delete: None,
             clipboard: None,
+            conflict: None,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
@@ -787,10 +797,59 @@ impl Workspace {
         self.run_op(FileOp::Delete { path }, cx);
     }
 
+    /// Run a file operation, first probing its destination off-thread:
+    /// an occupied one opens the conflict dialog instead of failing
+    /// mid-apply.
+    fn run_op(&mut self, op: FileOp, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let occupied = cx
+                .background_executor()
+                .spawn({
+                    let dest = op.destination();
+                    async move { dest.filter(|dest| std::fs::symlink_metadata(dest).is_ok()) }
+                })
+                .await;
+            this.update(cx, |this, cx| match occupied {
+                Some(dest) => {
+                    this.conflict = Some(ConflictState { op, dest });
+                    cx.notify();
+                }
+                None => this.spawn_apply(op, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Resolve the open conflict dialog: keep both (retarget to the
+    /// first free "name 2" variant) or cancel.
+    fn resolve_conflict(&mut self, keep_both: bool, cx: &mut Context<Self>) {
+        let Some(ConflictState { op, dest }) = self.conflict.take() else { return };
+        cx.notify();
+        if !keep_both {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let retargeted = cx
+                .background_executor()
+                .spawn(async move { ops::next_free_name(&dest).map(|free| op.with_destination(free)) })
+                .await;
+            this.update(cx, |this, cx| match retargeted {
+                Ok(op) => this.spawn_apply(op, cx),
+                Err(err) => {
+                    this.notice = Some(format!("{err:#}").into());
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Execute a file operation on the background executor; success
     /// lands in the undo journal and refreshes the listing. Ops never
     /// touch the index — the watchers pick the change up as deltas.
-    fn run_op(&mut self, op: FileOp, cx: &mut Context<Self>) {
+    fn spawn_apply(&mut self, op: FileOp, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { ops::apply(&op) }).await;
             this.update(cx, |this, cx| {
@@ -850,6 +909,14 @@ impl Workspace {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform || keystroke.modifiers.control {
             return; // shortcuts are handled by actions
+        }
+        if self.conflict.is_some() {
+            // Enter = the primary (keep both); escape arrives as the
+            // input's ClearInput action, handled in render().
+            if keystroke.key.as_str() == "enter" {
+                self.resolve_conflict(true, cx);
+            }
+            return;
         }
         if self.renaming.is_some() {
             // Escape is consumed by the input itself (Dismissed event);
@@ -1412,6 +1479,46 @@ impl Workspace {
         self.render_search_results(cx).into_any_element()
     }
 
+    fn render_conflict_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let conflict = self.conflict.as_ref()?;
+        let name = conflict.dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        Some(
+            ui::modal::backdrop("conflict-backdrop")
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.resolve_conflict(false, cx);
+                }))
+                .child(
+                    ui::modal::panel("conflict-panel")
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(ui::modal::title(format!("“{name}” already exists here")))
+                        .child(ui::modal::message(
+                            "Nothing is overwritten: keep both renames the new one to a \
+                             free “name 2” variant.",
+                        ))
+                        .child(
+                            ui::modal::buttons()
+                                .child(
+                                    ui::modal::button("conflict-cancel", "Cancel", false)
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, _window, cx| {
+                                                this.resolve_conflict(false, cx);
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    ui::modal::button("conflict-keep", "Keep Both", true)
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, _window, cx| {
+                                                this.resolve_conflict(true, cx);
+                                            },
+                                        )),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_status_bar(&self) -> impl IntoElement {
         let left: SharedString = if let Some(notice) = &self.notice {
             notice.clone()
@@ -1458,6 +1565,15 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &search_input::Paste, _window, cx| {
                 this.paste_clipboard(cx);
             }))
+            // Escape, bubbled by the empty input: close whatever is
+            // topmost — conflict dialog first, then the settings pane.
+            .on_action(cx.listener(|this, _: &search_input::ClearInput, _window, cx| {
+                if this.conflict.is_some() {
+                    this.resolve_conflict(false, cx);
+                } else if this.settings_open {
+                    this.toggle_settings(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &Undo, _window, cx| {
                 this.undo_last(cx);
             }))
@@ -1485,6 +1601,7 @@ impl Render for Workspace {
                     }),
             )
             .child(self.render_status_bar())
+            .children(self.render_conflict_modal(cx))
     }
 }
 

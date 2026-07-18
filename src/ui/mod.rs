@@ -9,6 +9,7 @@
 
 pub mod icon;
 pub mod list_row;
+pub mod modal;
 pub mod pane;
 pub mod search_input;
 pub mod settings_pane;

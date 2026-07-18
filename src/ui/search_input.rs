@@ -138,9 +138,15 @@ impl SearchInput {
     }
 
     fn clear(&mut self, _: &ClearInput, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.content.is_empty() {
-            self.set_text("", cx);
+        if self.content.is_empty() {
+            // Nothing to clear: let escape bubble (the workspace closes
+            // modals/panes with it), while still telling transient-
+            // editor consumers to dismiss.
+            cx.propagate();
+            cx.emit(SearchInputEvent::Dismissed);
+            return;
         }
+        self.set_text("", cx);
         cx.emit(SearchInputEvent::Dismissed);
     }
 
