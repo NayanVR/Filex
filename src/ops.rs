@@ -11,8 +11,8 @@
 //! blocking I/O — call it on a background executor, never the UI
 //! thread.
 //!
-//! Not yet here (later block-3 slices): delete-to-trash, conflict
-//! resolution (a destination that exists is an error, not a prompt),
+//! Not yet here (later block-3 slices): conflict resolution (a
+//! destination that exists is an error, not a prompt) and
 //! progress/cancellation for long copies.
 
 use std::path::{Path, PathBuf};
@@ -30,6 +30,8 @@ pub enum FileOp {
     Copy { from: PathBuf, to: PathBuf },
     /// Rename `path` to `new_name` within its parent directory.
     Rename { path: PathBuf, new_name: String },
+    /// Move `path` (absolute) to the OS trash.
+    Delete { path: PathBuf },
 }
 
 /// A completed operation, carrying what undo needs.
@@ -39,6 +41,27 @@ pub enum AppliedOp {
     /// Undo removes the copy. The original is never touched.
     Copied { to: PathBuf },
     Renamed { from: PathBuf, to: PathBuf },
+    Deleted { original: PathBuf, restore: TrashRestore },
+}
+
+/// What undo needs to bring a trashed item back — shaped by what each
+/// OS reports (see the `trash_backend` modules).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrashRestore {
+    /// The item's exact location inside the trash (macOS:
+    /// NSFileManager reports it); restore is a rename back.
+    TrashedAt(PathBuf),
+    /// The item's identity in the OS trash database (Windows Recycle
+    /// Bin / freedesktop trash); restore goes through the OS.
+    Item {
+        id: std::ffi::OsString,
+        name: std::ffi::OsString,
+        original_parent: PathBuf,
+        time_deleted: i64,
+    },
+    /// Trashed, but the OS didn't identify the item for restore; undo
+    /// reports that instead of guessing.
+    Unknown,
 }
 
 impl AppliedOp {
@@ -51,6 +74,10 @@ impl AppliedOp {
                 "renamed {} to {}",
                 from.file_name().unwrap_or_default().to_string_lossy(),
                 to.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Self::Deleted { original, .. } => format!(
+                "moved {} to the trash",
+                original.file_name().unwrap_or_default().to_string_lossy()
             ),
         }
     }
@@ -75,6 +102,10 @@ pub fn apply(op: &FileOp) -> Result<AppliedOp> {
             std::fs::rename(path, &to)
                 .with_context(|| format!("renaming {}", path.display()))?;
             Ok(AppliedOp::Renamed { from: path.clone(), to })
+        }
+        FileOp::Delete { path } => {
+            let restore = trash_backend::delete_to_trash(path)?;
+            Ok(AppliedOp::Deleted { original: path.clone(), restore })
         }
     }
 }
@@ -103,6 +134,9 @@ pub fn undo(applied: &AppliedOp) -> Result<()> {
             ensure_target_free(from)?;
             std::fs::rename(to, from)
                 .with_context(|| format!("renaming {} back", to.display()))
+        }
+        AppliedOp::Deleted { original, restore } => {
+            trash_backend::restore_from_trash(restore, original)
         }
     }
 }
@@ -209,6 +243,108 @@ fn copy_recursively(from: &Path, to: &Path) -> Result<()> {
     }
 }
 
+/// macOS trash backend. Calls NSFileManager's `trashItemAtURL` with
+/// the `resultingItemURL` out-parameter — the OS reports exactly where
+/// the item landed in the Trash, so restore is a plain rename back.
+/// (The `trash` crate was evaluated first, per the roadmap: its
+/// NSFileManager path discards that URL and its Finder path shells out
+/// to osascript with permission prompts — neither can undo.)
+#[cfg(target_os = "macos")]
+mod trash_backend {
+    use super::*;
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+
+    pub fn delete_to_trash(path: &Path) -> Result<TrashRestore> {
+        let Some(path_str) = path.to_str() else {
+            // Mirrors the index's documented non-UTF-8 stance.
+            bail!("{} has a non-UTF-8 name; trashing it isn't supported yet", path.display());
+        };
+        let manager = NSFileManager::defaultManager();
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
+        let mut resulting = None;
+        manager
+            .trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting))
+            .map_err(|err| {
+                anyhow::anyhow!("moving {} to the Trash: {err}", path.display())
+            })?;
+        Ok(resulting
+            .and_then(|url| url.path())
+            .map(|s| TrashRestore::TrashedAt(PathBuf::from(s.to_string())))
+            .unwrap_or(TrashRestore::Unknown))
+    }
+
+    pub fn restore_from_trash(restore: &TrashRestore, original: &Path) -> Result<()> {
+        match restore {
+            TrashRestore::TrashedAt(trashed) => {
+                ensure_target_free(original)?;
+                std::fs::rename(trashed, original).with_context(|| {
+                    format!("restoring {} from the Trash", original.display())
+                })
+            }
+            TrashRestore::Item { .. } => {
+                bail!("this restore handle is from another platform's trash")
+            }
+            TrashRestore::Unknown => {
+                bail!("the Trash didn't report where this item went; restore it manually")
+            }
+        }
+    }
+}
+
+/// Windows / Linux trash backend via the `trash` crate: Recycle Bin
+/// (IFileOperation) and the freedesktop trash spec respectively. After
+/// deleting, the item is looked up in the OS trash listing (newest
+/// entry whose original path matches) so undo can restore it through
+/// the OS. Paths are assumed absolute — the app always browses
+/// absolute paths, and canonicalizing here would wrongly resolve a
+/// symlink to its target before trashing.
+#[cfg(not(target_os = "macos"))]
+mod trash_backend {
+    use super::*;
+
+    pub fn delete_to_trash(path: &Path) -> Result<TrashRestore> {
+        trash::delete(path)
+            .with_context(|| format!("moving {} to the trash", path.display()))?;
+        let newest_match = trash::os_limited::list().ok().and_then(|items| {
+            items
+                .into_iter()
+                .filter(|item| item.original_path() == path)
+                .max_by_key(|item| item.time_deleted)
+        });
+        Ok(newest_match
+            .map(|item| TrashRestore::Item {
+                id: item.id,
+                name: item.name,
+                original_parent: item.original_parent,
+                time_deleted: item.time_deleted,
+            })
+            .unwrap_or(TrashRestore::Unknown))
+    }
+
+    pub fn restore_from_trash(restore: &TrashRestore, original: &Path) -> Result<()> {
+        match restore {
+            TrashRestore::Item { id, name, original_parent, time_deleted } => {
+                ensure_target_free(original)?;
+                let item = trash::TrashItem {
+                    id: id.clone(),
+                    name: name.clone(),
+                    original_parent: original_parent.clone(),
+                    time_deleted: *time_deleted,
+                };
+                trash::os_limited::restore_all([item]).with_context(|| {
+                    format!("restoring {} from the trash", original.display())
+                })
+            }
+            TrashRestore::TrashedAt(_) => {
+                bail!("this restore handle is from another platform's trash")
+            }
+            TrashRestore::Unknown => {
+                bail!("the trash didn't identify this item; restore it manually")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +447,34 @@ mod tests {
         let err = undo(&applied).unwrap_err();
         assert!(err.to_string().contains("already exists"));
         assert_eq!(fs::read_to_string(&from).unwrap(), "squatter");
+    }
+
+    /// Exercises the real OS trash. Environments without a usable
+    /// trash (containerized CI, tmpfs test dirs on another mount than
+    /// the home trash) skip gracefully, same pattern as the platform
+    /// watcher tests.
+    #[test]
+    fn delete_to_trash_then_undo_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("filex-trash-roundtrip.txt");
+        write(&victim, "bye");
+
+        let applied = match apply(&FileOp::Delete { path: victim.clone() }) {
+            Ok(applied) => applied,
+            Err(err) => {
+                eprintln!("skipping trash test (no usable trash here): {err:#}");
+                return;
+            }
+        };
+        assert!(!victim.exists(), "delete left the file in place");
+        if matches!(&applied, AppliedOp::Deleted { restore: TrashRestore::Unknown, .. }) {
+            eprintln!("skipping restore assertion (trash didn't identify the item)");
+            return;
+        }
+
+        undo(&applied).unwrap();
+        assert!(victim.exists(), "undo didn't restore the file");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "bye");
     }
 
     #[test]

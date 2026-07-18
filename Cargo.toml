@@ -43,11 +43,18 @@ tempfile = "3.27.0"
 dispatch2 = "0.3"
 objc2-core-foundation = "0.3.2"
 objc2-core-services = { version = "0.3.2", features = ["FSEvents", "dispatch2"] }
+# Delete-to-trash: NSFileManager reports where the item landed, which
+# the `trash` crate discards — that handle is what makes undo possible.
+objc2-foundation = { version = "0.3.2", features = ["NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# Freedesktop trash with list/restore (undo) via os_limited.
+trash = "5.2.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# Recycle Bin with list/restore (undo) via os_limited.
+trash = "5.2.6"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
