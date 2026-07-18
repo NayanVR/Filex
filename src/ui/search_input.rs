@@ -190,13 +190,27 @@ impl SearchInput {
         window.show_character_palette();
     }
 
+    // Clipboard actions bubble to the workspace while the input is
+    // empty: with no text to operate on, cmd-c/x/v become file
+    // operations on the selected row (the workspace's paste falls back
+    // to inserting clipboard text here, so paste-to-search still
+    // works).
+
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
         }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -205,6 +219,10 @@ impl SearchInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),

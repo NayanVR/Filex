@@ -100,6 +100,15 @@ struct SearchRow {
     is_dir: bool,
 }
 
+/// What a copy/cut put on the internal file clipboard. This is app
+/// state, not the OS clipboard — pasting files copied in other apps is
+/// out of scope for now.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClipMode {
+    Copy,
+    Cut,
+}
+
 /// A rename-in-place in progress: which browse row is being edited and
 /// the input that owns the edited text (the SearchInput element reused
 /// as a transient editor, per docs/roadmap.md).
@@ -147,6 +156,8 @@ struct Workspace {
     /// Two-press delete confirmation: the path armed by the first
     /// press; the second press on the same path deletes.
     pending_delete: Option<PathBuf>,
+    /// Internal file clipboard (cmd-c / cmd-x on a row).
+    clipboard: Option<(PathBuf, ClipMode)>,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
@@ -214,6 +225,7 @@ impl Workspace {
             renaming: None,
             journal: ops::Journal::default(),
             pending_delete: None,
+            clipboard: None,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
@@ -682,6 +694,74 @@ impl Workspace {
             return; // nothing to do — treated as cancel
         }
         self.run_op(FileOp::Rename { path: entry.path.clone(), new_name }, cx);
+    }
+
+    /// The selected item of whichever list is active (browse entries,
+    /// or search results while a query is live).
+    fn selected_path(&self) -> Option<(PathBuf, String)> {
+        if self.query.is_empty() {
+            let entry = self.selected.and_then(|ix| self.entries.get(ix))?;
+            Some((entry.path.clone(), entry.name.clone()))
+        } else {
+            let row = self.selected.and_then(|ix| self.results.get(ix))?;
+            Some((row.target.clone(), row.name.to_string()))
+        }
+    }
+
+    /// cmd-c / cmd-x on a row (reaches us only while the search input
+    /// is empty — otherwise the keys edit query text).
+    fn clip_selected(&mut self, mode: ClipMode, cx: &mut Context<Self>) {
+        if self.renaming.is_some() || self.settings_open {
+            return;
+        }
+        let Some((path, name)) = self.selected_path() else { return };
+        self.notice = Some(
+            match mode {
+                ClipMode::Copy => format!("copied “{name}” — paste into a folder"),
+                ClipMode::Cut => format!("cut “{name}” — paste to move"),
+            }
+            .into(),
+        );
+        self.clipboard = Some((path, mode));
+        cx.notify();
+    }
+
+    /// cmd-v: paste the file clipboard into the current directory; with
+    /// no file on it, fall back to pasting clipboard text into the
+    /// search box (the input bubbled the action because it was empty).
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.is_some() || self.settings_open {
+            return;
+        }
+        let Some((source, mode)) = self.clipboard.clone() else {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.search_input.update(cx, |input, cx| {
+                    input.set_text(text.replace('\n', " "), cx);
+                });
+            }
+            return;
+        };
+        let Some(file_name) = source.file_name() else { return };
+        let dest = self.cwd.join(file_name);
+        if dest == source {
+            self.notice = Some(match mode {
+                ClipMode::Copy => "already here — copy conflicts get options soon".into(),
+                ClipMode::Cut => "already here".into(),
+            });
+            if mode == ClipMode::Cut {
+                self.clipboard = None;
+            }
+            cx.notify();
+            return;
+        }
+        let op = match mode {
+            ClipMode::Copy => FileOp::Copy { from: source, to: dest },
+            ClipMode::Cut => FileOp::Move { from: source, to: dest },
+        };
+        if mode == ClipMode::Cut {
+            self.clipboard = None; // a move can only happen once
+        }
+        self.run_op(op, cx);
     }
 
     /// Move the selected browse entry to the OS trash. With
@@ -1366,6 +1446,17 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &DeleteSelected, _window, cx| {
                 this.delete_selected(cx);
+            }))
+            // Bubbled up from the (empty) search input: file-level
+            // clipboard operations on the selected row.
+            .on_action(cx.listener(|this, _: &search_input::Copy, _window, cx| {
+                this.clip_selected(ClipMode::Copy, cx);
+            }))
+            .on_action(cx.listener(|this, _: &search_input::Cut, _window, cx| {
+                this.clip_selected(ClipMode::Cut, cx);
+            }))
+            .on_action(cx.listener(|this, _: &search_input::Paste, _window, cx| {
+                this.paste_clipboard(cx);
             }))
             .on_action(cx.listener(|this, _: &Undo, _window, cx| {
                 this.undo_last(cx);
