@@ -116,6 +116,14 @@ struct ConflictState {
     dest: PathBuf,
 }
 
+/// One background file-operation job with live progress; shown in the
+/// jobs bar while running.
+struct Job {
+    id: u64,
+    label: SharedString,
+    progress: std::sync::Arc<ops::OpProgress>,
+}
+
 /// A rename-in-place in progress: which browse row is being edited and
 /// the input that owns the edited text (the SearchInput element reused
 /// as a transient editor, per docs/roadmap.md).
@@ -167,6 +175,10 @@ struct Workspace {
     clipboard: Option<(PathBuf, ClipMode)>,
     /// Open conflict dialog, if any.
     conflict: Option<ConflictState>,
+    /// In-flight copy/move jobs (renames and deletes are instant and
+    /// never appear here).
+    jobs: Vec<Job>,
+    next_job_id: u64,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
@@ -236,6 +248,8 @@ impl Workspace {
             pending_delete: None,
             clipboard: None,
             conflict: None,
+            jobs: Vec::new(),
+            next_job_id: 0,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
@@ -849,14 +863,44 @@ impl Workspace {
     /// Execute a file operation on the background executor; success
     /// lands in the undo journal and refreshes the listing. Ops never
     /// touch the index — the watchers pick the change up as deltas.
+    /// Copies and moves (the potentially long ones) appear in the jobs
+    /// bar with progress and a cancel control while they run.
     fn spawn_apply(&mut self, op: FileOp, cx: &mut Context<Self>) {
+        let progress = std::sync::Arc::new(ops::OpProgress::default());
+        let job_id = self.next_job_id;
+        if matches!(op, FileOp::Copy { .. } | FileOp::Move { .. }) {
+            self.next_job_id += 1;
+            let (verb, source) = match &op {
+                FileOp::Copy { from, .. } => ("copying", from),
+                FileOp::Move { from, .. } => ("moving", from),
+                _ => unreachable!(),
+            };
+            let name = source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            self.jobs.push(Job {
+                id: job_id,
+                label: format!("{verb} {name}").into(),
+                progress: progress.clone(),
+            });
+            self.spawn_job_ticker(job_id, cx);
+            cx.notify();
+        }
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { ops::apply(&op) }).await;
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let progress = progress.clone();
+                    async move { ops::apply_with_progress(&op, &progress) }
+                })
+                .await;
             this.update(cx, |this, cx| {
+                this.jobs.retain(|job| job.id != job_id);
                 match result {
                     Ok(applied) => {
                         this.notice = Some(applied.describe().into());
                         this.journal.record(applied);
+                    }
+                    Err(err) if err.is::<ops::OpCanceled>() => {
+                        this.notice = Some("canceled".into());
                     }
                     Err(err) => this.notice = Some(format!("{err:#}").into()),
                 }
@@ -867,6 +911,56 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Refresh the UI while job `id` runs, so its progress bar moves.
+    /// Exits as soon as the job leaves the list.
+    fn spawn_job_ticker(&self, id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    let alive = this.jobs.iter().any(|job| job.id == id);
+                    if alive {
+                        cx.notify();
+                    }
+                    alive
+                });
+                if !matches!(alive, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn cancel_job(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(job) = self.jobs.iter().find(|job| job.id == id) {
+            job.progress.request_cancel();
+            self.notice = Some("canceling…".into());
+            cx.notify();
+        }
+    }
+
+    fn render_jobs(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.jobs.is_empty() {
+            return None;
+        }
+        let mut bar = ui::job::jobs_bar();
+        for job in &self.jobs {
+            let id = job.id;
+            bar = bar.child(
+                ui::job::job_row(("job", id as usize), job.label.clone(), job.progress.fraction())
+                    .child(ui::job::cancel_button(("job-cancel", id as usize)).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.cancel_job(id, cx);
+                        }),
+                    )),
+            );
+        }
+        Some(bar.into_any_element())
     }
 
     /// Undo the most recent file operation (cmd-z / ctrl-z). The disk
@@ -1600,6 +1694,7 @@ impl Render for Workspace {
                         self.render_browse_pane(cx)
                     }),
             )
+            .children(self.render_jobs(cx))
             .child(self.render_status_bar())
             .children(self.render_conflict_modal(cx))
     }

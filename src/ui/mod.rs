@@ -8,6 +8,7 @@
 //! state and business logic stay in the workspace / lib.
 
 pub mod icon;
+pub mod job;
 pub mod list_row;
 pub mod modal;
 pub mod pane;

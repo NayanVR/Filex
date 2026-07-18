@@ -16,8 +16,53 @@
 //! progress/cancellation for long copies.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, bail};
+
+/// Shared handle between a running operation and the UI: byte-level
+/// progress plus a cancellation flag, all atomics so the background
+/// worker and the render loop never lock.
+#[derive(Debug, Default)]
+pub struct OpProgress {
+    copied: AtomicU64,
+    total: AtomicU64,
+    cancel: AtomicBool,
+}
+
+impl OpProgress {
+    /// Completed fraction in 0..=1; `None` until the total is known
+    /// (the pre-copy size walk hasn't finished).
+    pub fn fraction(&self) -> Option<f32> {
+        let total = self.total.load(Ordering::Relaxed);
+        if total == 0 {
+            return None;
+        }
+        Some((self.copied.load(Ordering::Relaxed) as f32 / total as f32).min(1.))
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    fn canceled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// Marker error for a user-requested cancellation, so callers can
+/// report "canceled" instead of a failure. Detect with
+/// `err.is::<OpCanceled>()`.
+#[derive(Debug)]
+pub struct OpCanceled;
+
+impl std::fmt::Display for OpCanceled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "operation canceled")
+    }
+}
+
+impl std::error::Error for OpCanceled {}
 
 /// A file operation as requested by the UI. Destinations are full
 /// paths (not parent directories).
@@ -132,15 +177,28 @@ impl AppliedOp {
 
 /// Execute `op`. Blocking — run on a background executor.
 pub fn apply(op: &FileOp) -> Result<AppliedOp> {
+    apply_with_progress(op, &OpProgress::default())
+}
+
+/// Execute `op`, reporting byte progress and honoring cancellation for
+/// the copying paths (copy, and cross-device move). A canceled or
+/// failed copy removes its partial destination; a canceled cross-
+/// device move additionally leaves the source untouched. Blocking —
+/// run on a background executor.
+pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<AppliedOp> {
     match op {
         FileOp::Move { from, to } => {
             ensure_target_free(to)?;
-            move_path(from, to)?;
+            move_path(from, to, progress)?;
             Ok(AppliedOp::Moved { from: from.clone(), to: to.clone() })
         }
         FileOp::Copy { from, to } => {
             ensure_target_free(to)?;
-            copy_recursively(from, to)?;
+            progress.total.store(tree_size(from)?, Ordering::Relaxed);
+            if let Err(err) = copy_recursively(from, to, progress) {
+                remove_any(to);
+                return Err(err);
+            }
             Ok(AppliedOp::Copied { to: to.clone() })
         }
         FileOp::Rename { path, new_name } => {
@@ -164,7 +222,7 @@ pub fn undo(applied: &AppliedOp) -> Result<()> {
     match applied {
         AppliedOp::Moved { from, to } => {
             ensure_target_free(from)?;
-            move_path(to, from)
+            move_path(to, from, &OpProgress::default())
         }
         AppliedOp::Copied { to } => {
             let meta = std::fs::symlink_metadata(to)
@@ -247,12 +305,17 @@ fn ensure_target_free(to: &Path) -> Result<()> {
 }
 
 /// Rename when the OS allows it; fall back to copy+delete when the
-/// destination is on another filesystem (EXDEV).
-fn move_path(from: &Path, to: &Path) -> Result<()> {
+/// destination is on another filesystem (EXDEV). Only the fallback
+/// reports progress — a same-device rename is instant.
+fn move_path(from: &Path, to: &Path, progress: &OpProgress) -> Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {
-            copy_recursively(from, to)?;
+            progress.total.store(tree_size(from)?, Ordering::Relaxed);
+            if let Err(err) = copy_recursively(from, to, progress) {
+                remove_any(to);
+                return Err(err);
+            }
             let meta = std::fs::symlink_metadata(from)
                 .with_context(|| format!("inspecting {}", from.display()))?;
             if meta.is_dir() {
@@ -268,10 +331,30 @@ fn move_path(from: &Path, to: &Path) -> Result<()> {
     }
 }
 
-/// Copy a file or directory tree. Symlinks are followed (their targets
-/// are copied) — same as `std::fs::copy`; preserving links is a later
-/// refinement if it ever matters in practice.
-fn copy_recursively(from: &Path, to: &Path) -> Result<()> {
+/// Total bytes a copy of `path` will write (files only; directory
+/// entries themselves count as zero).
+fn tree_size(path: &Path) -> Result<u64> {
+    let meta = std::fs::metadata(path).with_context(|| format!("inspecting {}", path.display()))?;
+    if !meta.is_dir() {
+        return Ok(meta.len());
+    }
+    let mut sum = 0;
+    for dirent in std::fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
+        let dirent = dirent.with_context(|| format!("reading {}", path.display()))?;
+        sum += tree_size(&dirent.path())?;
+    }
+    Ok(sum)
+}
+
+/// Copy a file or directory tree, counting bytes into `progress` and
+/// stopping (with [`OpCanceled`]) when cancellation is requested.
+/// Symlinks are followed (their targets are copied) — same as
+/// `std::fs::copy`; preserving links is a later refinement if it ever
+/// matters in practice.
+fn copy_recursively(from: &Path, to: &Path, progress: &OpProgress) -> Result<()> {
+    if progress.canceled() {
+        return Err(anyhow::Error::new(OpCanceled));
+    }
     let meta =
         std::fs::metadata(from).with_context(|| format!("inspecting {}", from.display()))?;
     if meta.is_dir() {
@@ -280,13 +363,55 @@ fn copy_recursively(from: &Path, to: &Path) -> Result<()> {
             std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))?
         {
             let dirent = dirent.with_context(|| format!("reading {}", from.display()))?;
-            copy_recursively(&dirent.path(), &to.join(dirent.file_name()))?;
+            copy_recursively(&dirent.path(), &to.join(dirent.file_name()), progress)?;
         }
         Ok(())
     } else {
-        std::fs::copy(from, to)
-            .map(drop)
-            .with_context(|| format!("copying {} to {}", from.display(), to.display()))
+        copy_file_chunked(from, to, progress)
+    }
+}
+
+/// Chunk size for cancellable file copies: big enough to stream fast,
+/// small enough that cancellation lands promptly mid-file.
+const COPY_CHUNK: usize = 1 << 20;
+
+fn copy_file_chunked(from: &Path, to: &Path, progress: &OpProgress) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+    let mut src =
+        std::fs::File::open(from).with_context(|| format!("opening {}", from.display()))?;
+    let mut dst =
+        std::fs::File::create(to).with_context(|| format!("creating {}", to.display()))?;
+    let mut buf = vec![0u8; COPY_CHUNK];
+    loop {
+        if progress.canceled() {
+            return Err(anyhow::Error::new(OpCanceled));
+        }
+        let read = src.read(&mut buf).with_context(|| format!("reading {}", from.display()))?;
+        if read == 0 {
+            break;
+        }
+        dst.write_all(&buf[..read]).with_context(|| format!("writing {}", to.display()))?;
+        progress.copied.fetch_add(read as u64, Ordering::Relaxed);
+    }
+    // `fs::copy` preserves permissions; the chunked path must too.
+    let perms = std::fs::metadata(from)
+        .with_context(|| format!("inspecting {}", from.display()))?
+        .permissions();
+    std::fs::set_permissions(to, perms)
+        .with_context(|| format!("setting permissions on {}", to.display()))
+}
+
+/// Best-effort removal of a partial destination after a canceled or
+/// failed copy. The copy error is what the user needs to see, so
+/// cleanup problems are only logged.
+fn remove_any(path: &Path) {
+    let result = match std::fs::symlink_metadata(path) {
+        Err(_) => return, // never created
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+    };
+    if let Err(err) = result {
+        tracing::warn!("couldn't clean up partial copy at {}: {err}", path.display());
     }
 }
 
@@ -494,6 +619,46 @@ mod tests {
         let err = undo(&applied).unwrap_err();
         assert!(err.to_string().contains("already exists"));
         assert_eq!(fs::read_to_string(&from).unwrap(), "squatter");
+    }
+
+    #[test]
+    fn copy_reports_byte_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        write(&src.join("a.txt"), "12345");
+        write(&src.join("b.txt"), "123");
+        let progress = OpProgress::default();
+
+        assert_eq!(progress.fraction(), None, "no total before the copy starts");
+        apply_with_progress(
+            &FileOp::Copy { from: src, to: dir.path().join("dst") },
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(progress.total.load(Ordering::Relaxed), 8);
+        assert_eq!(progress.copied.load(Ordering::Relaxed), 8);
+        assert_eq!(progress.fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn canceled_copy_reports_cancel_and_leaves_no_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        write(&src.join("a.txt"), "data");
+        let dst = dir.path().join("dst");
+        let progress = OpProgress::default();
+        progress.request_cancel();
+
+        let err = apply_with_progress(
+            &FileOp::Copy { from: src.clone(), to: dst.clone() },
+            &progress,
+        )
+        .unwrap_err();
+        assert!(err.is::<OpCanceled>(), "expected OpCanceled, got: {err:#}");
+        assert!(!dst.exists(), "partial destination should be cleaned up");
+        assert!(src.join("a.txt").exists(), "source must be untouched");
     }
 
     #[test]
