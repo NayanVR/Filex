@@ -1105,7 +1105,7 @@ impl Workspace {
                 ui::sidebar::sidebar_row("fda-banner")
                     .text_xs()
                     .text_color(rgb(WARN))
-                    .child("⚠ Grant Full Disk Access for complete indexing")
+                    .child("⚠ Grant Full Disk Access")
                     .on_click(|_: &ClickEvent, _window, _cx| {
                         filex::index::macos::open_full_disk_access_settings();
                     }),

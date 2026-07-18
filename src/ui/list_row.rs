@@ -71,6 +71,10 @@ pub fn header_cell(
 pub fn list_row(ix: usize, is_selected: bool) -> Stateful<Div> {
     div()
         .id(ix)
+        // Fill the pane: uniform_list items otherwise shrink-wrap
+        // their content, leaving detail columns unaligned with the
+        // header and the selection background ending mid-row.
+        .w_full()
         .flex()
         .items_center()
         .gap_2()

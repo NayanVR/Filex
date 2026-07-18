@@ -46,6 +46,9 @@ pub fn sidebar_row(id: impl Into<ElementId>) -> Stateful<Div> {
         .rounded_md()
         .cursor_pointer()
         .text_sm()
+        // Long labels clip at the sidebar edge instead of painting
+        // over the neighboring pane.
+        .overflow_hidden()
         .hover(|s| s.bg(rgb(BG_HOVER)))
 }
 
