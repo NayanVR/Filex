@@ -8,8 +8,10 @@ pub const BG: u32 = 0x1e2227;
 pub const BG_PANEL: u32 = 0x23272e;
 /// Hover background for interactive rows/buttons.
 pub const BG_HOVER: u32 = 0x2f343c;
-/// Background of the selected list row.
-pub const BG_SELECTED: u32 = 0x37404d;
+/// Background of the selected list row (accent-tinted, Finder-style).
+pub const BG_SELECTED: u32 = 0x2a4a63;
+/// Alternating list-row stripe (barely lighter than [`BG`]).
+pub const BG_STRIPE: u32 = 0x22262c;
 /// Panel / control borders.
 pub const BORDER: u32 = 0x363c45;
 /// Primary text.

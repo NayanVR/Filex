@@ -3,7 +3,7 @@
 
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, rgb};
 
-use super::theme::{BG_HOVER, BG_SELECTED, BORDER, TEXT, TEXT_DIM};
+use super::theme::{BG_HOVER, BG_SELECTED, BG_STRIPE, BORDER, TEXT, TEXT_DIM};
 
 /// Fixed row height — `uniform_list` requires every row equal-height,
 /// so this constant is the single place it's defined.
@@ -81,6 +81,9 @@ pub fn list_row(ix: usize, is_selected: bool) -> Stateful<Div> {
         .h(px(ROW_HEIGHT))
         .px_3()
         .cursor_pointer()
+        // Subtle alternating stripes (Finder list view); selection and
+        // hover paint over them.
+        .when(!is_selected && ix % 2 == 1, |s| s.bg(rgb(BG_STRIPE)))
         .when(is_selected, |s| s.bg(rgb(BG_SELECTED)))
         .when(!is_selected, |s| s.hover(|s| s.bg(rgb(BG_HOVER))))
 }
