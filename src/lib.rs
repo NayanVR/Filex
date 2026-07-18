@@ -6,4 +6,5 @@
 pub mod index;
 pub mod listing;
 pub mod logging;
+pub mod ops;
 pub mod settings;
