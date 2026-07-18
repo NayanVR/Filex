@@ -12,12 +12,11 @@ use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_size, read_dir_sorted};
 
-mod search_input;
 mod thumbnails;
 mod ui;
 use filex::listing::FileKind;
-use search_input::{SearchInput, SearchInputEvent};
 use thumbnails::ThumbnailState;
+use ui::search_input::{self, SearchInput, SearchInputEvent};
 use ui::theme::{ACCENT, BG, TEXT, TEXT_DIM, WARN};
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
