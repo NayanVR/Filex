@@ -375,7 +375,7 @@ mod imp {
                 Err(err) => {
                     // EPERM without CAP_SYS_ADMIN is the expected case for
                     // ordinary users; anything else is still non-fatal.
-                    eprintln!("filex: fanotify unavailable ({err:#}); using inotify");
+                    tracing::info!("fanotify unavailable ({err:#}); using inotify");
                 }
             }
             InotifyWatcher::spawn(root, deltas).map(Self::Inotify)
@@ -543,9 +543,8 @@ mod imp {
                     Err(err) => {
                         if resolve_failures_logged < 3 {
                             resolve_failures_logged += 1;
-                            eprintln!(
-                                "filex: fanotify handle resolution failed \
-                                 (mask {:#x}): {err}",
+                            tracing::warn!(
+                                "fanotify handle resolution failed (mask {:#x}): {err}",
                                 event.mask
                             );
                         }
@@ -650,8 +649,8 @@ mod imp {
                 .with_context(|| format!("registering watches under {}", root.display()))?;
             let degraded = Arc::new(AtomicBool::new(registry.is_degraded()));
             if registry.is_degraded() {
-                eprintln!(
-                    "filex: inotify watch budget ({budget}) exhausted; coverage is \
+                tracing::warn!(
+                    "inotify watch budget ({budget}) exhausted; coverage is \
                      partial — reconciling every {}s (raise \
                      fs.inotify.max_user_watches for full coverage)",
                     reconcile_interval.as_secs()

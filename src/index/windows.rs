@@ -213,7 +213,7 @@ mod imp {
         let event = match unsafe { CreateEventW(None, false, false, None) } {
             Ok(event) => VolumeHandle(event),
             Err(err) => {
-                eprintln!("filex: CreateEventW for change notification failed: {err}");
+                tracing::warn!("CreateEventW for change notification failed: {err}");
                 return;
             }
         };
@@ -241,8 +241,8 @@ mod imp {
                 )
             };
             if let Err(err) = issued {
-                eprintln!(
-                    "filex: ReadDirectoryChangesW on {} failed to start: {err}",
+                tracing::warn!(
+                    "ReadDirectoryChangesW on {} failed to start: {err}",
                     root.display()
                 );
                 break;
@@ -269,8 +269,8 @@ mod imp {
                     // Cancellation (drop) is expected; anything else must
                     // be visible — a silent break means silent staleness.
                     if err.code() != ERROR_OPERATION_ABORTED.to_hresult() {
-                        eprintln!(
-                            "filex: change notification on {} failed: {err}",
+                        tracing::warn!(
+                            "change notification on {} failed: {err}",
                             root.display()
                         );
                     }
@@ -365,12 +365,12 @@ mod imp {
                 let reader = match stream.try_clone() {
                     Ok(reader) => reader,
                     Err(err) => {
-                        eprintln!("filex: pipe clone failed: {err}");
+                        tracing::warn!("pipe clone failed: {err}");
                         return;
                     }
                 };
                 if let Err(err) = crate::index::ipc::serve_connection(reader, stream, &*host) {
-                    eprintln!("filex: ipc connection ended with error: {err:#}");
+                    tracing::warn!("ipc connection ended with error: {err:#}");
                 }
             })?;
         }
@@ -579,7 +579,7 @@ mod imp {
 
         let (index, orphans) = crate::index::usn::build_index_from_mft(root, root_frn, &records);
         if orphans > 0 {
-            eprintln!("filex: MFT enumeration produced {orphans} unreachable records (skipped)");
+            tracing::warn!("MFT enumeration produced {orphans} unreachable records (skipped)");
         }
         Ok(UsnBootstrap { index, journal })
     }
@@ -703,7 +703,7 @@ mod imp {
                     // means records were lost: reconcile with a rescan.
                     use windows::Win32::Foundation::ERROR_OPERATION_ABORTED;
                     if err.code() != ERROR_OPERATION_ABORTED.to_hresult() {
-                        eprintln!("filex: USN journal read failed ({err}); rescanning");
+                        tracing::warn!("USN journal read failed ({err}); rescanning");
                         deltas
                             .send(vec![FsDelta::Rescan { path: root.to_path_buf() }])
                             .ok();

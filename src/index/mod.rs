@@ -667,7 +667,7 @@ impl Drop for LiveIndex {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Err(err) = persist::save(&index, persistence.checkpoint(), &persistence.path) {
-                eprintln!("filex: failed to save index snapshot: {err:#}");
+                tracing::error!("failed to save index snapshot: {err:#}");
             }
         }
     }
@@ -714,7 +714,7 @@ pub fn start_live_index_with_snapshot(
         match persist::load(path, &canonical) {
             Ok(snapshot) => Some(snapshot),
             Err(err) => {
-                eprintln!("filex: ignoring unusable index snapshot: {err:#}");
+                tracing::warn!("ignoring unusable index snapshot: {err:#}");
                 None
             }
         }
@@ -756,7 +756,7 @@ fn assemble_live_index(
                 return; // unchanged since the last periodic save
             }
             if let Err(err) = persist::save(index, checkpoint, &path) {
-                eprintln!("filex: periodic snapshot save failed: {err:#}");
+                tracing::error!("periodic snapshot save failed: {err:#}");
             }
         }) as watcher::SaveHook
     });
@@ -811,7 +811,7 @@ fn platform_start(
     let fs_watcher = match spawned {
         Ok(watcher) => Some(watcher),
         Err(err) => {
-            eprintln!("filex: live index updates disabled: {err:#}");
+            tracing::warn!("live index updates disabled: {err:#}");
             None
         }
     };
@@ -866,7 +866,7 @@ fn platform_start(
                         && (next_usn as i64) <= info.next_usn
                 }
                 Err(err) => {
-                    eprintln!("filex: USN journal query failed: {err:#}");
+                    tracing::warn!("USN journal query failed: {err:#}");
                     false
                 }
             };
@@ -895,7 +895,7 @@ fn platform_start(
                             on_change,
                         );
                     }
-                    Err(err) => eprintln!("filex: USN journal watcher failed: {err:#}"),
+                    Err(err) => tracing::warn!("USN journal watcher failed: {err:#}"),
                 }
             }
         }
@@ -917,7 +917,7 @@ fn platform_start(
                         (Some(PlatformWatcher::Usn(watcher)), source)
                     }
                     Err(err) => {
-                        eprintln!("filex: USN journal watcher failed: {err:#}");
+                        tracing::warn!("USN journal watcher failed: {err:#}");
                         (None, CheckpointSource::Untracked)
                     }
                 };
@@ -935,9 +935,7 @@ fn platform_start(
             }
             Err(err) => {
                 // Expected without elevation: fall through to RDCW.
-                eprintln!(
-                    "filex: USN fast path unavailable ({err:#}); using directory watching"
-                );
+                tracing::info!("USN fast path unavailable ({err:#}); using directory watching");
             }
         }
     }
@@ -946,7 +944,7 @@ fn platform_start(
     let fs_watcher = match windows::DirChangesWatcher::spawn(&canonical, delta_tx.clone()) {
         Ok(watcher) => Some(PlatformWatcher::Rdcw(watcher)),
         Err(err) => {
-            eprintln!("filex: live index updates disabled: {err:#}");
+            tracing::warn!("live index updates disabled: {err:#}");
             None
         }
     };

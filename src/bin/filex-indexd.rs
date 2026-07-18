@@ -24,6 +24,7 @@ fn main() -> anyhow::Result<()> {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    let _logging_guard = filex::logging::init("filex-indexd");
     let mut roots: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if roots.is_empty() {
         roots = manager::default_roots_file()
@@ -43,13 +44,13 @@ fn main() -> anyhow::Result<()> {
     let mut live_indexes = Vec::new();
     let mut host_roots = Vec::new();
     for root in roots {
-        eprintln!("filex-indexd: indexing {}", root.display());
+        tracing::info!("indexing {}", root.display());
         match start_live_index(&root, || {}) {
             Ok(live) => {
                 host_roots.push((root, live.index.clone()));
                 live_indexes.push(live);
             }
-            Err(err) => eprintln!("filex-indexd: skipping {}: {err:#}", root.display()),
+            Err(err) => tracing::warn!("skipping {}: {err:#}", root.display()),
         }
     }
     if host_roots.is_empty() {
@@ -57,7 +58,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let host: Arc<dyn IndexHost> = Arc::new(MultiRootHost { roots: host_roots });
-    eprintln!("filex-indexd: serving on {PIPE_NAME}");
+    tracing::info!("serving on {PIPE_NAME}");
     windows::run_pipe_server(PIPE_NAME, host, None)
 }
 

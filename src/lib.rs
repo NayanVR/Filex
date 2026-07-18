@@ -5,4 +5,5 @@
 
 pub mod index;
 pub mod listing;
+pub mod logging;
 pub mod settings;

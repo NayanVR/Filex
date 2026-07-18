@@ -240,7 +240,7 @@ impl Workspace {
                         true
                     }
                     Err(err) => {
-                        eprintln!("filex: index service lost ({err:#}); indexing locally");
+                        tracing::warn!("index service lost ({err:#}); indexing locally");
                         this.service_disconnected(cx);
                         false
                     }
@@ -433,7 +433,7 @@ impl Workspace {
         cx.background_executor()
             .spawn(async move {
                 if let Err(err) = manager::save_roots(&file, &roots) {
-                    eprintln!("filex: failed to save root list: {err:#}");
+                    tracing::error!("failed to save root list: {err:#}");
                 }
             })
             .detach();
@@ -646,7 +646,7 @@ impl Workspace {
                             cx.notify();
                         }
                         Err(err) => {
-                            eprintln!("filex: service search failed ({err:#})");
+                            tracing::warn!("service search failed ({err:#})");
                             this.service_disconnected(cx);
                         }
                     }
@@ -1012,6 +1012,7 @@ impl Render for Workspace {
 }
 
 fn main() {
+    let _logging_guard = filex::logging::init("filex");
     Application::new().run(|cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([

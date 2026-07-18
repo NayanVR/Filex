@@ -259,7 +259,7 @@ impl IndexWriter {
                                 on_change();
                             }
                             Err(err) => {
-                                eprintln!("filex: root rescan of {} failed: {err:#}", root.display());
+                                tracing::warn!("root rescan of {} failed: {err:#}", root.display());
                             }
                         }
                         continue;
@@ -284,7 +284,7 @@ impl IndexWriter {
                             match apply(&mut index, delta) {
                                 Ok(()) => applied_any = true,
                                 Err(err) => {
-                                    eprintln!("filex: failed to apply {delta:?}: {err:#}");
+                                    tracing::warn!("failed to apply {delta:?}: {err:#}");
                                 }
                             }
                         }
