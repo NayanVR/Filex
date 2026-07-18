@@ -11,6 +11,7 @@ use gpui::{
 use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
+use filex::ops::{self, FileOp};
 use filex::settings::SortBy;
 
 mod settings_store;
@@ -22,7 +23,7 @@ use thumbnails::ThumbnailState;
 use ui::search_input::{self, SearchInput, SearchInputEvent};
 use ui::theme::{ACCENT, BG, TEXT, TEXT_DIM, WARN};
 
-actions!(filex, [Quit, CloseWindow, GoUp, ToggleSettings]);
+actions!(filex, [Quit, CloseWindow, GoUp, ToggleSettings, RenameSelected, Undo]);
 
 /// Open a file with the platform's default application. Detached — the
 /// launched app owns its own lifetime.
@@ -96,6 +97,16 @@ struct SearchRow {
     is_dir: bool,
 }
 
+/// A rename-in-place in progress: which browse row is being edited and
+/// the input that owns the edited text (the SearchInput element reused
+/// as a transient editor, per docs/roadmap.md).
+struct RenameState {
+    ix: usize,
+    input: gpui::Entity<SearchInput>,
+    /// Watches for Dismissed (escape) to cancel.
+    _subscription: gpui::Subscription,
+}
+
 struct Workspace {
     focus_handle: FocusHandle,
     cwd: PathBuf,
@@ -126,6 +137,10 @@ struct Workspace {
     /// The settings pane replaces the browse list while open (search
     /// still takes precedence, Spotlight-style).
     settings_open: bool,
+    /// In-flight rename; `None` when no row is being edited.
+    renaming: Option<RenameState>,
+    /// Undo stack of completed file operations.
+    journal: ops::Journal,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
@@ -155,6 +170,7 @@ impl Workspace {
                 }
             }
             SearchInputEvent::BackspaceWhenEmpty => this.go_up(cx),
+            SearchInputEvent::Dismissed => {} // escape just clears the query
         });
         let settings = cx.new(SettingsStore::new);
         // Settings changes re-derive everything visible that depends on
@@ -189,6 +205,8 @@ impl Workspace {
             search_generation: 0,
             selected: None,
             settings_open: false,
+            renaming: None,
+            journal: ops::Journal::default(),
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
@@ -464,6 +482,9 @@ impl Workspace {
                 self.entries = entries;
                 self.load_error = None;
                 self.selected = None;
+                // Any in-flight rename points at rows that no longer
+                // exist; drop the editor.
+                self.renaming = None;
                 self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
             }
             Err(err) => {
@@ -607,12 +628,125 @@ impl Workspace {
         });
     }
 
+    /// Begin renaming the selected browse entry (F2): the row's name
+    /// cell becomes an input prefilled with the current name, content
+    /// preselected so typing replaces it.
+    fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.query.is_empty() || self.settings_open {
+            return;
+        }
+        let Some(ix) = self.selected else { return };
+        let Some(entry) = self.entries.get(ix) else { return };
+        let name = entry.name.clone();
+        let input = cx.new(SearchInput::new);
+        input.update(cx, |input, cx| {
+            input.set_placeholder("new name", cx);
+            input.set_text(name, cx);
+            input.select_all_text(cx);
+        });
+        let subscription =
+            cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
+                if matches!(event, SearchInputEvent::Dismissed) {
+                    this.cancel_rename(window, cx);
+                }
+            });
+        window.focus(&input.focus_handle(cx));
+        self.renaming = Some(RenameState { ix, input, _subscription: subscription });
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            window.focus(&self.search_input.focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(RenameState { ix, input, .. }) = self.renaming.take() else {
+            return;
+        };
+        window.focus(&self.search_input.focus_handle(cx));
+        cx.notify();
+        let Some(entry) = self.entries.get(ix) else { return };
+        let new_name = input.read(cx).text().trim().to_string();
+        if new_name.is_empty() || new_name == entry.name {
+            return; // nothing to do — treated as cancel
+        }
+        self.run_op(FileOp::Rename { path: entry.path.clone(), new_name }, cx);
+    }
+
+    /// Execute a file operation on the background executor; success
+    /// lands in the undo journal and refreshes the listing. Ops never
+    /// touch the index — the watchers pick the change up as deltas.
+    fn run_op(&mut self, op: FileOp, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { ops::apply(&op) }).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(applied) => {
+                        this.notice = Some(applied.describe().into());
+                        this.journal.record(applied);
+                    }
+                    Err(err) => this.notice = Some(format!("{err:#}").into()),
+                }
+                let cwd = this.cwd.clone();
+                this.load_dir(&cwd, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Undo the most recent file operation (cmd-z / ctrl-z). The disk
+    /// work runs off-thread; a failed undo goes back on the journal so
+    /// the user can fix the cause and retry.
+    fn undo_last(&mut self, cx: &mut Context<Self>) {
+        let Some(applied) = self.journal.pop() else {
+            self.notice = Some("nothing to undo".into());
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let applied = applied.clone();
+                    async move { ops::undo(&applied) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.notice = Some(format!("undid: {}", applied.describe()).into()),
+                    Err(err) => {
+                        this.notice = Some(format!("undo failed: {err:#}").into());
+                        this.journal.restore(applied);
+                    }
+                }
+                let cwd = this.cwd.clone();
+                this.load_dir(&cwd, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// List-navigation keys. Text editing lives in the SearchInput (which
     /// is focused); unhandled keys bubble up here.
-    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform || keystroke.modifiers.control {
             return; // shortcuts are handled by actions
+        }
+        if self.renaming.is_some() {
+            // Escape is consumed by the input itself (Dismissed event);
+            // enter lands here and commits.
+            if keystroke.key.as_str() == "enter" {
+                self.commit_rename(window, cx);
+            }
+            return;
         }
         match keystroke.key.as_str() {
             "up" => self.move_selection(-1, cx),
@@ -1056,10 +1190,27 @@ impl Workspace {
                         let is_selected = this.selected == Some(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let icon = this.render_icon_cell(&name, &path, is_dir, cx);
+                        let rename_input = this
+                            .renaming
+                            .as_ref()
+                            .filter(|rename| rename.ix == ix)
+                            .map(|rename| rename.input.clone());
+                        let name_cell = match rename_input {
+                            Some(input) => div()
+                                .flex_1()
+                                .px_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(ACCENT))
+                                .text_sm()
+                                .child(input)
+                                .into_any_element(),
+                            None => div().flex_1().text_sm().child(name).into_any_element(),
+                        };
                         Some(
                             ui::list_row::list_row(ix, is_selected)
                                 .child(icon)
-                                .child(div().flex_1().text_sm().child(name))
+                                .child(name_cell)
                                 .child(ui::list_row::detail_cell(
                                     ui::list_row::MODIFIED_COL_WIDTH,
                                     format_modified(modified, std::time::SystemTime::now()),
@@ -1164,8 +1315,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleSettings, _window, cx| {
                 this.toggle_settings(cx);
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                this.handle_key(event, cx);
+            .on_action(cx.listener(|this, _: &RenameSelected, window, cx| {
+                this.start_rename(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Undo, _window, cx| {
+                this.undo_last(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.handle_key(event, window, cx);
             }))
             .flex()
             .flex_col()
@@ -1204,6 +1361,8 @@ fn main() {
             KeyBinding::new("cmd-up", GoUp, None),
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-,", ToggleSettings, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-z", Undo, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-q", Quit, None),
             #[cfg(not(target_os = "macos"))]
@@ -1212,6 +1371,9 @@ fn main() {
             KeyBinding::new("alt-up", GoUp, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-,", ToggleSettings, None),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-z", Undo, None),
+            KeyBinding::new("f2", RenameSelected, None),
         ]);
         search_input::bind_keys(cx);
         cx.on_window_closed(|cx| {

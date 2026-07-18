@@ -44,6 +44,10 @@ pub enum SearchInputEvent {
     Changed(String),
     /// Backspace pressed while empty — the workspace navigates up.
     BackspaceWhenEmpty,
+    /// Escape pressed (the content is also cleared). Consumers that
+    /// use the input as a transient editor (rename-in-place) treat
+    /// this as cancel; the search box ignores it.
+    Dismissed,
 }
 
 pub struct SearchInput {
@@ -77,6 +81,26 @@ impl SearchInput {
 
     pub fn is_empty(&self) -> bool {
         self.content.is_empty()
+    }
+
+    /// Current content. Used by non-search consumers (rename-in-place)
+    /// that read the value on commit instead of subscribing to Changed.
+    pub fn text(&self) -> &str {
+        &self.content
+    }
+
+    pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = text.into();
+        cx.notify();
+    }
+
+    /// Select the whole content, e.g. so a prefilled rename replaces on
+    /// first keystroke. (The action-handler `select_all` needs a window;
+    /// this programmatic variant doesn't.)
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
     }
 
     /// Replace the whole content programmatically (e.g. clearing after a
@@ -117,6 +141,7 @@ impl SearchInput {
         if !self.content.is_empty() {
             self.set_text("", cx);
         }
+        cx.emit(SearchInputEvent::Dismissed);
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
