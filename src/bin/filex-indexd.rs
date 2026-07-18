@@ -27,15 +27,24 @@ fn main() -> anyhow::Result<()> {
     let _logging_guard = filex::logging::init("filex-indexd");
     let mut roots: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if roots.is_empty() {
-        roots = manager::default_roots_file()
-            .as_deref()
-            .map(manager::load_roots)
-            .unwrap_or_default();
+        // Same sources as the UI: settings.json, with the legacy
+        // roots.list as first-launch migration / fallback.
+        let legacy = manager::default_roots_file();
+        roots = match filex::settings::default_settings_file() {
+            Some(file) => match filex::settings::Settings::load(&file, legacy.as_deref()) {
+                Ok(settings) => settings.roots,
+                Err(err) => {
+                    tracing::warn!("unusable settings file ({err:#}); using legacy roots.list");
+                    legacy.as_deref().map(manager::load_roots).unwrap_or_default()
+                }
+            },
+            None => legacy.as_deref().map(manager::load_roots).unwrap_or_default(),
+        };
     }
     if roots.is_empty() {
         anyhow::bail!(
             "no roots to index: pass paths as arguments (e.g. filex-indexd C:\\) \
-             or configure roots.list"
+             or configure settings.json"
         );
     }
 

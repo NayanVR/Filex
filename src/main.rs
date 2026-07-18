@@ -12,9 +12,11 @@ use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_size, read_dir_sorted};
 
+mod settings_store;
 mod thumbnails;
 mod ui;
 use filex::listing::FileKind;
+use settings_store::{SettingsEvent, SettingsStore};
 use thumbnails::ThumbnailState;
 use ui::search_input::{self, SearchInput, SearchInputEvent};
 use ui::theme::{ACCENT, BG, TEXT, TEXT_DIM, WARN};
@@ -99,7 +101,8 @@ struct Workspace {
     entries: Vec<Entry>,
     load_error: Option<SharedString>,
     roots: Vec<RootSlot>,
-    roots_file: Option<PathBuf>,
+    settings: gpui::Entity<SettingsStore>,
+    _settings_subscription: gpui::Subscription,
     /// Transient user-facing message (e.g. why a root couldn't be added).
     notice: Option<SharedString>,
     #[cfg(target_os = "macos")]
@@ -125,11 +128,10 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn configured_roots() -> Vec<PathBuf> {
-        let mut configured = manager::default_roots_file()
-            .as_deref()
-            .map(manager::load_roots)
-            .unwrap_or_default();
+    /// Roots to index: from settings, defaulting to the home directory
+    /// on a fresh install.
+    fn configured_roots(&self, cx: &App) -> Vec<PathBuf> {
+        let mut configured = self.settings.read(cx).settings().roots.clone();
         if configured.is_empty()
             && let Some(home) = std::env::home_dir()
         {
@@ -150,13 +152,25 @@ impl Workspace {
             }
             SearchInputEvent::BackspaceWhenEmpty => this.go_up(cx),
         });
+        let settings = cx.new(SettingsStore::new);
+        // Settings changes re-derive everything visible that depends on
+        // them (today: the hidden-file filter on the browse list).
+        let settings_subscription =
+            cx.subscribe(&settings, |this, _store, event, cx| match event {
+                SettingsEvent::Changed => {
+                    let cwd = this.cwd.clone();
+                    this.load_dir(&cwd, cx);
+                    cx.notify();
+                }
+            });
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
             entries: Vec::new(),
             load_error: None,
             roots: Vec::new(),
-            roots_file: manager::default_roots_file(),
+            settings,
+            _settings_subscription: settings_subscription,
             notice: None,
             #[cfg(target_os = "macos")]
             fda_missing: false,
@@ -174,14 +188,14 @@ impl Workspace {
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
         };
-        this.load_dir(&cwd);
+        this.load_dir(&cwd, cx);
         // Windows probes for the elevated index service first and only
         // falls back to in-process indexing if it's absent; elsewhere
         // indexing is always in-process.
         #[cfg(target_os = "windows")]
         this.spawn_service_probe(cx);
         #[cfg(not(target_os = "windows"))]
-        for path in Self::configured_roots() {
+        for path in this.configured_roots(cx) {
             this.add_root_slot(path, cx);
         }
         this.spawn_fda_check(cx);
@@ -205,7 +219,7 @@ impl Workspace {
                         this.spawn_service_status_poll(cx);
                     }
                     None => {
-                        for path in Self::configured_roots() {
+                        for path in this.configured_roots(cx) {
                             this.add_root_slot(path, cx);
                         }
                     }
@@ -261,7 +275,7 @@ impl Workspace {
         self.service = None;
         self.service_status.clear();
         if self.roots.is_empty() {
-            for path in Self::configured_roots() {
+            for path in self.configured_roots(cx) {
                 self.add_root_slot(path, cx);
             }
         }
@@ -425,23 +439,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Roots live in settings (the store persists + notifies).
     fn persist_roots(&self, cx: &mut Context<Self>) {
-        let Some(file) = self.roots_file.clone() else {
-            return;
-        };
         let roots: Vec<PathBuf> = self.roots.iter().map(|slot| slot.path.clone()).collect();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(err) = manager::save_roots(&file, &roots) {
-                    tracing::error!("failed to save root list: {err:#}");
-                }
-            })
-            .detach();
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| settings.roots = roots);
+        });
     }
 
-    fn load_dir(&mut self, path: &Path) {
+    fn load_dir(&mut self, path: &Path, cx: &App) {
         match read_dir_sorted(path) {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                if !self.settings.read(cx).settings().show_hidden_files {
+                    entries.retain(|entry| !entry.is_hidden);
+                }
                 self.cwd = path.to_path_buf();
                 self.entries = entries;
                 self.load_error = None;
@@ -497,7 +508,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let kind = FileKind::of(name, is_dir);
-        if kind == FileKind::Image {
+        if kind == FileKind::Image && self.settings.read(cx).settings().thumbnails_enabled {
             match self.thumbnails.get(path) {
                 Some(ThumbnailState::Ready(imagery)) => {
                     return ui::icon::thumbnail_icon(imagery.clone());
@@ -569,7 +580,7 @@ impl Workspace {
     }
 
     fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.load_dir(&path);
+        self.load_dir(&path, cx);
         cx.notify();
     }
 

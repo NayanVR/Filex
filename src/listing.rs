@@ -11,6 +11,39 @@ pub struct Entry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub size: u64,
+    /// Hidden by the platform's convention; the browse view filters on
+    /// this unless the show-hidden-files setting is on.
+    pub is_hidden: bool,
+}
+
+/// Whether an entry counts as hidden. The dotfile convention applies on
+/// every platform (macOS Finder hides dotfiles too, and dot-named files
+/// on Windows are almost always ported Unix tooling); Windows adds the
+/// FILE_ATTRIBUTE_HIDDEN bit and macOS the Finder UF_HIDDEN flag, both
+/// read from metadata we already fetched for the size.
+fn is_hidden_entry(name: &str, metadata: Option<&std::fs::Metadata>) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(meta) = metadata {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        if meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 {
+            return true;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(meta) = metadata {
+        use std::os::macos::fs::MetadataExt as _;
+        const UF_HIDDEN: u32 = 0x8000;
+        if meta.st_flags() & UF_HIDDEN != 0 {
+            return true;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let _ = metadata;
+    false
 }
 
 /// Read a directory and return entries sorted directories-first, then
@@ -24,12 +57,15 @@ pub fn read_dir_sorted(path: &Path) -> Result<Vec<Entry>> {
         .filter_map(|dirent| {
             let dirent = dirent.ok()?;
             let file_type = dirent.file_type().ok()?;
-            let size = dirent.metadata().map_or(0, |m| m.len());
+            let metadata = dirent.metadata().ok();
+            let name = dirent.file_name().to_string_lossy().into_owned();
+            let is_hidden = is_hidden_entry(&name, metadata.as_ref());
             Some(Entry {
-                name: dirent.file_name().to_string_lossy().into_owned(),
+                name,
                 path: dirent.path(),
                 is_dir: file_type.is_dir(),
-                size,
+                size: metadata.map_or(0, |m| m.len()),
+                is_hidden,
             })
         })
         .collect();
@@ -126,6 +162,7 @@ mod tests {
             path: PathBuf::from(name),
             is_dir,
             size: 0,
+            is_hidden: false,
         }
     }
 
@@ -168,6 +205,25 @@ mod tests {
         assert!(!entries[1].is_dir);
         assert_eq!(entries[1].size, 5);
         assert_eq!(entries[1].path, dir.path().join("file.txt"));
+    }
+
+    #[test]
+    fn dotfiles_are_flagged_hidden_but_still_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".dotfile"), b"").unwrap();
+        fs::write(dir.path().join("visible.txt"), b"").unwrap();
+
+        let entries = read_dir_sorted(dir.path()).unwrap();
+        let flags: Vec<(&str, bool)> =
+            entries.iter().map(|e| (e.name.as_str(), e.is_hidden)).collect();
+        assert_eq!(flags, [(".dotfile", true), ("visible.txt", false)]);
+    }
+
+    #[test]
+    fn hidden_classification_is_name_based_without_metadata() {
+        assert!(is_hidden_entry(".git", None));
+        assert!(!is_hidden_entry("src", None));
+        assert!(!is_hidden_entry("a.txt", None));
     }
 
     #[test]
