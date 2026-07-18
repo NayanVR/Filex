@@ -23,7 +23,10 @@ use thumbnails::ThumbnailState;
 use ui::search_input::{self, SearchInput, SearchInputEvent};
 use ui::theme::{ACCENT, BG, TEXT, TEXT_DIM, WARN};
 
-actions!(filex, [Quit, CloseWindow, GoUp, ToggleSettings, RenameSelected, Undo]);
+actions!(
+    filex,
+    [Quit, CloseWindow, GoUp, ToggleSettings, RenameSelected, DeleteSelected, Undo]
+);
 
 /// Open a file with the platform's default application. Detached — the
 /// launched app owns its own lifetime.
@@ -141,6 +144,9 @@ struct Workspace {
     renaming: Option<RenameState>,
     /// Undo stack of completed file operations.
     journal: ops::Journal,
+    /// Two-press delete confirmation: the path armed by the first
+    /// press; the second press on the same path deletes.
+    pending_delete: Option<PathBuf>,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
@@ -207,6 +213,7 @@ impl Workspace {
             settings_open: false,
             renaming: None,
             journal: ops::Journal::default(),
+            pending_delete: None,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
@@ -482,9 +489,10 @@ impl Workspace {
                 self.entries = entries;
                 self.load_error = None;
                 self.selected = None;
-                // Any in-flight rename points at rows that no longer
-                // exist; drop the editor.
+                // Any in-flight rename or armed delete points at rows
+                // that no longer exist; drop them.
                 self.renaming = None;
+                self.pending_delete = None;
                 self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
             }
             Err(err) => {
@@ -674,6 +682,29 @@ impl Workspace {
             return; // nothing to do — treated as cancel
         }
         self.run_op(FileOp::Rename { path: entry.path.clone(), new_name }, cx);
+    }
+
+    /// Move the selected browse entry to the OS trash. With
+    /// confirm_delete on (the default), the first press arms and the
+    /// second press on the same entry deletes — a modal dialog can
+    /// replace this once conflict prompts exist.
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.is_some() || !self.query.is_empty() || self.settings_open {
+            return;
+        }
+        let Some(entry) = self.selected.and_then(|ix| self.entries.get(ix)) else {
+            return;
+        };
+        let (path, name) = (entry.path.clone(), entry.name.clone());
+        let confirm = self.settings.read(cx).settings().confirm_delete;
+        if confirm && self.pending_delete.as_ref() != Some(&path) {
+            self.pending_delete = Some(path);
+            self.notice = Some(format!("press again to move “{name}” to the trash").into());
+            cx.notify();
+            return;
+        }
+        self.pending_delete = None;
+        self.run_op(FileOp::Delete { path }, cx);
     }
 
     /// Execute a file operation on the background executor; success
@@ -960,6 +991,19 @@ impl Workspace {
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.settings.update(cx, |store, cx| {
                         store.update(cx, |s| s.show_hidden_files = !s.show_hidden_files);
+                    });
+                })),
+            )
+            .child(
+                ui::settings_pane::toggle_row(
+                    "confirm-delete",
+                    "Confirm before deleting",
+                    "First press arms; a second press moves the file to the trash",
+                    settings.confirm_delete,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.confirm_delete = !s.confirm_delete);
                     });
                 })),
             )
@@ -1320,6 +1364,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &RenameSelected, window, cx| {
                 this.start_rename(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &DeleteSelected, _window, cx| {
+                this.delete_selected(cx);
+            }))
             .on_action(cx.listener(|this, _: &Undo, _window, cx| {
                 this.undo_last(cx);
             }))
@@ -1365,6 +1412,11 @@ fn main() {
             KeyBinding::new("cmd-,", ToggleSettings, None),
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-z", Undo, None),
+            // Finder's delete shortcut. Plain Delete can't work here:
+            // the always-focused search input consumes it as text
+            // editing.
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-backspace", DeleteSelected, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-q", Quit, None),
             #[cfg(not(target_os = "macos"))]
@@ -1375,6 +1427,10 @@ fn main() {
             KeyBinding::new("ctrl-,", ToggleSettings, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-z", Undo, None),
+            // Not plain Delete: the always-focused search input
+            // consumes that for text editing.
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-delete", DeleteSelected, None),
             KeyBinding::new("f2", RenameSelected, None),
         ]);
         search_input::bind_keys(cx);
