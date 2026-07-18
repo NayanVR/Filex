@@ -952,22 +952,10 @@ impl Workspace {
 
     fn render_search_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if !self.any_root_ready() {
-            return div()
-                .flex_1()
-                .p_4()
-                .text_sm()
-                .text_color(rgb(TEXT_DIM))
-                .child("still indexing — results will appear when ready…")
-                .into_any_element();
+            return ui::pane::empty_state("still indexing — results will appear when ready…");
         }
         if self.results.is_empty() {
-            return div()
-                .flex_1()
-                .p_4()
-                .text_sm()
-                .text_color(rgb(TEXT_DIM))
-                .child(format!("no matches for “{}”", self.query))
-                .into_any_element();
+            return ui::pane::empty_state(format!("no matches for “{}”", self.query));
         }
         self.render_search_results(cx).into_any_element()
     }
