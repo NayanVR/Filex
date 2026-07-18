@@ -50,9 +50,37 @@ use it:
   are never gated on or slowed by an animation, and nothing
   layout-animates inside a `uniform_list` row. When in doubt, measure.
 
+## Standing principle from Phase 2 on: reusable components, reviewable code
+
+Also decided 2026-07-17: Phase 2+ code is written to be **reviewed by a
+human later**, not just to work. Concretely:
+
+- **Extract reusable UI components** instead of growing `main.rs`
+  (already ~1200 lines): a `src/ui/` module family — list rows, icon
+  cell, sidebar sections/rows, panels, menus, buttons, the settings
+  form controls — each a small, documented, self-contained building
+  block styled from shared palette constants. The first Phase 2a
+  session should begin by carving the existing render code into these
+  before adding features on top.
+- **One concern per commit**, with messages that explain why (the
+  existing history is the standard to keep). Don't mix drive-by
+  refactors into feature commits; land the refactor first, then the
+  feature on top.
+- **Keep logic out of the view layer** so it stays unit-testable (the
+  existing lib/app split is the model — extend it: sort comparators,
+  settings, the undo journal all belong in the lib with tests).
+- Doc comments on every public component and on anything with a
+  non-obvious constraint; consistent naming with the existing code.
+
 ## Phase 2a — Explorer capabilities (primary track, macOS-friendly)
 
 Work in this order; each block is roughly one session.
+
+### 0. Carve main.rs into `src/ui/` components (per the reviewability principle)
+
+Pure refactor, no behavior change: extract row/icon/sidebar/status-bar
+rendering into documented reusable components before Phase 2a features
+build on them. Small session; makes every later diff smaller.
 
 ### 1. Settings foundation (do first — everything after generates settings)
 
