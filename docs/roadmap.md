@@ -145,6 +145,20 @@ with block 1.
 
 ### 3. File operations (the big block; likely 2+ sessions)
 
+**Progress 2026-07-18 (slice 2):** delete-to-trash with undo. Trash
+crate evaluated per the plan: it does delete+restore on Windows/Linux
+(`os_limited` — deleted items matched in the trash listing, stored as
+identity handles, restored through the OS), but can't undo on macOS
+(Finder path = osascript + permission prompts; its NSFileManager path
+discards the resultingItemURL). So macOS got a small hand-rolled
+NSFileManager backend (objc2-foundation) that keeps the trashed URL —
+restore is a rename back, verified against the real Trash on the dev
+machine. UI: cmd-backspace / ctrl-delete with a two-press confirm
+honoring confirm_delete (modal dialog can replace it when conflict
+prompts land); plain Delete is unusable while the search input is
+always focused — revisit focus. delete_to_trash setting is
+deliberately unconsumed (there is no permanent-delete path).
+
 **Progress 2026-07-18 (slice 1 of 2+):** `filex::ops` in the lib —
 `apply` for Move/Copy/Rename returning an `AppliedOp` that `undo`
 reverses (copy-undo removes the copy; cross-device moves fall back to
