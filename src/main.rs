@@ -1384,13 +1384,25 @@ fn main() {
         .detach();
 
         let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
+        // macOS: unified-titlebar look — the system titlebar goes
+        // transparent and the traffic lights sit inset in our top bar
+        // (which pads left to clear them). Elsewhere the native
+        // titlebar stays.
+        #[cfg(target_os = "macos")]
+        let titlebar = TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(
+                px(12.),
+                px((ui::top_bar::TOP_BAR_HEIGHT - 12.) / 2.),
+            )),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let titlebar = TitlebarOptions { title: Some("filex".into()), ..Default::default() };
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("filex".into()),
-                    ..Default::default()
-                }),
+                titlebar: Some(titlebar),
                 ..Default::default()
             },
             |window, cx| {

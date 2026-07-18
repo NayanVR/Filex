@@ -5,17 +5,27 @@ use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, rgb};
 
 use super::theme::{ACCENT, BG_HOVER, BG_PANEL, BORDER, TEXT, TEXT_DIM};
 
+/// Bar height. The macOS titlebar is transparent and the traffic
+/// lights are inset into this bar, so their position (set at window
+/// creation) is derived from it.
+pub const TOP_BAR_HEIGHT: f32 = 40.;
+
 /// The bar container; children flow left-to-right.
 pub fn top_bar() -> Div {
-    div()
+    let bar = div()
         .flex()
         .items_center()
         .gap_2()
-        .h(px(40.))
+        .h(px(TOP_BAR_HEIGHT))
         .px_3()
         .border_b_1()
         .border_color(rgb(BORDER))
-        .bg(rgb(BG_PANEL))
+        .bg(rgb(BG_PANEL));
+    // Clear the inset traffic lights (unified-titlebar look): the
+    // three buttons start at x=12 and span ~52px.
+    #[cfg(target_os = "macos")]
+    let bar = bar.pl(px(76.));
+    bar
 }
 
 /// A small glyph button ("↑"). Callers chain `.on_click`.
