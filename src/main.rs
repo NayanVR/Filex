@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use futures::StreamExt as _;
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, FocusHandle, Focusable as _, KeyBinding,
-    KeyDownEvent, ScrollStrategy, SharedString, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size, uniform_list,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, rgb, size, uniform_list,
 };
 
 use filex::index::watcher::SharedIndex;
@@ -116,6 +117,19 @@ struct ConflictState {
     dest: PathBuf,
 }
 
+/// What an open context menu is about.
+enum MenuTarget {
+    /// A file row — browse (`from_search: false`) or a search result.
+    Entry { ix: usize, path: PathBuf, name: String, is_dir: bool, from_search: bool },
+    /// An indexed root in the sidebar.
+    Root { path: PathBuf },
+}
+
+struct ContextMenu {
+    position: Point<Pixels>,
+    target: MenuTarget,
+}
+
 /// One background file-operation job with live progress; shown in the
 /// jobs bar while running.
 struct Job {
@@ -179,6 +193,8 @@ struct Workspace {
     /// never appear here).
     jobs: Vec<Job>,
     next_job_id: u64,
+    /// Open context menu, if any.
+    context_menu: Option<ContextMenu>,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
@@ -250,6 +266,7 @@ impl Workspace {
             conflict: None,
             jobs: Vec::new(),
             next_job_id: 0,
+            context_menu: None,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
@@ -484,6 +501,12 @@ impl Workspace {
 
     /// Add the directory currently being browsed as a new indexed root.
     fn add_current_folder(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.cwd.clone();
+        self.add_root(cwd, cx);
+    }
+
+    /// Validate and start indexing a new root.
+    fn add_root(&mut self, candidate: PathBuf, cx: &mut Context<Self>) {
         if self.service_mode() {
             self.notice =
                 Some("roots are managed by the filex index service (filex-indexd)".into());
@@ -491,7 +514,7 @@ impl Workspace {
             return;
         }
         let existing: Vec<PathBuf> = self.roots.iter().map(|slot| slot.path.clone()).collect();
-        match manager::validate_new_root(&existing, &self.cwd) {
+        match manager::validate_new_root(&existing, &candidate) {
             Ok(canonical) => {
                 self.notice = None;
                 self.roots.push(RootSlot::new(canonical.clone()));
@@ -624,6 +647,10 @@ impl Workspace {
             let Some(row) = self.results.get(ix) else { return };
             (row.target.clone(), row.is_dir, true)
         };
+        self.open_target(path, is_dir, from_search, cx);
+    }
+
+    fn open_target(&mut self, path: PathBuf, is_dir: bool, from_search: bool, cx: &mut Context<Self>) {
         if is_dir {
             self.navigate(path, cx);
             if from_search {
@@ -638,6 +665,41 @@ impl Workspace {
             }
             cx.notify();
         }
+    }
+
+    /// Jump to a file's parent directory and select it there (context
+    /// menu "Reveal in Folder" on search results).
+    fn reveal(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(parent) = path.parent().map(Path::to_path_buf) else { return };
+        self.clear_search(cx);
+        self.navigate(parent, cx);
+        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
+            && let Some(ix) = self.entries.iter().position(|entry| entry.name == name)
+        {
+            self.selected = Some(ix);
+            self.browse_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
+    /// Stop indexing a root. Dropping the slot drops its LiveIndex —
+    /// the watcher stops and a final snapshot saves on drop.
+    fn remove_root(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let before = self.roots.len();
+        self.roots.retain(|slot| slot.path != path);
+        if self.roots.len() == before {
+            return;
+        }
+        self.persist_roots(cx);
+        self.update_search(cx);
+        self.notice = Some(format!("removed {} from the index", path.display()).into());
+        cx.notify();
+    }
+
+    fn copy_path_to_clipboard(&mut self, path: &Path, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.display().to_string()));
+        self.notice = Some("path copied".into());
+        cx.notify();
     }
 
     fn activate_selected(&mut self, cx: &mut Context<Self>) {
@@ -739,6 +801,10 @@ impl Workspace {
             return;
         }
         let Some((path, name)) = self.selected_path() else { return };
+        self.clip_path(path, &name, mode, cx);
+    }
+
+    fn clip_path(&mut self, path: PathBuf, name: &str, mode: ClipMode, cx: &mut Context<Self>) {
         self.notice = Some(
             match mode {
                 ClipMode::Copy => format!("copied “{name}” — paste into a folder"),
@@ -1320,9 +1386,16 @@ impl Workspace {
             RootState::Ready { .. } => ("●", ACCENT),
             RootState::Failed(_) => ("✕", WARN),
         };
+        let menu_path = slot.path.clone();
         ui::sidebar::sidebar_row(("root", ix))
             .child(ui::sidebar::root_marker(marker, marker_color))
             .child(div().flex_1().overflow_hidden().child(slot.label.clone()))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_root_menu(menu_path.clone(), event.position, window, cx);
+                }),
+            )
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 match &failure {
                     Some(err) => {
@@ -1512,7 +1585,13 @@ impl Workspace {
                                     } else {
                                         this.select(ix, cx);
                                     }
-                                })),
+                                }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                        this.open_entry_menu(ix, false, event.position, window, cx);
+                                    }),
+                                ),
                         )
                     })
                     .collect()
@@ -1553,7 +1632,13 @@ impl Workspace {
                                     } else {
                                         this.select(ix, cx);
                                     }
-                                })),
+                                }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                        this.open_entry_menu(ix, true, event.position, window, cx);
+                                    }),
+                                ),
                         )
                     })
                     .collect()
@@ -1571,6 +1656,196 @@ impl Workspace {
             return ui::pane::empty_state(format!("no matches for “{}”", self.query));
         }
         self.render_search_results(cx).into_any_element()
+    }
+
+    /// Keep the menu on screen: pull the anchor back from the right and
+    /// bottom edges by the menu's size (estimated height — items are
+    /// fixed-height so the estimate is close).
+    fn clamped_menu_position(
+        raw: Point<Pixels>,
+        est_height: f32,
+        window: &Window,
+    ) -> Point<Pixels> {
+        let viewport = window.viewport_size();
+        let max_x = viewport.width - px(ui::menu::MENU_WIDTH + 8.);
+        let max_y = viewport.height - px(est_height);
+        gpui::point(raw.x.min(max_x).max(px(0.)), raw.y.min(max_y).max(px(0.)))
+    }
+
+    fn open_entry_menu(
+        &mut self,
+        ix: usize,
+        from_search: bool,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.renaming.is_some() || self.conflict.is_some() {
+            return;
+        }
+        let target = if from_search {
+            let Some(row) = self.results.get(ix) else { return };
+            MenuTarget::Entry {
+                ix,
+                path: row.target.clone(),
+                name: row.name.to_string(),
+                is_dir: row.is_dir,
+                from_search,
+            }
+        } else {
+            let Some(entry) = self.entries.get(ix) else { return };
+            MenuTarget::Entry {
+                ix,
+                path: entry.path.clone(),
+                name: entry.name.clone(),
+                is_dir: entry.is_dir,
+                from_search,
+            }
+        };
+        self.selected = Some(ix);
+        self.context_menu = Some(ContextMenu {
+            position: Self::clamped_menu_position(position, 280., window),
+            target,
+        });
+        cx.notify();
+    }
+
+    fn open_root_menu(
+        &mut self,
+        path: PathBuf,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position: Self::clamped_menu_position(position, 90., window),
+            target: MenuTarget::Root { path },
+        });
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.context_menu.as_ref()?;
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        match &menu.target {
+            MenuTarget::Entry { ix, path, name, is_dir, from_search } => {
+                let (ix, is_dir, from_search) = (*ix, *is_dir, *from_search);
+                items.push(ui::menu::heading(name.clone()).into_any_element());
+                let p = path.clone();
+                items.push(
+                    ui::menu::item("menu-open", "Open", false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.open_target(p.clone(), is_dir, from_search, cx);
+                        }))
+                        .into_any_element(),
+                );
+                if from_search {
+                    let p = path.clone();
+                    items.push(
+                        ui::menu::item("menu-reveal", "Reveal in Folder", false)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                this.close_menu(cx);
+                                this.reveal(p.clone(), cx);
+                            }))
+                            .into_any_element(),
+                    );
+                } else {
+                    items.push(
+                        ui::menu::item("menu-rename", "Rename", false)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.close_menu(cx);
+                                this.selected = Some(ix);
+                                this.start_rename(window, cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
+                items.push(ui::menu::separator().into_any_element());
+                let (p, n) = (path.clone(), name.clone());
+                items.push(
+                    ui::menu::item("menu-copy", "Copy", false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.clip_path(p.clone(), &n, ClipMode::Copy, cx);
+                        }))
+                        .into_any_element(),
+                );
+                let (p, n) = (path.clone(), name.clone());
+                items.push(
+                    ui::menu::item("menu-cut", "Cut", false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.clip_path(p.clone(), &n, ClipMode::Cut, cx);
+                        }))
+                        .into_any_element(),
+                );
+                let p = path.clone();
+                items.push(
+                    ui::menu::item("menu-copy-path", "Copy Path", false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.copy_path_to_clipboard(&p, cx);
+                        }))
+                        .into_any_element(),
+                );
+                if is_dir && !self.service_mode() {
+                    let p = path.clone();
+                    items.push(
+                        ui::menu::item("menu-index", "Index This Folder", false)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                this.close_menu(cx);
+                                this.add_root(p.clone(), cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
+                items.push(ui::menu::separator().into_any_element());
+                let p = path.clone();
+                items.push(
+                    ui::menu::item("menu-trash", "Move to Trash", true)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.run_op(FileOp::Delete { path: p.clone() }, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+            MenuTarget::Root { path } => {
+                let label =
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                items.push(ui::menu::heading(label).into_any_element());
+                let p = path.clone();
+                items.push(
+                    ui::menu::item("menu-remove-root", "Remove from Index", true)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.remove_root(&p.clone(), cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        Some(
+            ui::menu::overlay("context-menu-overlay")
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.close_menu(cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                        this.close_menu(cx);
+                    }),
+                )
+                .child(ui::menu::panel(menu.position, items))
+                .into_any_element(),
+        )
     }
 
     fn render_conflict_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -1662,7 +1937,9 @@ impl Render for Workspace {
             // Escape, bubbled by the empty input: close whatever is
             // topmost — conflict dialog first, then the settings pane.
             .on_action(cx.listener(|this, _: &search_input::ClearInput, _window, cx| {
-                if this.conflict.is_some() {
+                if this.context_menu.is_some() {
+                    this.close_menu(cx);
+                } else if this.conflict.is_some() {
                     this.resolve_conflict(false, cx);
                 } else if this.settings_open {
                     this.toggle_settings(cx);
@@ -1696,6 +1973,7 @@ impl Render for Workspace {
             )
             .children(self.render_jobs(cx))
             .child(self.render_status_bar())
+            .children(self.render_context_menu(cx))
             .children(self.render_conflict_modal(cx))
     }
 }

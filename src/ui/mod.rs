@@ -10,6 +10,7 @@
 pub mod icon;
 pub mod job;
 pub mod list_row;
+pub mod menu;
 pub mod modal;
 pub mod pane;
 pub mod search_input;
