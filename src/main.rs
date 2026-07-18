@@ -18,7 +18,7 @@ mod ui;
 use filex::listing::FileKind;
 use search_input::{SearchInput, SearchInputEvent};
 use thumbnails::ThumbnailState;
-use ui::theme::{ACCENT, BG, BG_HOVER, BG_PANEL, BORDER, TEXT, TEXT_DIM, WARN};
+use ui::theme::{ACCENT, BG, TEXT, TEXT_DIM, WARN};
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
 
@@ -712,12 +712,7 @@ impl Workspace {
         #[cfg(target_os = "windows")]
         if self.service_mode() {
             let files: u64 = self.service_status.iter().map(|r| r.files).sum();
-            let roots = self.service_status.len();
-            return format!(
-                "service · {files} files · {roots} root{}",
-                if roots == 1 { "" } else { "s" }
-            )
-            .into();
+            return ui::status_bar::service_index_status(files, self.service_status.len()).into();
         }
         let total = self.roots.len();
         let mut ready = 0usize;
@@ -733,71 +728,22 @@ impl Workspace {
                 RootState::Building => {}
             }
         }
-        let mut text = if ready == total {
-            format!("{files} files · {total} root{}", if total == 1 { "" } else { "s" })
-        } else {
-            format!("indexing {ready}/{total} roots · {files} files")
-        };
-        if failed > 0 {
-            text.push_str(&format!(" · {failed} failed"));
-        }
         let degraded = self.roots.iter().any(|slot| match &slot.state {
             RootState::Ready { live, .. } => live.coverage_degraded(),
             _ => false,
         });
-        if degraded {
-            text.push_str(" · partial watch coverage");
-        }
-        text.into()
+        ui::status_bar::local_index_status(ready, total, failed, files, degraded).into()
     }
 
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let searching = !self.query.is_empty();
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .h(px(40.))
-            .px_3()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG_PANEL))
-            .child(
-                div()
-                    .id("up")
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(BG_HOVER)))
-                    .text_color(rgb(TEXT_DIM))
-                    .child("↑")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.go_up(cx);
-                    })),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(rgb(TEXT_DIM))
-                    .overflow_hidden()
-                    .child(self.cwd.display().to_string()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .w(px(260.))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(if searching { ACCENT } else { BORDER }))
-                    .text_sm()
-                    .text_color(rgb(TEXT))
-                    .child(self.search_input.clone()),
-            )
+        ui::top_bar::top_bar()
+            .child(ui::top_bar::toolbar_button("up", "↑").on_click(cx.listener(
+                |this, _: &ClickEvent, _window, cx| {
+                    this.go_up(cx);
+                },
+            )))
+            .child(ui::top_bar::path_label(self.cwd.display().to_string()))
+            .child(ui::top_bar::search_box(!self.query.is_empty()).child(self.search_input.clone()))
     }
 
     /// A row for one service-managed root (service mode has no local
@@ -1042,19 +988,7 @@ impl Workspace {
             )
             .into()
         };
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(26.))
-            .px_3()
-            .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG_PANEL))
-            .text_xs()
-            .text_color(rgb(TEXT_DIM))
-            .child(left)
-            .child(self.index_status_text())
+        ui::status_bar::status_bar(left, self.index_status_text())
     }
 }
 
