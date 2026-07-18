@@ -21,7 +21,7 @@ use thumbnails::ThumbnailState;
 use ui::search_input::{self, SearchInput, SearchInputEvent};
 use ui::theme::{ACCENT, BG, TEXT, TEXT_DIM, WARN};
 
-actions!(filex, [Quit, CloseWindow, GoUp]);
+actions!(filex, [Quit, CloseWindow, GoUp, ToggleSettings]);
 
 /// Open a file with the platform's default application. Detached — the
 /// launched app owns its own lifetime.
@@ -122,6 +122,9 @@ struct Workspace {
     /// Index into the active list (search results while searching,
     /// directory entries otherwise).
     selected: Option<usize>,
+    /// The settings pane replaces the browse list while open (search
+    /// still takes precedence, Spotlight-style).
+    settings_open: bool,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
@@ -184,6 +187,7 @@ impl Workspace {
             results: Vec::new(),
             search_generation: 0,
             selected: None,
+            settings_open: false,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
@@ -745,6 +749,11 @@ impl Workspace {
         ui::status_bar::local_index_status(ready, total, failed, files, degraded).into()
     }
 
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = !self.settings_open;
+        cx.notify();
+    }
+
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         ui::top_bar::top_bar()
             .child(ui::top_bar::toolbar_button("up", "↑").on_click(cx.listener(
@@ -754,6 +763,51 @@ impl Workspace {
             )))
             .child(ui::top_bar::path_label(self.cwd.display().to_string()))
             .child(ui::top_bar::search_box(!self.query.is_empty()).child(self.search_input.clone()))
+            .child(
+                ui::top_bar::toolbar_button("settings", "⚙")
+                    .when(self.settings_open, |s| s.text_color(rgb(ACCENT)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.toggle_settings(cx);
+                    })),
+            )
+    }
+
+    fn render_settings_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let settings = self.settings.read(cx).settings().clone();
+        let file_note: SharedString = match filex::settings::default_settings_file() {
+            Some(path) => format!("saved to {}", path.display()).into(),
+            None => "no config directory found — settings won't persist".into(),
+        };
+        ui::settings_pane::settings_pane()
+            .child(ui::settings_pane::pane_title("Settings"))
+            .child(
+                ui::settings_pane::toggle_row(
+                    "show-hidden",
+                    "Show hidden files",
+                    "Dotfiles and OS-hidden entries in the browse list",
+                    settings.show_hidden_files,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.show_hidden_files = !s.show_hidden_files);
+                    });
+                })),
+            )
+            .child(
+                ui::settings_pane::toggle_row(
+                    "thumbnails",
+                    "Image thumbnails",
+                    "Decode small previews for image files in the list",
+                    settings.thumbnails_enabled,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.thumbnails_enabled = !s.thumbnails_enabled);
+                    });
+                })),
+            )
+            .child(ui::settings_pane::footnote(file_note))
+            .into_any_element()
     }
 
     /// A row for one service-managed root (service mode has no local
@@ -997,6 +1051,9 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(cx.listener(|this, _: &GoUp, _window, cx| this.go_up(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSettings, _window, cx| {
+                this.toggle_settings(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 this.handle_key(event, cx);
             }))
@@ -1014,6 +1071,8 @@ impl Render for Workspace {
                     .child(self.render_sidebar(cx))
                     .child(if searching {
                         self.render_search_pane(cx)
+                    } else if self.settings_open {
+                        self.render_settings_pane(cx)
                     } else {
                         self.render_file_list(cx).into_any_element()
                     }),
@@ -1033,12 +1092,16 @@ fn main() {
             KeyBinding::new("cmd-w", CloseWindow, None),
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-up", GoUp, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-,", ToggleSettings, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-q", Quit, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-w", CloseWindow, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("alt-up", GoUp, None),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-,", ToggleSettings, None),
         ]);
         search_input::bind_keys(cx);
         cx.on_window_closed(|cx| {
