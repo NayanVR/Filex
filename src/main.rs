@@ -452,9 +452,11 @@ impl Workspace {
     }
 
     fn load_dir(&mut self, path: &Path, cx: &App) {
-        match read_dir_sorted(path) {
+        let settings = self.settings.read(cx).settings();
+        let (sort, show_hidden) = (settings.sort, settings.show_hidden_files);
+        match read_dir_sorted(path, &sort) {
             Ok(mut entries) => {
-                if !self.settings.read(cx).settings().show_hidden_files {
+                if !show_hidden {
                     entries.retain(|entry| !entry.is_hidden);
                 }
                 self.cwd = path.to_path_buf();
