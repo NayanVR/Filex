@@ -18,7 +18,7 @@ mod ui;
 use filex::listing::FileKind;
 use search_input::{SearchInput, SearchInputEvent};
 use thumbnails::ThumbnailState;
-use ui::theme::{ACCENT, BG, BG_HOVER, BG_PANEL, BG_SELECTED, BORDER, TEXT, TEXT_DIM, WARN};
+use ui::theme::{ACCENT, BG, BG_HOVER, BG_PANEL, BORDER, TEXT, TEXT_DIM, WARN};
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
 
@@ -488,7 +488,8 @@ impl Workspace {
     }
 
     /// The icon cell for a row: a decoded thumbnail for image files when
-    /// ready, otherwise the kind glyph.
+    /// ready, otherwise the kind glyph. May schedule a decode as a side
+    /// effect — only rows the virtualized list renders get here.
     fn render_icon_cell(
         &mut self,
         name: &str,
@@ -500,23 +501,13 @@ impl Workspace {
         if kind == FileKind::Image {
             match self.thumbnails.get(path) {
                 Some(ThumbnailState::Ready(imagery)) => {
-                    return gpui::img(imagery.clone())
-                        .w(px(20.))
-                        .h(px(20.))
-                        .rounded_sm()
-                        .object_fit(gpui::ObjectFit::Cover)
-                        .into_any_element();
+                    return ui::icon::thumbnail_icon(imagery.clone());
                 }
                 Some(_) => {}
                 None => self.request_thumbnail(path.to_path_buf(), cx),
             }
         }
-        div()
-            .w(px(20.))
-            .text_sm()
-            .text_color(rgb(if is_dir { ACCENT } else { TEXT_DIM }))
-            .child(kind.glyph())
-            .into_any_element()
+        ui::icon::glyph_icon(kind, is_dir)
     }
 
     /// Length of whichever list selection currently applies to.
@@ -1015,16 +1006,7 @@ impl Workspace {
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let icon = this.render_icon_cell(&name, &path, is_dir, cx);
                         Some(
-                            div()
-                                .id(ix)
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .h(px(28.))
-                                .px_3()
-                                .cursor_pointer()
-                                .when(is_selected, |s| s.bg(rgb(BG_SELECTED)))
-                                .when(!is_selected, |s| s.hover(|s| s.bg(rgb(BG_HOVER))))
+                            ui::list_row::list_row(ix, is_selected)
                                 .child(icon)
                                 .child(div().flex_1().text_sm().child(name))
                                 .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(
@@ -1064,16 +1046,7 @@ impl Workspace {
                         let path_label = row.path_label.clone();
                         let icon = this.render_icon_cell(&name, &path, is_dir, cx);
                         Some(
-                            div()
-                                .id(ix)
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .h(px(28.))
-                                .px_3()
-                                .cursor_pointer()
-                                .when(is_selected, |s| s.bg(rgb(BG_SELECTED)))
-                                .when(!is_selected, |s| s.hover(|s| s.bg(rgb(BG_HOVER))))
+                            ui::list_row::list_row(ix, is_selected)
                                 .child(icon)
                                 .child(div().text_sm().child(name))
                                 .child(
