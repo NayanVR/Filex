@@ -145,6 +145,20 @@ with block 1.
 
 ### 3. File operations (the big block; likely 2+ sessions)
 
+**Done 2026-07-18 (slices 3–4 closing it out):** copy/cut/paste with
+the standard keys is the copy/move gesture (shared with text editing
+by propagation: the empty search input bubbles cmd-c/x/v to the
+workspace; paste falls back to paste-to-search). Occupied
+destinations open a conflict dialog (ui::modal) offering Cancel /
+Keep Both (`ops::next_free_name`, Finder-style "name 2") — **no
+Replace option yet**: overwrite needs compound undo (trash the loser
+first, then move), noted below as the one open item. Copies/moves run
+as background jobs (`ops::apply_with_progress`: atomic byte progress,
+1MiB chunked cancellable copies that preserve permissions, partial-
+destination cleanup, typed OpCanceled) with a jobs bar showing live
+progress and a cancel control. Drag-and-drop as a second move gesture
+is unscheduled polish.
+
 **Progress 2026-07-18 (slice 2):** delete-to-trash with undo. Trash
 crate evaluated per the plan: it does delete+restore on Windows/Linux
 (`os_limited` — deleted items matched in the trash listing, stored as
@@ -185,13 +199,17 @@ background job queue with progress + cancellation for long copies.
 
 ### 4. Context menus
 
-- Right-click menu for rows (open, reveal, copy path, rename, delete,
-  index-this-folder) and for the sidebar (remove root — currently
-  impossible from the UI).
-- Evaluate gpui-component's menu/popover first; hand-roll an anchored
-  popover only if it doesn't fit.
-- Menus/popovers are a natural first home for the polish principle:
-  eased open/close, hover feedback.
+**Done 2026-07-18.** gpui-component evaluated and declined (it tracks
+gpui's git head; filex pins crates.io gpui 0.2 — not worth the widget
+tree for one menu). `ui::menu` is a hand-rolled anchored popover:
+click-anywhere/escape closes, viewport-clamped anchor, 120ms
+ease_out_quint fade-in (polish principle: animation on the popover,
+never in list rows). Browse rows get Open / Rename / Copy / Cut /
+Copy Path / Index This Folder / Move to Trash; search results swap
+Rename for Reveal in Folder; sidebar roots get Remove from Index
+(drops the LiveIndex → watcher stops, snapshot saves). Menu actions
+reuse the keyboard's op/journal paths, so they all undo. Kind sorting
+still isn't exposed here — add it if anyone misses it.
 
 ## Phase 2b — Finish the Windows story (parallel track; needs Windows hardware or CI-driven iteration)
 
