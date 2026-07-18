@@ -78,9 +78,12 @@ Work in this order; each block is roughly one session.
 
 ### 0. Carve main.rs into `src/ui/` components (per the reviewability principle)
 
-Pure refactor, no behavior change: extract row/icon/sidebar/status-bar
-rendering into documented reusable components before Phase 2a features
-build on them. Small session; makes every later diff smaller.
+**Done 2026-07-18.** `src/ui/` now holds theme (shared palette),
+list_row, icon, sidebar, top_bar, status_bar (index status lines are
+pure, unit-tested functions), pane (empty states), and search_input
+(moved into the family). main.rs kept the Workspace state/logic and
+shrank to composition of these blocks. Pure refactor, no behavior
+change.
 
 ### 1. Settings foundation (do first — everything after generates settings)
 
