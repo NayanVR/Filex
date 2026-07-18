@@ -815,19 +815,8 @@ impl Workspace {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.path.clone())
             .into();
-        div()
-            .id(("service-root", ix))
-            .flex()
-            .items_center()
-            .gap_2()
-            .mx_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .text_sm()
-            .hover(|s| s.bg(rgb(BG_HOVER)))
-            .child(div().text_xs().text_color(rgb(ACCENT)).child("◆"))
+        ui::sidebar::sidebar_row(("service-root", ix))
+            .child(ui::sidebar::root_marker("◆", ACCENT))
             .child(div().flex_1().overflow_hidden().child(label))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.navigate(path.clone(), cx);
@@ -851,19 +840,8 @@ impl Workspace {
             RootState::Ready { .. } => ("●", ACCENT),
             RootState::Failed(_) => ("✕", WARN),
         };
-        div()
-            .id(("root", ix))
-            .flex()
-            .items_center()
-            .gap_2()
-            .mx_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .text_sm()
-            .hover(|s| s.bg(rgb(BG_HOVER)))
-            .child(div().text_xs().text_color(rgb(marker_color)).child(marker))
+        ui::sidebar::sidebar_row(("root", ix))
+            .child(ui::sidebar::root_marker(marker, marker_color))
             .child(div().flex_1().overflow_hidden().child(slot.label.clone()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 match &failure {
@@ -904,59 +882,20 @@ impl Workspace {
                 .collect()
         };
 
-        let sidebar = div()
-            .flex()
-            .flex_col()
-            .w(px(200.))
-            .h_full()
-            .py_2()
-            .border_r_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG_PANEL))
-            .child(
-                div()
-                    .px_3()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(rgb(TEXT_DIM))
-                    .child("PLACES"),
-            )
+        let sidebar = ui::sidebar::sidebar_panel()
+            .child(ui::sidebar::section_header("PLACES"))
             .children(places.into_iter().enumerate().map(|(ix, (label, path))| {
-                div()
-                    .id(("place", ix))
-                    .mx_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_sm()
-                    .hover(|s| s.bg(rgb(BG_HOVER)))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                ui::sidebar::sidebar_row(("place", ix)).child(label).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _window, cx| {
                         this.navigate(path.clone(), cx);
-                    }))
+                    },
+                ))
             }))
-            .child(
-                div()
-                    .px_3()
-                    .pt_3()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(rgb(TEXT_DIM))
-                    .child("INDEXED"),
-            )
+            .child(ui::sidebar::section_header("INDEXED").pt_3())
             .children(root_rows)
             .child(
-                div()
-                    .id("add-root")
-                    .mx_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_sm()
+                ui::sidebar::sidebar_row("add-root")
                     .text_color(rgb(TEXT_DIM))
-                    .hover(|s| s.bg(rgb(BG_HOVER)))
                     .child("+ index current folder")
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.add_current_folder(cx);
@@ -968,16 +907,9 @@ impl Workspace {
         #[cfg(target_os = "macos")]
         let sidebar = if self.fda_missing {
             sidebar.child(div().flex_1()).child(
-                div()
-                    .id("fda-banner")
-                    .mx_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
+                ui::sidebar::sidebar_row("fda-banner")
                     .text_xs()
                     .text_color(rgb(WARN))
-                    .hover(|s| s.bg(rgb(BG_HOVER)))
                     .child("⚠ Grant Full Disk Access for complete indexing")
                     .on_click(|_: &ClickEvent, _window, _cx| {
                         filex::index::macos::open_full_disk_access_settings();

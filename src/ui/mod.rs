@@ -9,4 +9,5 @@
 
 pub mod icon;
 pub mod list_row;
+pub mod sidebar;
 pub mod theme;
