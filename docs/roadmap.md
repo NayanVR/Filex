@@ -130,12 +130,18 @@ behavior change.
 
 ### 2. Sorting + breadcrumbs (small, warm-up for list UI work)
 
-- Sort comparator enum (name/size/modified/kind) + clickable column
-  headers; defaults come from settings. Note: `listing::Entry` needs
-  mtime — fetch lazily or accept one stat per entry in browse (browse
-  dirs are small; the index never stats).
-- Breadcrumbs: replace the top-bar path text with clickable segments.
-- Hidden-files toggle: already done (landed with block 1).
+**Done 2026-07-18.** `listing::sort_entries` orders by the persisted
+`SortSettings` (name/size/modified/kind; descending reverses only the
+primary key, directories-first grouping and name tie-breaks survive).
+`Entry.modified` comes from the metadata already fetched for sizes —
+one stat per entry in browse, as planned. Browse shows Name | Modified
+(compact relative age via `format_modified`, no date-crate dep) | Size
+with clickable headers that select-or-flip the sort through the
+settings store. Kind sorting has no header (no column to hang it on) —
+expose it in the block-4 context menu. Breadcrumbs replaced the path
+text: `listing::path_segments` + `ui::top_bar` strip, middle segments
+eliding to "…" on deep paths. Hidden-files toggle had already landed
+with block 1.
 
 ### 3. File operations (the big block; likely 2+ sessions)
 
