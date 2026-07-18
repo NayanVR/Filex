@@ -37,9 +37,7 @@ actions!(
     ]
 );
 
-const CURSOR: u32 = 0x5ac8fa;
-const SELECTION: u32 = 0x5ac8fa40;
-const PLACEHOLDER: u32 = 0x8b929e;
+use crate::ui::theme::{ACCENT as CURSOR, ACCENT_SELECTION as SELECTION, TEXT_DIM as PLACEHOLDER};
 
 pub enum SearchInputEvent {
     /// The text changed (typing, paste, cut, IME commit, clear).

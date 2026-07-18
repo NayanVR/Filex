@@ -14,22 +14,13 @@ use filex::listing::{Entry, format_size, read_dir_sorted};
 
 mod search_input;
 mod thumbnails;
+mod ui;
 use filex::listing::FileKind;
 use search_input::{SearchInput, SearchInputEvent};
 use thumbnails::ThumbnailState;
+use ui::theme::{ACCENT, BG, BG_HOVER, BG_PANEL, BG_SELECTED, BORDER, TEXT, TEXT_DIM, WARN};
 
 actions!(filex, [Quit, CloseWindow, GoUp]);
-
-// Palette (dark). Placeholder until a real theme system lands.
-const BG: u32 = 0x1e2227;
-const BG_PANEL: u32 = 0x23272e;
-const BG_HOVER: u32 = 0x2f343c;
-const BORDER: u32 = 0x363c45;
-const TEXT: u32 = 0xd7dae0;
-const TEXT_DIM: u32 = 0x8b929e;
-const ACCENT: u32 = 0x5ac8fa;
-const WARN: u32 = 0xe5c07b;
-const BG_SELECTED: u32 = 0x37404d;
 
 /// Open a file with the platform's default application. Detached — the
 /// launched app owns its own lifetime.
