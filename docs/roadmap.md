@@ -87,6 +87,21 @@ change.
 
 ### 1. Settings foundation (do first — everything after generates settings)
 
+**Done 2026-07-18.** `filex::settings` (lib, serde/serde_json) persists
+the JSON below at `<config_dir>/filex/settings.json`; first launch
+migrates and immediately rewrites `roots.list` roots into it, and both
+the UI and `filex-indexd` keep reading `roots.list` as fallback for
+one version (drop the fallback + `manager::save_roots` next version).
+`SettingsStore` (app entity) persists changes off-thread and emits
+`Changed`; a settings pane (gear button / cmd-,) swaps into the main
+area with toggle rows for the settings consumed today. Logging landed
+too: `filex::logging`, tracing → daily-rotated files in
+`<data_local_dir>/filex/logs`, all runtime `eprintln!`s replaced.
+Pulled forward from block 2: the hidden-files toggle is fully wired
+(`Entry.is_hidden`: dotfiles everywhere + FILE_ATTRIBUTE_HIDDEN +
+UF_HIDDEN), and hidden files are now hidden by default — a deliberate
+behavior change.
+
 - `Settings` struct in the lib; persisted as **JSON** (decision:
   JSON, not TOML) at `<config_dir>/filex/settings.json` via
   `serde`/`serde_json` (approved dependency addition, confined to the
@@ -120,7 +135,7 @@ change.
   mtime — fetch lazily or accept one stat per entry in browse (browse
   dirs are small; the index never stats).
 - Breadcrumbs: replace the top-bar path text with clickable segments.
-- Hidden-files toggle wired to settings.
+- Hidden-files toggle: already done (landed with block 1).
 
 ### 3. File operations (the big block; likely 2+ sessions)
 
