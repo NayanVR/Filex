@@ -10,7 +10,7 @@ use gpui::{
 
 use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
-use filex::listing::{Entry, format_modified, format_size, read_dir_sorted};
+use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::settings::SortBy;
 
 mod settings_store;
@@ -752,6 +752,39 @@ impl Workspace {
         ui::status_bar::local_index_status(ready, total, failed, files, degraded).into()
     }
 
+    /// Clickable path segments. Deep paths elide the middle ("…"),
+    /// keeping the root and the last few segments — the tail is what
+    /// the user actually navigates with.
+    fn render_breadcrumbs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const MAX_SEGMENTS: usize = 6;
+        const TAIL_SEGMENTS: usize = 4;
+        let segments = path_segments(&self.cwd);
+        let elide = segments.len() > MAX_SEGMENTS;
+        let tail_start = if elide { segments.len() - TAIL_SEGMENTS } else { usize::MAX };
+
+        let mut children: Vec<gpui::AnyElement> = Vec::new();
+        for (ix, (label, target)) in segments.into_iter().enumerate() {
+            if elide && ix > 0 && ix < tail_start {
+                if ix == 1 {
+                    children.push(ui::top_bar::breadcrumb_separator("›").into_any_element());
+                    children.push(ui::top_bar::breadcrumb_separator("…").into_any_element());
+                }
+                continue;
+            }
+            if ix > 0 {
+                children.push(ui::top_bar::breadcrumb_separator("›").into_any_element());
+            }
+            children.push(
+                ui::top_bar::breadcrumb_segment(("crumb", ix), label)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.navigate(target.clone(), cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        ui::top_bar::breadcrumbs().children(children)
+    }
+
     fn toggle_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
         cx.notify();
@@ -764,7 +797,7 @@ impl Workspace {
                     this.go_up(cx);
                 },
             )))
-            .child(ui::top_bar::path_label(self.cwd.display().to_string()))
+            .child(self.render_breadcrumbs(cx))
             .child(ui::top_bar::search_box(!self.query.is_empty()).child(self.search_input.clone()))
             .child(
                 ui::top_bar::toolbar_button("settings", "⚙")

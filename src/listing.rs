@@ -190,6 +190,28 @@ impl FileKind {
     }
 }
 
+/// Split a path into breadcrumb segments: each is the label to show
+/// and the full path clicking it navigates to. The filesystem root
+/// comes out as "/" on Unix; on Windows the drive prefix and root fold
+/// into a single navigable "C:\" segment (the bare prefix "C:" is a
+/// drive-relative path, not a location).
+pub fn path_segments(path: &Path) -> Vec<(String, PathBuf)> {
+    use std::path::Component;
+    let mut segments = Vec::new();
+    let mut acc = PathBuf::new();
+    for comp in path.components() {
+        acc.push(comp.as_os_str());
+        match comp {
+            Component::Prefix(_) => {}
+            Component::RootDir => {
+                segments.push((acc.to_string_lossy().into_owned(), acc.clone()));
+            }
+            _ => segments.push((comp.as_os_str().to_string_lossy().into_owned(), acc.clone())),
+        }
+    }
+    segments
+}
+
 /// Compact relative age for the Modified column ("just now", "5m",
 /// "3h", "2d", "4w", "7mo", "2y"); "—" when the mtime is unknown.
 /// Relative beats absolute here: no date-formatting dependency, and a
@@ -420,6 +442,34 @@ mod tests {
         assert_eq!(FileKind::of("backup.tar.gz", false), FileKind::Archive);
         assert_eq!(FileKind::of("Makefile", false), FileKind::Other);
         assert_eq!(FileKind::of("weird.xyz", false), FileKind::Other);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn path_segments_walk_from_root() {
+        assert_eq!(path_segments(Path::new("/")), [("/".to_string(), PathBuf::from("/"))]);
+        assert_eq!(
+            path_segments(Path::new("/Users/nayan/code")),
+            [
+                ("/".to_string(), PathBuf::from("/")),
+                ("Users".to_string(), PathBuf::from("/Users")),
+                ("nayan".to_string(), PathBuf::from("/Users/nayan")),
+                ("code".to_string(), PathBuf::from("/Users/nayan/code")),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn path_segments_fold_drive_prefix_into_root() {
+        assert_eq!(
+            path_segments(Path::new(r"C:\Users\nayan")),
+            [
+                (r"C:\".to_string(), PathBuf::from(r"C:\")),
+                ("Users".to_string(), PathBuf::from(r"C:\Users")),
+                ("nayan".to_string(), PathBuf::from(r"C:\Users\nayan")),
+            ]
+        );
     }
 
     #[test]

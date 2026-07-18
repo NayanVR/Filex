@@ -31,9 +31,32 @@ pub fn toolbar_button(id: impl Into<ElementId>, glyph: &'static str) -> Stateful
         .child(glyph)
 }
 
-/// The current-path label filling the bar's middle.
-pub fn path_label(text: impl Into<SharedString>) -> Div {
-    div().flex_1().text_sm().text_color(rgb(TEXT_DIM)).overflow_hidden().child(text.into())
+/// The breadcrumb strip filling the bar's middle. Children are
+/// [`breadcrumb_segment`]s interleaved with [`breadcrumb_separator`]s.
+pub fn breadcrumbs() -> Div {
+    div().flex_1().flex().items_center().gap_1().overflow_hidden()
+}
+
+/// One clickable path segment. Callers chain `.on_click` to navigate.
+pub fn breadcrumb_segment(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(rgb(TEXT_DIM))
+        .hover(|s| s.bg(rgb(BG_HOVER)).text_color(rgb(TEXT)))
+        .child(label.into())
+}
+
+/// The "›" between segments (also used, without siblings, as the
+/// non-clickable "…" that stands in for elided middle segments).
+pub fn breadcrumb_separator(glyph: &'static str) -> Div {
+    div().text_xs().text_color(rgb(TEXT_DIM)).child(glyph)
 }
 
 /// The search box frame; the border lights up while a query is active.
