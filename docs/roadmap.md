@@ -145,6 +145,18 @@ with block 1.
 
 ### 3. File operations (the big block; likely 2+ sessions)
 
+**Progress 2026-07-18 (slice 1 of 2+):** `filex::ops` in the lib —
+`apply` for Move/Copy/Rename returning an `AppliedOp` that `undo`
+reverses (copy-undo removes the copy; cross-device moves fall back to
+copy+delete; existing destinations are errors, not prompts, for now),
+plus the bounded `Journal` undo stack — all unit-tested. First UI
+consumer: rename-in-place on F2 (SearchInput reused as the row
+editor, enter commits / escape cancels via a new Dismissed event) and
+cmd-z / ctrl-z undo. Still to do in this block: delete-to-trash
+(trash-crate evaluation), copy/move UI (needs a destination gesture —
+paste or drag), conflict prompts (skip/overwrite/rename), and the
+background job queue with progress + cancellation for long copies.
+
 - Ops: copy, move, rename, delete. Architecture note: ops never touch
   the index — watchers pick up the changes as deltas automatically.
 - **Undo** via an operation journal storing inverses (move A→B ⇒ move
