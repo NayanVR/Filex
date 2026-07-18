@@ -1808,6 +1808,8 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-services",
  "rayon",
+ "serde",
+ "serde_json",
  "tempfile",
  "unicode-segmentation",
  "windows 0.62.2",

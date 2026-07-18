@@ -5,3 +5,4 @@
 
 pub mod index;
 pub mod listing;
+pub mod settings;
