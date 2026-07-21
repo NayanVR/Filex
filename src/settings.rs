@@ -46,6 +46,10 @@ pub struct Settings {
     /// Grid card size, as an index into the app's fixed size steps
     /// (clamped to a valid step when consumed).
     pub grid_zoom: u8,
+    /// Whether the right-hand details/preview panel is shown.
+    pub preview_open: bool,
+    /// Width of the details panel in logical pixels (clamped when used).
+    pub preview_width: f32,
 }
 
 /// The two browse layouts (block 4).
@@ -81,6 +85,8 @@ impl Default for Settings {
             theme: ThemeMode::System,
             view: ViewMode::List,
             grid_zoom: 1,
+            preview_open: false,
+            preview_width: 280.,
         }
     }
 }
@@ -169,6 +175,8 @@ mod tests {
         assert_eq!(settings.theme, ThemeMode::System);
         assert_eq!(settings.view, ViewMode::List);
         assert_eq!(settings.grid_zoom, 1);
+        assert!(!settings.preview_open);
+        assert_eq!(settings.preview_width, 280.);
     }
 
     #[test]

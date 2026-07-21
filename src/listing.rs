@@ -175,6 +175,20 @@ impl FileKind {
         }
     }
 
+    /// Human-readable kind name for the details panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Directory => "Folder",
+            Self::Image => "Image",
+            Self::Video => "Video",
+            Self::Audio => "Audio",
+            Self::Archive => "Archive",
+            Self::Code => "Code",
+            Self::Document => "Document",
+            Self::Other => "File",
+        }
+    }
+
     /// Emoji glyph shown in list rows (until a real icon set lands).
     pub fn glyph(self) -> &'static str {
         match self {

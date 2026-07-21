@@ -27,8 +27,36 @@ use ui::theme::{ActiveTheme as _, Theme};
 
 actions!(
     filex,
-    [Quit, CloseWindow, GoUp, ToggleSettings, RenameSelected, DeleteSelected, Undo]
+    [Quit, CloseWindow, GoUp, ToggleSettings, TogglePreview, RenameSelected, DeleteSelected, Undo]
 );
+
+/// Metadata for the details panel, fetched lazily off-thread per
+/// selection (created time + image dimensions cost a stat / header read
+/// that browse doesn't already do).
+struct PreviewMeta {
+    /// The item this describes — guards against a stale async result
+    /// landing after the selection moved on.
+    path: PathBuf,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    /// Pixel dimensions for images; `None` for everything else.
+    dimensions: Option<(u32, u32)>,
+}
+
+/// Stat `path` and, for images, read its pixel dimensions from the
+/// header. Blocking — run on the background executor.
+fn fetch_preview_meta(path: &Path) -> PreviewMeta {
+    let (mut size, mut modified, mut created) = (0, None, None);
+    if let Ok(md) = std::fs::metadata(path) {
+        size = md.len();
+        modified = md.modified().ok();
+        created = md.created().ok();
+    }
+    // `image_dimensions` reads only the header and errors on non-images.
+    let dimensions = image::image_dimensions(path).ok();
+    PreviewMeta { path: path.to_path_buf(), size, modified, created, dimensions }
+}
 
 /// Open a file with the platform's default application. Detached — the
 /// launched app owns its own lifetime.
@@ -215,6 +243,8 @@ struct Workspace {
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
+    /// Lazily-fetched metadata for the details panel's current item.
+    preview_meta: Option<PreviewMeta>,
 }
 
 impl Workspace {
@@ -301,6 +331,7 @@ impl Workspace {
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
+            preview_meta: None,
         };
         this.load_dir(&cwd, cx);
         // Windows probes for the elevated index service first and only
@@ -666,6 +697,7 @@ impl Workspace {
                 if self.query.is_empty() { &self.browse_scroll } else { &self.results_scroll };
             handle.scroll_to_item(next, ScrollStrategy::Center);
         }
+        self.refresh_preview(cx);
         cx.notify();
     }
 
@@ -711,6 +743,7 @@ impl Workspace {
             self.selection.select_one(ix);
             self.browse_scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
+        self.refresh_preview(cx);
         cx.notify();
     }
 
@@ -770,6 +803,7 @@ impl Workspace {
         } else {
             self.selection.select_one(ix);
         }
+        self.refresh_preview(cx);
         cx.notify();
     }
 
@@ -778,6 +812,7 @@ impl Workspace {
             return;
         }
         self.selection.select_all(self.active_list_len());
+        self.refresh_preview(cx);
         cx.notify();
     }
 
@@ -865,6 +900,64 @@ impl Workspace {
     /// Every selected item's (path, name), in list order.
     fn selected_paths(&self) -> Vec<(PathBuf, String)> {
         self.selection.iter().filter_map(|ix| self.path_at(ix)).collect()
+    }
+
+    /// The lead item (path, name, is_dir) — the details panel's subject
+    /// and the natural single target.
+    fn lead_item(&self) -> Option<(PathBuf, String, bool)> {
+        let ix = self.selection.lead()?;
+        if self.query.is_empty() {
+            let entry = self.entries.get(ix)?;
+            Some((entry.path.clone(), entry.name.clone(), entry.is_dir))
+        } else {
+            let row = self.results.get(ix)?;
+            Some((row.target.clone(), row.name.to_string(), row.is_dir))
+        }
+    }
+
+    /// Toggle the details panel (top-bar button / cmd-i). Opening it
+    /// kicks off the metadata fetch for the current item.
+    fn toggle_preview(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| settings.preview_open = !settings.preview_open);
+        });
+        self.refresh_preview(cx);
+    }
+
+    /// Ensure `preview_meta` describes the current lead item, fetching it
+    /// off-thread when the selection moved (or clearing it when the panel
+    /// is closed / nothing is selected). Called after selection changes.
+    fn refresh_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.read(cx).settings().preview_open {
+            self.preview_meta = None;
+            return;
+        }
+        let Some((path, _, _)) = self.lead_item() else {
+            self.preview_meta = None;
+            return;
+        };
+        if self.preview_meta.as_ref().map(|m| m.path.as_path()) == Some(path.as_path()) {
+            return; // already have this item's metadata
+        }
+        self.preview_meta = None; // drop stale while the fetch is in flight
+        cx.spawn(async move |this, cx| {
+            let meta = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { fetch_preview_meta(&path) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // Apply only if the lead still points at the same item.
+                if this.lead_item().map(|(p, _, _)| p).as_deref() == Some(path.as_path()) {
+                    this.preview_meta = Some(meta);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// cmd-c / cmd-x (reaches us only while the search input is empty —
@@ -1330,6 +1423,7 @@ impl Workspace {
                                 })
                                 .collect();
                             this.select_first_result();
+                            this.refresh_preview(cx);
                             cx.notify();
                         }
                         Err(err) => {
@@ -1370,6 +1464,7 @@ impl Workspace {
                 if this.search_generation == generation {
                     this.results = rows;
                     this.select_first_result();
+                    this.refresh_preview(cx);
                     cx.notify();
                 }
             })
@@ -1489,8 +1584,9 @@ impl Workspace {
 
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let view = self.settings.read(cx).settings().view;
-        let is_grid = view == ViewMode::Grid;
+        let settings = self.settings.read(cx).settings();
+        let is_grid = settings.view == ViewMode::Grid;
+        let preview_open = settings.preview_open;
         ui::top_bar::top_bar(&theme)
             .child(
                 ui::top_bar::toolbar_button(&theme, "up", "icons/arrow-up.svg", theme.text_dim)
@@ -1521,6 +1617,16 @@ impl Workspace {
                     theme.text_dim,
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_view(cx))),
+            )
+            // Details/preview panel toggle.
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "preview-toggle",
+                    "icons/panel-right.svg",
+                    if preview_open { theme.accent } else { theme.text_dim },
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_preview(cx))),
             )
             .child(
                 ui::top_bar::toolbar_button(
@@ -1851,13 +1957,20 @@ impl Workspace {
     /// builds only its own cards, so the grid is as virtualized as the
     /// list.
     fn render_grid(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let zoom = self.settings.read(cx).settings().grid_zoom;
-        let size = ui::grid::card_size(zoom);
+        let settings = self.settings.read(cx).settings();
+        let size = ui::grid::card_size(settings.grid_zoom);
         let cell = ui::grid::cell_width(size);
-        // Approximate content width: the window minus the sidebar and the
-        // grid's own inset. Off-by-one on the odd frame just reflows.
+        let preview_w = if settings.preview_open {
+            ui::details::clamp_width(settings.preview_width)
+        } else {
+            0.
+        };
+        // Approximate content width: the window minus the sidebar, the
+        // open details panel, and the grid's own inset. Off-by-one on the
+        // odd frame just reflows.
         let content_w = (f32::from(window.viewport_size().width)
             - ui::sidebar::SIDEBAR_WIDTH
+            - preview_w
             - ui::grid::CARD_GAP * 2.)
             .max(cell);
         let cols = ui::grid::columns_for(content_w, cell);
@@ -2340,6 +2453,65 @@ impl Workspace {
         };
         ui::status_bar::status_bar(theme, left, self.index_status_text())
     }
+
+    /// The right-hand details/preview panel for the lead item. `None`
+    /// when the panel is closed or the settings pane is showing. Uses
+    /// `&mut self` because the preview image may schedule a thumbnail
+    /// decode, exactly like a list row.
+    fn render_details_panel(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let settings = self.settings.read(cx).settings();
+        if !settings.preview_open || self.settings_open {
+            return None;
+        }
+        let width = settings.preview_width;
+        let theme = *cx.theme();
+        let Some((path, name, is_dir)) = self.lead_item() else {
+            return Some(
+                ui::details::panel(&theme, width)
+                    .child(ui::details::empty(&theme, "No selection"))
+                    .into_any_element(),
+            );
+        };
+        let kind = FileKind::of(&name, is_dir);
+        let preview = self.render_icon_cell(&name, &path, is_dir, 160., cx);
+        let meta = self.preview_meta.as_ref().filter(|m| m.path == path);
+        let now = std::time::SystemTime::now();
+
+        let size_value: SharedString = if is_dir {
+            "—".into()
+        } else {
+            match meta {
+                Some(m) => format_size(m.size).into(),
+                None => "…".into(),
+            }
+        };
+        let modified_value: SharedString = match meta {
+            Some(m) => format_modified(m.modified, now).into(),
+            None => "…".into(),
+        };
+        let created_value: SharedString = match meta {
+            Some(m) => format_modified(m.created, now).into(),
+            None => "…".into(),
+        };
+        let where_value: SharedString =
+            path.parent().map(|p| p.display().to_string()).unwrap_or_default().into();
+
+        let mut panel = ui::details::panel(&theme, width)
+            .child(ui::details::preview_box(&theme).child(preview))
+            .child(ui::details::title(&theme, name))
+            .child(ui::details::divider(&theme))
+            .child(ui::details::meta_row(&theme, "Kind", kind.label()))
+            .child(ui::details::meta_row(&theme, "Size", size_value))
+            .child(ui::details::meta_row(&theme, "Modified", modified_value))
+            .child(ui::details::meta_row(&theme, "Created", created_value));
+        if let Some((w, h)) = meta.and_then(|m| m.dimensions) {
+            panel = panel.child(ui::details::meta_row(&theme, "Dimensions", format!("{w} × {h}")));
+        }
+        let panel = panel
+            .child(ui::details::divider(&theme))
+            .child(ui::details::meta_row(&theme, "Where", where_value));
+        Some(panel.into_any_element())
+    }
 }
 
 impl Render for Workspace {
@@ -2352,6 +2524,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoUp, _window, cx| this.go_up(cx)))
             .on_action(cx.listener(|this, _: &ToggleSettings, _window, cx| {
                 this.toggle_settings(cx);
+            }))
+            .on_action(cx.listener(|this, _: &TogglePreview, _window, cx| {
+                this.toggle_preview(cx);
             }))
             .on_action(cx.listener(|this, _: &RenameSelected, window, cx| {
                 this.start_rename(window, cx);
@@ -2410,7 +2585,8 @@ impl Render for Workspace {
                         self.render_settings_pane(cx)
                     } else {
                         self.render_browse_pane(window, cx)
-                    }),
+                    })
+                    .children(self.render_details_panel(cx)),
             )
             .children(self.render_jobs(cx))
             .child(self.render_status_bar(&theme))
@@ -2439,6 +2615,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-,", ToggleSettings, None),
             #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-i", TogglePreview, None),
+            #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-z", Undo, None),
             // Finder's delete shortcut. Plain Delete can't work here:
             // the always-focused search input consumes it as text
@@ -2453,6 +2631,8 @@ fn main() {
             KeyBinding::new("alt-up", GoUp, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-,", ToggleSettings, None),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-i", TogglePreview, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-z", Undo, None),
             // Not plain Delete: the always-focused search input

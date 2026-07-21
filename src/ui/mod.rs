@@ -8,6 +8,7 @@
 //! state and business logic stay in the workspace / lib.
 
 pub mod assets;
+pub mod details;
 pub mod fonts;
 pub mod grid;
 pub mod icon;

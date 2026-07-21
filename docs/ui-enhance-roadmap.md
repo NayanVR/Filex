@@ -151,6 +151,20 @@ stepper covers the same size steps.
 
 ### 5. Preview / details panel
 
+**Done 2026-07-21.** `ui::details` renders a right-hand panel for the
+lead item: a large preview (the image thumbnail at 160px, else the big
+file-type icon — reusing `render_icon_cell`, no PDF/design parsing) over
+name, Kind (`FileKind::label`), Size, Modified, Created, image
+Dimensions, and Where. Created time + dimensions are fetched lazily
+off-thread per selection (`fetch_preview_meta`: one `std::fs::metadata`
++ `image::image_dimensions` header read), guarded against stale results
+by comparing the lead path. Settings gained `preview_open` +
+`preview_width`; a top-bar toggle (panel-right icon) and cmd-i/ctrl-i
+drive it, width persisted. The grid's column count subtracts the open
+panel's width so cards reflow. Drag-to-resize is deferred (width is
+persisted at a fixed default for now); a larger dedicated preview decode
+(vs. reusing the 128px thumbnail) is a possible refinement.
+
 - Right-hand collapsible panel for the selected item: large preview,
   name, kind, size, created/modified, image dimensions.
 - Previews: images via the existing decode path at panel size
