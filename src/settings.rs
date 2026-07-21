@@ -38,6 +38,20 @@ pub struct Settings {
     pub confirm_delete: bool,
     pub delete_to_trash: bool,
     pub thumbnails_enabled: bool,
+    /// Which color theme to render: a fixed light/dark palette, or one
+    /// that follows the OS appearance.
+    pub theme: ThemeMode,
+}
+
+/// The three theme choices exposed in settings. `System` follows the
+/// window's OS appearance; the app maps this to a concrete palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 impl Default for Settings {
@@ -50,6 +64,7 @@ impl Default for Settings {
             confirm_delete: true,
             delete_to_trash: true,
             thumbnails_enabled: true,
+            theme: ThemeMode::System,
         }
     }
 }
@@ -135,6 +150,7 @@ mod tests {
         assert!(settings.confirm_delete);
         assert!(settings.delete_to_trash);
         assert!(settings.thumbnails_enabled);
+        assert_eq!(settings.theme, ThemeMode::System);
     }
 
     #[test]

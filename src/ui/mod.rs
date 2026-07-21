@@ -7,6 +7,7 @@
 //! workspace render method past a screenful, belongs here — while
 //! state and business logic stay in the workspace / lib.
 
+pub mod fonts;
 pub mod icon;
 pub mod job;
 pub mod list_row;

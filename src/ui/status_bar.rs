@@ -4,12 +4,16 @@
 //! be unit-tested without GPUI; the workspace only counts state and
 //! passes numbers in.
 
-use gpui::{Div, SharedString, div, prelude::*, px, rgb};
+use gpui::{Div, SharedString, div, prelude::*, px};
 
-use super::theme::{BG_PANEL, BORDER, TEXT_DIM};
+use super::theme::Theme;
 
 /// The bar container: left-aligned message, right-aligned index status.
-pub fn status_bar(left: impl Into<SharedString>, right: impl Into<SharedString>) -> Div {
+pub fn status_bar(
+    theme: &Theme,
+    left: impl Into<SharedString>,
+    right: impl Into<SharedString>,
+) -> Div {
     div()
         .flex()
         .items_center()
@@ -17,10 +21,10 @@ pub fn status_bar(left: impl Into<SharedString>, right: impl Into<SharedString>)
         .h(px(26.))
         .px_3()
         .border_t_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(BG_PANEL))
+        .border_color(theme.border)
+        .bg(theme.panel)
         .text_xs()
-        .text_color(rgb(TEXT_DIM))
+        .text_color(theme.text_dim)
         .child(left.into())
         .child(right.into())
 }

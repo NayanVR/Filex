@@ -7,9 +7,9 @@
 //! presentation-only: the caller supplies current values and chains
 //! `.on_click` to mutate the settings store.
 
-use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
-use super::theme::{ACCENT, BG_HOVER, BG_PANEL, BORDER, TEXT, TEXT_DIM};
+use super::theme::Theme;
 
 /// The pane container filling the main content area.
 pub fn settings_pane() -> Div {
@@ -17,58 +17,109 @@ pub fn settings_pane() -> Div {
 }
 
 /// The pane's heading.
-pub fn pane_title(text: impl Into<SharedString>) -> Div {
-    div().pb_2().text_sm().text_color(rgb(TEXT)).child(text.into())
+pub fn pane_title(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div().pb_2().text_sm().text_color(theme.text).child(text.into())
+}
+
+/// The label + explanation stack shared by every settings row.
+fn row_label(theme: &Theme, label: impl Into<SharedString>, description: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(div().text_sm().text_color(theme.text).child(label.into()))
+        .child(div().text_xs().text_color(theme.text_dim).child(description.into()))
+}
+
+/// The shell of a settings row: label on the left, a control on the
+/// right. [`toggle_row`] and [`choice_row`] both build on it.
+fn row_shell() -> Div {
+    div().flex().items_center().justify_between().gap_4().px_3().py_2().rounded_md()
 }
 
 /// One toggleable setting: label + explanation on the left, a switch
 /// showing `on` on the right. The whole row is the click target.
 pub fn toggle_row(
+    theme: &Theme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     description: impl Into<SharedString>,
     on: bool,
 ) -> Stateful<Div> {
-    div()
+    let hover = theme.hover;
+    row_shell()
         .id(id)
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_4()
-        .px_3()
-        .py_2()
-        .rounded_md()
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(BG_HOVER)))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(div().text_sm().text_color(rgb(TEXT)).child(label.into()))
-                .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(description.into())),
-        )
-        .child(switch(on))
+        .hover(move |s| s.bg(hover))
+        .child(row_label(theme, label, description))
+        .child(switch(theme, on))
+}
+
+/// A setting picked from a small fixed set of choices: label on the
+/// left, a [`segmented`] control on the right. The caller builds the
+/// segments (each its own click target) and passes them in.
+pub fn choice_row(
+    theme: &Theme,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: AnyElement,
+) -> Div {
+    row_shell().child(row_label(theme, label, description)).child(control)
+}
+
+/// The container for a segmented control (a pill split into [`segment`]s).
+pub fn segmented(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(2.))
+        .p(px(2.))
+        .rounded_md()
+        .bg(theme.hover)
+}
+
+/// One choice in a [`segmented`] control; `selected` fills it with the
+/// accent. Callers chain `.on_click`.
+pub fn segment(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+) -> Stateful<Div> {
+    let base = div()
+        .id(id)
+        .px_2()
+        .py(px(2.))
+        .rounded_sm()
+        .cursor_pointer()
+        .text_xs()
+        .child(label.into());
+    if selected {
+        base.bg(theme.accent).text_color(theme.on_accent)
+    } else {
+        base.text_color(theme.text_dim)
+    }
 }
 
 /// The switch pill: accent track with the knob at the end when on,
 /// dim track with the knob at the start when off.
-fn switch(on: bool) -> AnyElement {
+fn switch(theme: &Theme, on: bool) -> AnyElement {
     div()
         .flex_none()
         .w(px(30.))
         .h(px(18.))
         .rounded_full()
         .p(px(2.))
-        .bg(rgb(if on { ACCENT } else { BORDER }))
+        .bg(if on { theme.accent } else { theme.border })
         .flex()
         .items_center()
         .when(on, |s| s.justify_end())
-        .child(div().size(px(14.)).rounded_full().bg(rgb(BG_PANEL)))
+        .child(div().size(px(14.)).rounded_full().bg(theme.panel))
         .into_any_element()
 }
 
 /// Dim footnote at the bottom of the pane (e.g. where settings live
 /// on disk).
-pub fn footnote(text: impl Into<SharedString>) -> Div {
-    div().pt_3().text_xs().text_color(rgb(TEXT_DIM)).child(text.into())
+pub fn footnote(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div().pt_3().text_xs().text_color(theme.text_dim).child(text.into())
 }

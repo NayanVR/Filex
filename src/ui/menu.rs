@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Div, ElementId, Pixels, Point, SharedString,
-    Stateful, div, ease_out_quint, prelude::*, px, rgb,
+    Stateful, div, ease_out_quint, prelude::*, px,
 };
 
-use super::theme::{BG_PANEL, BG_SELECTED, BORDER, TEXT, TEXT_DIM, WARN};
+use super::theme::Theme;
 
 /// Menu card width; callers use it to clamp the anchor so the menu
 /// never opens past the window edge.
@@ -29,7 +29,7 @@ pub fn overlay(id: impl Into<ElementId>) -> Stateful<Div> {
 /// The anchored menu card. `position` is in window coordinates,
 /// already clamped by the caller; `items` come from [`item`] /
 /// [`separator`].
-pub fn panel(position: Point<Pixels>, items: Vec<AnyElement>) -> impl IntoElement {
+pub fn panel(theme: &Theme, position: Point<Pixels>, items: Vec<AnyElement>) -> impl IntoElement {
     div()
         .absolute()
         .left(position.x)
@@ -38,8 +38,8 @@ pub fn panel(position: Point<Pixels>, items: Vec<AnyElement>) -> impl IntoElemen
         .py_1()
         .rounded_lg()
         .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(BG_PANEL))
+        .border_color(theme.border)
+        .bg(theme.panel)
         .shadow_lg()
         .flex()
         .flex_col()
@@ -53,7 +53,13 @@ pub fn panel(position: Point<Pixels>, items: Vec<AnyElement>) -> impl IntoElemen
 
 /// One menu entry; callers chain `.on_click`. `danger` marks
 /// destructive entries (trash, remove) with the warn color.
-pub fn item(id: impl Into<ElementId>, label: impl Into<SharedString>, danger: bool) -> Stateful<Div> {
+pub fn item(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    danger: bool,
+) -> Stateful<Div> {
+    let selected = theme.selected;
     div()
         .id(id)
         .mx_1()
@@ -62,24 +68,24 @@ pub fn item(id: impl Into<ElementId>, label: impl Into<SharedString>, danger: bo
         .rounded_md()
         .cursor_pointer()
         .text_sm()
-        .text_color(rgb(if danger { WARN } else { TEXT }))
-        .hover(|s| s.bg(rgb(BG_SELECTED)))
+        .text_color(if danger { theme.warn } else { theme.text })
+        .hover(move |s| s.bg(selected))
         .child(label.into())
 }
 
 /// Thin line between item groups.
-pub fn separator() -> Div {
-    div().my_1().h(px(1.)).bg(rgb(BORDER))
+pub fn separator(theme: &Theme) -> Div {
+    div().my_1().h(px(1.)).bg(theme.border)
 }
 
 /// Dim, non-interactive heading (e.g. the file name the menu is for).
-pub fn heading(label: impl Into<SharedString>) -> Div {
+pub fn heading(theme: &Theme, label: impl Into<SharedString>) -> Div {
     div()
         .mx_1()
         .px_2()
         .pb_1()
         .text_xs()
-        .text_color(rgb(TEXT_DIM))
+        .text_color(theme.text_dim)
         .overflow_hidden()
         .child(label.into())
 }

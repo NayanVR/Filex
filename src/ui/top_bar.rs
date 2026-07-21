@@ -1,9 +1,9 @@
 //! The top bar: navigation button, current path, and the search box
 //! frame (the input entity itself lives in the workspace).
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, rgb};
+use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
-use super::theme::{ACCENT, BG_HOVER, BG_PANEL, BORDER, TEXT, TEXT_DIM};
+use super::theme::Theme;
 
 /// Bar height. The macOS titlebar is transparent and the traffic
 /// lights are inset into this bar, so their position (set at window
@@ -11,7 +11,7 @@ use super::theme::{ACCENT, BG_HOVER, BG_PANEL, BORDER, TEXT, TEXT_DIM};
 pub const TOP_BAR_HEIGHT: f32 = 40.;
 
 /// The bar container; children flow left-to-right.
-pub fn top_bar() -> Div {
+pub fn top_bar(theme: &Theme) -> Div {
     let bar = div()
         .flex()
         .items_center()
@@ -19,8 +19,8 @@ pub fn top_bar() -> Div {
         .h(px(TOP_BAR_HEIGHT))
         .px_3()
         .border_b_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(BG_PANEL));
+        .border_color(theme.border)
+        .bg(theme.panel);
     // Clear the inset traffic lights (unified-titlebar look): the
     // three buttons start at x=12 and span ~52px.
     #[cfg(target_os = "macos")]
@@ -29,15 +29,16 @@ pub fn top_bar() -> Div {
 }
 
 /// A small glyph button ("↑"). Callers chain `.on_click`.
-pub fn toolbar_button(id: impl Into<ElementId>, glyph: &'static str) -> Stateful<Div> {
+pub fn toolbar_button(theme: &Theme, id: impl Into<ElementId>, glyph: &'static str) -> Stateful<Div> {
+    let hover = theme.hover;
     div()
         .id(id)
         .px_2()
         .py_1()
         .rounded_md()
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(BG_HOVER)))
-        .text_color(rgb(TEXT_DIM))
+        .hover(move |s| s.bg(hover))
+        .text_color(theme.text_dim)
         .child(glyph)
 }
 
@@ -49,29 +50,31 @@ pub fn breadcrumbs() -> Div {
 
 /// One clickable path segment. Callers chain `.on_click` to navigate.
 pub fn breadcrumb_segment(
+    theme: &Theme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
+    let (hover, text) = (theme.hover, theme.text);
     div()
         .id(id)
         .px_1()
         .rounded_sm()
         .cursor_pointer()
         .text_sm()
-        .text_color(rgb(TEXT_DIM))
-        .hover(|s| s.bg(rgb(BG_HOVER)).text_color(rgb(TEXT)))
+        .text_color(theme.text_dim)
+        .hover(move |s| s.bg(hover).text_color(text))
         .child(label.into())
 }
 
 /// The "›" between segments (also used, without siblings, as the
 /// non-clickable "…" that stands in for elided middle segments).
-pub fn breadcrumb_separator(glyph: &'static str) -> Div {
-    div().text_xs().text_color(rgb(TEXT_DIM)).child(glyph)
+pub fn breadcrumb_separator(theme: &Theme, glyph: &'static str) -> Div {
+    div().text_xs().text_color(theme.text_dim).child(glyph)
 }
 
 /// The search box frame; the border lights up while a query is active.
 /// The caller adds the input entity as the child.
-pub fn search_box(active: bool) -> Div {
+pub fn search_box(theme: &Theme, active: bool) -> Div {
     div()
         .flex()
         .items_center()
@@ -80,7 +83,7 @@ pub fn search_box(active: bool) -> Div {
         .py_1()
         .rounded_md()
         .border_1()
-        .border_color(rgb(if active { ACCENT } else { BORDER }))
+        .border_color(if active { theme.accent } else { theme.border })
         .text_sm()
-        .text_color(rgb(TEXT))
+        .text_color(theme.text)
 }

@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
-use gpui::{AnyElement, RenderImage, div, img, prelude::*, px, rgb};
+use gpui::{AnyElement, RenderImage, div, img, prelude::*, px};
 
 use filex::listing::FileKind;
 
-use super::theme::{ACCENT, TEXT_DIM};
+use super::theme::Theme;
 
 /// Width (and height, for thumbnails) of the icon cell. Public so the
 /// column header can align its leading spacer with the icon column.
@@ -28,11 +28,11 @@ pub fn thumbnail_icon(imagery: Arc<RenderImage>) -> AnyElement {
 }
 
 /// The glyph for `kind`, accent-colored for directories.
-pub fn glyph_icon(kind: FileKind, is_dir: bool) -> AnyElement {
+pub fn glyph_icon(theme: &Theme, kind: FileKind, is_dir: bool) -> AnyElement {
     div()
         .w(px(ICON_SIZE))
         .text_sm()
-        .text_color(rgb(if is_dir { ACCENT } else { TEXT_DIM }))
+        .text_color(if is_dir { theme.accent } else { theme.text_dim })
         .child(kind.glyph())
         .into_any_element()
 }

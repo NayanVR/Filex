@@ -33,6 +33,26 @@ retrofitted.
 
 ### 1. Theme system + light theme + typography
 
+**Done 2026-07-21.** `ui::theme` is now a `Theme` struct of semantic
+`Rgba` slots (bg, panel, hover, selected, stripe, border, text,
+text_dim, accent, on_accent, accent_selection, warn, success) with two
+variants — `Theme::dark()` (pixel-identical to the old constants) and
+`Theme::light()` (white content, cyan-blue accent deepened to `#0e8fce`
+so `on_accent` white reads on fills). It lives in GPUI global state,
+reached via the `ActiveTheme` extension (`cx.theme()`); every `ui::*`
+component and the search input takes `&Theme` and no component
+references a raw hex value. New `theme` setting (`system`/`light`/`dark`,
+default `system`) resolves against `window.appearance()` and re-resolves
+live via `observe_window_appearance`; the settings pane gained an
+Appearance segmented control (`choice_row`/`segmented`/`segment`) that
+restyles the app instantly. Typography: Inter (four static weights,
+OFL, in `assets/fonts/`) is embedded via `include_bytes!`, registered
+at startup (`ui::fonts::register`), and set as the root `font_family`
+so it cascades everywhere. Accent decision (2026-07-21): keep the
+cyan-blue family across both themes rather than the mockup's violet.
+Per-size/weight theme tokens were deferred — the existing `text_xs/sm`
+helpers carry the scale for now.
+
 - Replace the `ui::theme` constants with a `Theme` struct: semantic
   slots (bg, panel, hover, selected, stripe, border, text, text-dim,
   accent, warn, success), two built-in variants (dark = current

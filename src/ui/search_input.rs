@@ -13,7 +13,7 @@ use gpui::{
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions,
-    div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -37,7 +37,7 @@ actions!(
     ]
 );
 
-use super::theme::{ACCENT as CURSOR, ACCENT_SELECTION as SELECTION, TEXT_DIM as PLACEHOLDER};
+use super::theme::ActiveTheme as _;
 
 pub enum SearchInputEvent {
     /// The text changed (typing, paste, cut, IME commit, clear).
@@ -528,6 +528,7 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let theme = *cx.theme();
         let input = self.input.read(cx);
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
@@ -535,7 +536,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), rgb(PLACEHOLDER).into())
+            (input.placeholder.clone(), theme.text_dim.into())
         } else {
             (content, style.color)
         };
@@ -583,7 +584,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(CURSOR),
+                    theme.accent,
                 )),
             )
         } else {
@@ -599,7 +600,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(SELECTION),
+                    theme.accent_selection,
                 )),
                 None,
             )

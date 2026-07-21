@@ -5,15 +5,15 @@ use futures::StreamExt as _;
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, FocusHandle, Focusable as _, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString,
-    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, rgb, size, uniform_list,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, size, uniform_list,
 };
 
 use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
-use filex::settings::SortBy;
+use filex::settings::{SortBy, ThemeMode};
 
 mod settings_store;
 mod thumbnails;
@@ -22,7 +22,7 @@ use filex::listing::FileKind;
 use settings_store::{SettingsEvent, SettingsStore};
 use thumbnails::ThumbnailState;
 use ui::search_input::{self, SearchInput, SearchInputEvent};
-use ui::theme::{ACCENT, BG, TEXT, TEXT_DIM, WARN};
+use ui::theme::{ActiveTheme as _, Theme};
 
 actions!(
     filex,
@@ -156,6 +156,10 @@ struct Workspace {
     roots: Vec<RootSlot>,
     settings: gpui::Entity<SettingsStore>,
     _settings_subscription: gpui::Subscription,
+    /// Last-known OS window appearance, tracked so the `system` theme
+    /// mode can be re-resolved when settings change without a window in
+    /// hand. Updated at startup and by the appearance observer.
+    appearance: WindowAppearance,
     /// Transient user-facing message (e.g. why a root couldn't be added).
     notice: Option<SharedString>,
     #[cfg(target_os = "macos")]
@@ -213,6 +217,16 @@ impl Workspace {
         configured
     }
 
+    /// Resolve the color theme from the `theme` setting + the current OS
+    /// appearance and install it as the global every component reads
+    /// through `cx.theme()`. Called at startup, whenever settings
+    /// change, and when the OS appearance flips.
+    fn apply_theme(&self, cx: &mut Context<Self>) {
+        let mode = self.settings.read(cx).settings().theme;
+        cx.set_global(Theme::resolve(mode, self.appearance));
+        cx.notify();
+    }
+
     fn new(cx: &mut Context<Self>) -> Self {
         let cwd = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let search_input = cx.new(SearchInput::new);
@@ -228,13 +242,14 @@ impl Workspace {
         });
         let settings = cx.new(SettingsStore::new);
         // Settings changes re-derive everything visible that depends on
-        // them (today: the hidden-file filter on the browse list).
+        // them (the hidden-file filter on the browse list, and the
+        // active color theme).
         let settings_subscription =
             cx.subscribe(&settings, |this, _store, event, cx| match event {
                 SettingsEvent::Changed => {
                     let cwd = this.cwd.clone();
                     this.load_dir(&cwd, cx);
-                    cx.notify();
+                    this.apply_theme(cx);
                 }
             });
         let mut this = Self {
@@ -245,6 +260,9 @@ impl Workspace {
             roots: Vec::new(),
             settings,
             _settings_subscription: settings_subscription,
+            // Corrected the moment a window exists (main's open-window
+            // closure) and kept current by the appearance observer.
+            appearance: WindowAppearance::Dark,
             notice: None,
             #[cfg(target_os = "macos")]
             fda_missing: false,
@@ -612,7 +630,7 @@ impl Workspace {
                 None => self.request_thumbnail(path.to_path_buf(), cx),
             }
         }
-        ui::icon::glyph_icon(kind, is_dir)
+        ui::icon::glyph_icon(cx.theme(), kind, is_dir)
     }
 
     /// Length of whichever list selection currently applies to.
@@ -1014,16 +1032,22 @@ impl Workspace {
         if self.jobs.is_empty() {
             return None;
         }
-        let mut bar = ui::job::jobs_bar();
+        let theme = *cx.theme();
+        let mut bar = ui::job::jobs_bar(&theme);
         for job in &self.jobs {
             let id = job.id;
             bar = bar.child(
-                ui::job::job_row(("job", id as usize), job.label.clone(), job.progress.fraction())
-                    .child(ui::job::cancel_button(("job-cancel", id as usize)).on_click(
-                        cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.cancel_job(id, cx);
-                        }),
-                    )),
+                ui::job::job_row(
+                    &theme,
+                    ("job", id as usize),
+                    job.label.clone(),
+                    job.progress.fraction(),
+                )
+                .child(ui::job::cancel_button(&theme, ("job-cancel", id as usize)).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.cancel_job(id, cx);
+                    }),
+                )),
             );
         }
         Some(bar.into_any_element())
@@ -1230,6 +1254,7 @@ impl Workspace {
     fn render_breadcrumbs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         const MAX_SEGMENTS: usize = 6;
         const TAIL_SEGMENTS: usize = 4;
+        let theme = *cx.theme();
         let segments = path_segments(&self.cwd);
         let elide = segments.len() > MAX_SEGMENTS;
         let tail_start = if elide { segments.len() - TAIL_SEGMENTS } else { usize::MAX };
@@ -1238,16 +1263,16 @@ impl Workspace {
         for (ix, (label, target)) in segments.into_iter().enumerate() {
             if elide && ix > 0 && ix < tail_start {
                 if ix == 1 {
-                    children.push(ui::top_bar::breadcrumb_separator("›").into_any_element());
-                    children.push(ui::top_bar::breadcrumb_separator("…").into_any_element());
+                    children.push(ui::top_bar::breadcrumb_separator(&theme, "›").into_any_element());
+                    children.push(ui::top_bar::breadcrumb_separator(&theme, "…").into_any_element());
                 }
                 continue;
             }
             if ix > 0 {
-                children.push(ui::top_bar::breadcrumb_separator("›").into_any_element());
+                children.push(ui::top_bar::breadcrumb_separator(&theme, "›").into_any_element());
             }
             children.push(
-                ui::top_bar::breadcrumb_segment(("crumb", ix), label)
+                ui::top_bar::breadcrumb_segment(&theme, ("crumb", ix), label)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         this.navigate(target.clone(), cx);
                     }))
@@ -1263,17 +1288,21 @@ impl Workspace {
     }
 
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        ui::top_bar::top_bar()
-            .child(ui::top_bar::toolbar_button("up", "↑").on_click(cx.listener(
+        let theme = *cx.theme();
+        ui::top_bar::top_bar(&theme)
+            .child(ui::top_bar::toolbar_button(&theme, "up", "↑").on_click(cx.listener(
                 |this, _: &ClickEvent, _window, cx| {
                     this.go_up(cx);
                 },
             )))
             .child(self.render_breadcrumbs(cx))
-            .child(ui::top_bar::search_box(!self.query.is_empty()).child(self.search_input.clone()))
             .child(
-                ui::top_bar::toolbar_button("settings", "⚙")
-                    .when(self.settings_open, |s| s.text_color(rgb(ACCENT)))
+                ui::top_bar::search_box(&theme, !self.query.is_empty())
+                    .child(self.search_input.clone()),
+            )
+            .child(
+                ui::top_bar::toolbar_button(&theme, "settings", "⚙")
+                    .when(self.settings_open, |s| s.text_color(theme.accent))
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.toggle_settings(cx);
                     })),
@@ -1281,15 +1310,23 @@ impl Workspace {
     }
 
     fn render_settings_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = *cx.theme();
         let settings = self.settings.read(cx).settings().clone();
         let file_note: SharedString = match filex::settings::default_settings_file() {
             Some(path) => format!("saved to {}", path.display()).into(),
             None => "no config directory found — settings won't persist".into(),
         };
         ui::settings_pane::settings_pane()
-            .child(ui::settings_pane::pane_title("Settings"))
+            .child(ui::settings_pane::pane_title(&theme, "Settings"))
+            .child(ui::settings_pane::choice_row(
+                &theme,
+                "Appearance",
+                "Match the system, or force a light or dark palette",
+                self.render_theme_selector(&theme, settings.theme, cx),
+            ))
             .child(
                 ui::settings_pane::toggle_row(
+                    &theme,
                     "show-hidden",
                     "Show hidden files",
                     "Dotfiles and OS-hidden entries in the browse list",
@@ -1303,6 +1340,7 @@ impl Workspace {
             )
             .child(
                 ui::settings_pane::toggle_row(
+                    &theme,
                     "confirm-delete",
                     "Confirm before deleting",
                     "First press arms; a second press moves the file to the trash",
@@ -1316,6 +1354,7 @@ impl Workspace {
             )
             .child(
                 ui::settings_pane::toggle_row(
+                    &theme,
                     "dirs-first",
                     "Directories first",
                     "Group folders above files whatever the sort order",
@@ -1331,6 +1370,7 @@ impl Workspace {
             )
             .child(
                 ui::settings_pane::toggle_row(
+                    &theme,
                     "thumbnails",
                     "Image thumbnails",
                     "Decode small previews for image files in the list",
@@ -1342,7 +1382,33 @@ impl Workspace {
                     });
                 })),
             )
-            .child(ui::settings_pane::footnote(file_note))
+            .child(ui::settings_pane::footnote(&theme, file_note))
+            .into_any_element()
+    }
+
+    /// The three-way light/dark/system segmented control for the
+    /// Appearance setting. Each segment writes the chosen mode straight
+    /// to the store; the Changed event re-resolves and reinstalls the
+    /// theme, restyling the whole app live.
+    fn render_theme_selector(
+        &self,
+        theme: &Theme,
+        current: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let segment = |id: &'static str, label: &'static str, mode: ThemeMode| {
+            ui::settings_pane::segment(theme, id, label, current == mode).on_click(cx.listener(
+                move |this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.theme = mode);
+                    });
+                },
+            ))
+        };
+        ui::settings_pane::segmented(theme)
+            .child(segment("theme-system", "System", ThemeMode::System))
+            .child(segment("theme-light", "Light", ThemeMode::Light))
+            .child(segment("theme-dark", "Dark", ThemeMode::Dark))
             .into_any_element()
     }
 
@@ -1361,8 +1427,9 @@ impl Workspace {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.path.clone())
             .into();
-        ui::sidebar::sidebar_row(("service-root", ix))
-            .child(ui::sidebar::root_marker("◆", ACCENT))
+        let theme = *cx.theme();
+        ui::sidebar::sidebar_row(&theme, ("service-root", ix))
+            .child(ui::sidebar::root_marker("◆", theme.accent))
             .child(div().flex_1().overflow_hidden().child(label))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.navigate(path.clone(), cx);
@@ -1373,6 +1440,7 @@ impl Workspace {
     // `use<>`: the built element owns its data; without opting out of
     // lifetime capture it couldn't be collected across loop iterations.
     fn render_root_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = *cx.theme();
         let slot = &self.roots[ix];
         let path = slot.path.clone();
         // Clicking a healthy root navigates to it; clicking a failed one
@@ -1382,12 +1450,12 @@ impl Workspace {
             _ => None,
         };
         let (marker, marker_color) = match &slot.state {
-            RootState::Building => ("…", TEXT_DIM),
-            RootState::Ready { .. } => ("●", ACCENT),
-            RootState::Failed(_) => ("✕", WARN),
+            RootState::Building => ("…", theme.text_dim),
+            RootState::Ready { .. } => ("●", theme.accent),
+            RootState::Failed(_) => ("✕", theme.warn),
         };
         let menu_path = slot.path.clone();
-        ui::sidebar::sidebar_row(("root", ix))
+        ui::sidebar::sidebar_row(&theme, ("root", ix))
             .child(ui::sidebar::root_marker(marker, marker_color))
             .child(div().flex_1().overflow_hidden().child(slot.label.clone()))
             .on_mouse_down(
@@ -1408,6 +1476,7 @@ impl Workspace {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *cx.theme();
         // Emoji glyphs stand in until the real icon set lands (roadmap).
         let places: Vec<(&str, &str, PathBuf)> = [
             ("🏠", "Home", std::env::home_dir()),
@@ -1436,21 +1505,21 @@ impl Workspace {
                 .collect()
         };
 
-        let sidebar = ui::sidebar::sidebar_panel()
-            .child(ui::sidebar::section_header("PLACES"))
+        let sidebar = ui::sidebar::sidebar_panel(&theme)
+            .child(ui::sidebar::section_header(&theme, "PLACES"))
             .children(places.into_iter().enumerate().map(|(ix, (glyph, label, path))| {
-                ui::sidebar::sidebar_row(("place", ix))
-                    .child(ui::sidebar::root_marker(glyph, TEXT_DIM))
+                ui::sidebar::sidebar_row(&theme, ("place", ix))
+                    .child(ui::sidebar::root_marker(glyph, theme.text_dim))
                     .child(label)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         this.navigate(path.clone(), cx);
                     }))
             }))
-            .child(ui::sidebar::section_header("INDEXED").pt_3())
+            .child(ui::sidebar::section_header(&theme, "INDEXED").pt_3())
             .children(root_rows)
             .child(
-                ui::sidebar::sidebar_row("add-root")
-                    .text_color(rgb(TEXT_DIM))
+                ui::sidebar::sidebar_row(&theme, "add-root")
+                    .text_color(theme.text_dim)
                     .child("+ index current folder")
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.add_current_folder(cx);
@@ -1462,9 +1531,9 @@ impl Workspace {
         #[cfg(target_os = "macos")]
         let sidebar = if self.fda_missing {
             sidebar.child(div().flex_1()).child(
-                ui::sidebar::sidebar_row("fda-banner")
+                ui::sidebar::sidebar_row(&theme, "fda-banner")
                     .text_xs()
-                    .text_color(rgb(WARN))
+                    .text_color(theme.warn)
                     .child("⚠ Grant Full Disk Access")
                     .on_click(|_: &ClickEvent, _window, _cx| {
                         filex::index::macos::open_full_disk_access_settings();
@@ -1494,6 +1563,7 @@ impl Workspace {
     }
 
     fn render_column_headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *cx.theme();
         let sort = self.settings.read(cx).settings().sort;
         let active = |by: SortBy| (sort.by == by).then_some(sort.ascending);
         let on_sort = |by: SortBy| {
@@ -1501,21 +1571,26 @@ impl Workspace {
                 this.set_sort(by, cx);
             })
         };
-        ui::list_row::header_row(ui::icon::ICON_SIZE)
+        ui::list_row::header_row(&theme, ui::icon::ICON_SIZE)
             .child(
-                ui::list_row::header_cell("sort-name", "Name", active(SortBy::Name))
+                ui::list_row::header_cell(&theme, "sort-name", "Name", active(SortBy::Name))
                     .flex_1()
                     .on_click(on_sort(SortBy::Name)),
             )
             .child(
-                ui::list_row::header_cell("sort-modified", "Modified", active(SortBy::Modified))
-                    .w(px(ui::list_row::MODIFIED_COL_WIDTH))
-                    .flex_none()
-                    .text_right()
-                    .on_click(on_sort(SortBy::Modified)),
+                ui::list_row::header_cell(
+                    &theme,
+                    "sort-modified",
+                    "Modified",
+                    active(SortBy::Modified),
+                )
+                .w(px(ui::list_row::MODIFIED_COL_WIDTH))
+                .flex_none()
+                .text_right()
+                .on_click(on_sort(SortBy::Modified)),
             )
             .child(
-                ui::list_row::header_cell("sort-size", "Size", active(SortBy::Size))
+                ui::list_row::header_cell(&theme, "sort-size", "Size", active(SortBy::Size))
                     .w(px(ui::list_row::SIZE_COL_WIDTH))
                     .flex_none()
                     .text_right()
@@ -1539,6 +1614,7 @@ impl Workspace {
             "entries",
             self.entries.len(),
             cx.processor(|this, range: Range<usize>, _window, cx| {
+                let theme = *cx.theme();
                 range
                     .filter_map(|ix| {
         // Copy row data out first: the icon cell needs &mut self (it may
@@ -1561,21 +1637,23 @@ impl Workspace {
                                 .px_1()
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(rgb(ACCENT))
+                                .border_color(theme.accent)
                                 .text_sm()
                                 .child(input)
                                 .into_any_element(),
                             None => div().flex_1().text_sm().child(name).into_any_element(),
                         };
                         Some(
-                            ui::list_row::list_row(ix, is_selected)
+                            ui::list_row::list_row(&theme, ix, is_selected)
                                 .child(icon)
                                 .child(name_cell)
                                 .child(ui::list_row::detail_cell(
+                                    &theme,
                                     ui::list_row::MODIFIED_COL_WIDTH,
                                     format_modified(modified, std::time::SystemTime::now()),
                                 ))
                                 .child(ui::list_row::detail_cell(
+                                    &theme,
                                     ui::list_row::SIZE_COL_WIDTH,
                                     if is_dir { "—".to_string() } else { format_size(size) },
                                 ))
@@ -1606,6 +1684,7 @@ impl Workspace {
             "results",
             self.results.len(),
             cx.processor(|this, range: Range<usize>, _window, cx| {
+                let theme = *cx.theme();
                 range
                     .filter_map(|ix| {
                         let row = this.results.get(ix)?;
@@ -1615,14 +1694,14 @@ impl Workspace {
                         let path_label = row.path_label.clone();
                         let icon = this.render_icon_cell(&name, &path, is_dir, cx);
                         Some(
-                            ui::list_row::list_row(ix, is_selected)
+                            ui::list_row::list_row(&theme, ix, is_selected)
                                 .child(icon)
                                 .child(div().text_sm().child(name))
                                 .child(
                                     div()
                                         .flex_1()
                                         .text_xs()
-                                        .text_color(rgb(TEXT_DIM))
+                                        .text_color(theme.text_dim)
                                         .overflow_hidden()
                                         .child(path_label),
                                 )
@@ -1649,11 +1728,12 @@ impl Workspace {
     }
 
     fn render_search_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = *cx.theme();
         if !self.any_root_ready() {
-            return ui::pane::empty_state("still indexing — results will appear when ready…");
+            return ui::pane::empty_state(&theme, "still indexing — results will appear when ready…");
         }
         if self.results.is_empty() {
-            return ui::pane::empty_state(format!("no matches for “{}”", self.query));
+            return ui::pane::empty_state(&theme, format!("no matches for “{}”", self.query));
         }
         self.render_search_results(cx).into_any_element()
     }
@@ -1732,14 +1812,15 @@ impl Workspace {
 
     fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.context_menu.as_ref()?;
+        let theme = *cx.theme();
         let mut items: Vec<gpui::AnyElement> = Vec::new();
         match &menu.target {
             MenuTarget::Entry { ix, path, name, is_dir, from_search } => {
                 let (ix, is_dir, from_search) = (*ix, *is_dir, *from_search);
-                items.push(ui::menu::heading(name.clone()).into_any_element());
+                items.push(ui::menu::heading(&theme, name.clone()).into_any_element());
                 let p = path.clone();
                 items.push(
-                    ui::menu::item("menu-open", "Open", false)
+                    ui::menu::item(&theme, "menu-open", "Open", false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
                             this.open_target(p.clone(), is_dir, from_search, cx);
@@ -1749,7 +1830,7 @@ impl Workspace {
                 if from_search {
                     let p = path.clone();
                     items.push(
-                        ui::menu::item("menu-reveal", "Reveal in Folder", false)
+                        ui::menu::item(&theme, "menu-reveal", "Reveal in Folder", false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.close_menu(cx);
                                 this.reveal(p.clone(), cx);
@@ -1758,7 +1839,7 @@ impl Workspace {
                     );
                 } else {
                     items.push(
-                        ui::menu::item("menu-rename", "Rename", false)
+                        ui::menu::item(&theme, "menu-rename", "Rename", false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.close_menu(cx);
                                 this.selected = Some(ix);
@@ -1767,10 +1848,10 @@ impl Workspace {
                             .into_any_element(),
                     );
                 }
-                items.push(ui::menu::separator().into_any_element());
+                items.push(ui::menu::separator(&theme).into_any_element());
                 let (p, n) = (path.clone(), name.clone());
                 items.push(
-                    ui::menu::item("menu-copy", "Copy", false)
+                    ui::menu::item(&theme, "menu-copy", "Copy", false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
                             this.clip_path(p.clone(), &n, ClipMode::Copy, cx);
@@ -1779,7 +1860,7 @@ impl Workspace {
                 );
                 let (p, n) = (path.clone(), name.clone());
                 items.push(
-                    ui::menu::item("menu-cut", "Cut", false)
+                    ui::menu::item(&theme, "menu-cut", "Cut", false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
                             this.clip_path(p.clone(), &n, ClipMode::Cut, cx);
@@ -1788,7 +1869,7 @@ impl Workspace {
                 );
                 let p = path.clone();
                 items.push(
-                    ui::menu::item("menu-copy-path", "Copy Path", false)
+                    ui::menu::item(&theme, "menu-copy-path", "Copy Path", false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
                             this.copy_path_to_clipboard(&p, cx);
@@ -1798,7 +1879,7 @@ impl Workspace {
                 if is_dir && !self.service_mode() {
                     let p = path.clone();
                     items.push(
-                        ui::menu::item("menu-index", "Index This Folder", false)
+                        ui::menu::item(&theme, "menu-index", "Index This Folder", false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.close_menu(cx);
                                 this.add_root(p.clone(), cx);
@@ -1806,10 +1887,10 @@ impl Workspace {
                             .into_any_element(),
                     );
                 }
-                items.push(ui::menu::separator().into_any_element());
+                items.push(ui::menu::separator(&theme).into_any_element());
                 let p = path.clone();
                 items.push(
-                    ui::menu::item("menu-trash", "Move to Trash", true)
+                    ui::menu::item(&theme, "menu-trash", "Move to Trash", true)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
                             this.run_op(FileOp::Delete { path: p.clone() }, cx);
@@ -1820,10 +1901,10 @@ impl Workspace {
             MenuTarget::Root { path } => {
                 let label =
                     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                items.push(ui::menu::heading(label).into_any_element());
+                items.push(ui::menu::heading(&theme, label).into_any_element());
                 let p = path.clone();
                 items.push(
-                    ui::menu::item("menu-remove-root", "Remove from Index", true)
+                    ui::menu::item(&theme, "menu-remove-root", "Remove from Index", true)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
                             this.remove_root(&p.clone(), cx);
@@ -1843,13 +1924,14 @@ impl Workspace {
                         this.close_menu(cx);
                     }),
                 )
-                .child(ui::menu::panel(menu.position, items))
+                .child(ui::menu::panel(&theme, menu.position, items))
                 .into_any_element(),
         )
     }
 
     fn render_conflict_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let conflict = self.conflict.as_ref()?;
+        let theme = *cx.theme();
         let name = conflict.dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
         Some(
             ui::modal::backdrop("conflict-backdrop")
@@ -1857,17 +1939,18 @@ impl Workspace {
                     this.resolve_conflict(false, cx);
                 }))
                 .child(
-                    ui::modal::panel("conflict-panel")
+                    ui::modal::panel(&theme, "conflict-panel")
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(ui::modal::title(format!("“{name}” already exists here")))
+                        .child(ui::modal::title(&theme, format!("“{name}” already exists here")))
                         .child(ui::modal::message(
+                            &theme,
                             "Nothing is overwritten: keep both renames the new one to a \
                              free “name 2” variant.",
                         ))
                         .child(
                             ui::modal::buttons()
                                 .child(
-                                    ui::modal::button("conflict-cancel", "Cancel", false)
+                                    ui::modal::button(&theme, "conflict-cancel", "Cancel", false)
                                         .on_click(cx.listener(
                                             |this, _: &ClickEvent, _window, cx| {
                                                 this.resolve_conflict(false, cx);
@@ -1875,7 +1958,7 @@ impl Workspace {
                                         )),
                                 )
                                 .child(
-                                    ui::modal::button("conflict-keep", "Keep Both", true)
+                                    ui::modal::button(&theme, "conflict-keep", "Keep Both", true)
                                         .on_click(cx.listener(
                                             |this, _: &ClickEvent, _window, cx| {
                                                 this.resolve_conflict(true, cx);
@@ -1888,7 +1971,7 @@ impl Workspace {
         )
     }
 
-    fn render_status_bar(&self) -> impl IntoElement {
+    fn render_status_bar(&self, theme: &Theme) -> impl IntoElement {
         let left: SharedString = if let Some(notice) = &self.notice {
             notice.clone()
         } else if let Some(err) = &self.load_error {
@@ -1903,13 +1986,14 @@ impl Workspace {
             )
             .into()
         };
-        ui::status_bar::status_bar(left, self.index_status_text())
+        ui::status_bar::status_bar(theme, left, self.index_status_text())
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let searching = !self.query.is_empty();
+        let theme = *cx.theme();
         div()
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -1954,8 +2038,9 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .font_family(ui::fonts::UI_FONT_FAMILY)
+            .bg(theme.bg)
+            .text_color(theme.text)
             .child(self.render_top_bar(cx))
             .child(
                 div()
@@ -1972,7 +2057,7 @@ impl Render for Workspace {
                     }),
             )
             .children(self.render_jobs(cx))
-            .child(self.render_status_bar())
+            .child(self.render_status_bar(&theme))
             .children(self.render_context_menu(cx))
             .children(self.render_conflict_modal(cx))
     }
@@ -1981,6 +2066,12 @@ impl Render for Workspace {
 fn main() {
     let _logging_guard = filex::logging::init("filex");
     Application::new().run(|cx: &mut App| {
+        // Register the bundled UI font before anything renders.
+        ui::fonts::register(cx);
+        // A default theme so `cx.theme()` is valid from the first frame;
+        // the workspace refines it against the real window appearance as
+        // soon as a window exists (see the open-window closure below).
+        cx.set_global(Theme::dark());
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
             #[cfg(target_os = "macos")]
@@ -2046,13 +2137,34 @@ fn main() {
             },
             |window, cx| {
                 cx.activate(true);
-                cx.new(|cx| {
+                let workspace = cx.new(|cx| {
                     let workspace = Workspace::new(cx);
                     // Focus the input so typing searches immediately;
                     // navigation keys bubble up to the workspace.
                     window.focus(&workspace.search_input.focus_handle(cx));
                     workspace
-                })
+                });
+                // A window now exists, so its OS appearance is known:
+                // resolve the theme against it, and keep it in sync as
+                // the user flips the OS between light and dark.
+                workspace.update(cx, |ws, cx| {
+                    ws.appearance = window.appearance();
+                    ws.apply_theme(cx);
+                });
+                window
+                    .observe_window_appearance({
+                        let workspace = workspace.downgrade();
+                        move |window, cx| {
+                            workspace
+                                .update(cx, |ws, cx| {
+                                    ws.appearance = window.appearance();
+                                    ws.apply_theme(cx);
+                                })
+                                .ok();
+                        }
+                    })
+                    .detach();
+                workspace
             },
         )
         .expect("failed to open the main window");

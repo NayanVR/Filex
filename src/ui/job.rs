@@ -2,19 +2,20 @@
 //! progress bar, cancel control. Shown in a slim bar above the status
 //! bar only while jobs run.
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, relative, rgb};
+use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, relative};
 
-use super::theme::{ACCENT, BG_HOVER, BG_PANEL, BORDER, TEXT_DIM, WARN};
+use super::theme::Theme;
 
 /// Container stacking one [`job_row`] per active job.
-pub fn jobs_bar() -> Div {
-    div().flex().flex_col().border_t_1().border_color(rgb(BORDER)).bg(rgb(BG_PANEL))
+pub fn jobs_bar(theme: &Theme) -> Div {
+    div().flex().flex_col().border_t_1().border_color(theme.border).bg(theme.panel)
 }
 
 /// One job: label on the left, progress bar filling the middle.
 /// `fraction` is completed 0..=1, or `None` while the total is still
 /// being sized (bar stays empty). Callers append the cancel button.
 pub fn job_row(
+    theme: &Theme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     fraction: Option<f32>,
@@ -31,14 +32,14 @@ pub fn job_row(
         .px_3()
         .h(px(24.))
         .text_xs()
-        .text_color(rgb(TEXT_DIM))
+        .text_color(theme.text_dim)
         .child(div().overflow_hidden().child(label.into()))
         .child(
-            div().flex_1().h(px(4.)).rounded_full().bg(rgb(BORDER)).child(
+            div().flex_1().h(px(4.)).rounded_full().bg(theme.border).child(
                 div()
                     .h_full()
                     .rounded_full()
-                    .bg(rgb(ACCENT))
+                    .bg(theme.accent)
                     .w(relative(fraction.unwrap_or(0.))),
             ),
         )
@@ -46,13 +47,14 @@ pub fn job_row(
 }
 
 /// The ✕ that cancels a job; callers chain `.on_click`.
-pub fn cancel_button(id: impl Into<ElementId>) -> Stateful<Div> {
+pub fn cancel_button(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
+    let (hover, warn) = (theme.hover, theme.warn);
     div()
         .id(id)
         .px_1()
         .rounded_sm()
         .cursor_pointer()
-        .text_color(rgb(TEXT_DIM))
-        .hover(|s| s.bg(rgb(BG_HOVER)).text_color(rgb(WARN)))
+        .text_color(theme.text_dim)
+        .hover(move |s| s.bg(hover).text_color(warn))
         .child("✕")
 }
