@@ -215,10 +215,14 @@ struct Workspace {
     _search_input_subscription: gpui::Subscription,
     results: Vec<SearchRow>,
     search_generation: u64,
-    /// Multi-selection over the active list (search results while
-    /// searching, directory entries otherwise). Reset whenever that list
-    /// changes.
+    /// Multi-selection over the browse list (directory entries). Belongs
+    /// to the active tab (block 6); survives a search and is restored
+    /// when the query clears.
     selection: Selection,
+    /// Multi-selection over the global search results. Separate from
+    /// `selection` so a search doesn't disturb the browse selection —
+    /// search is a Spotlight-style overlay, not part of a tab.
+    search_selection: Selection,
     /// The settings pane replaces the browse list while open (search
     /// still takes precedence, Spotlight-style).
     settings_open: bool,
@@ -319,6 +323,7 @@ impl Workspace {
             results: Vec::new(),
             search_generation: 0,
             selection: Selection::default(),
+            search_selection: Selection::default(),
             settings_open: false,
             renaming: None,
             journal: ops::Journal::default(),
@@ -683,14 +688,24 @@ impl Workspace {
         if self.query.is_empty() { self.entries.len() } else { self.results.len() }
     }
 
+    /// The selection for the active list: the global search selection
+    /// while a query is live, otherwise the (per-tab) browse selection.
+    fn active_selection(&self) -> &Selection {
+        if self.query.is_empty() { &self.selection } else { &self.search_selection }
+    }
+
+    fn active_selection_mut(&mut self) -> &mut Selection {
+        if self.query.is_empty() { &mut self.selection } else { &mut self.search_selection }
+    }
+
     /// Arrow-key navigation. `extend` (shift held) grows the range from
     /// the anchor instead of moving a single selection.
     fn move_selection(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
         let len = self.active_list_len();
         let next = if extend {
-            self.selection.extend_lead(delta, len)
+            self.active_selection_mut().extend_lead(delta, len)
         } else {
-            self.selection.move_lead(delta, len)
+            self.active_selection_mut().move_lead(delta, len)
         };
         if let Some(next) = next {
             let handle =
@@ -787,7 +802,7 @@ impl Workspace {
     }
 
     fn activate_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(ix) = self.selection.lead() {
+        if let Some(ix) = self.active_selection().lead() {
             self.activate(ix, cx);
         }
     }
@@ -797,11 +812,11 @@ impl Workspace {
     /// selects only it.
     fn select_click(&mut self, ix: usize, modifiers: gpui::Modifiers, cx: &mut Context<Self>) {
         if modifiers.secondary() {
-            self.selection.toggle(ix);
+            self.active_selection_mut().toggle(ix);
         } else if modifiers.shift {
-            self.selection.range_to(ix);
+            self.active_selection_mut().range_to(ix);
         } else {
-            self.selection.select_one(ix);
+            self.active_selection_mut().select_one(ix);
         }
         self.refresh_preview(cx);
         cx.notify();
@@ -811,7 +826,8 @@ impl Workspace {
         if self.renaming.is_some() || self.settings_open {
             return;
         }
-        self.selection.select_all(self.active_list_len());
+        let len = self.active_list_len();
+        self.active_selection_mut().select_all(len);
         self.refresh_preview(cx);
         cx.notify();
     }
@@ -844,7 +860,7 @@ impl Workspace {
         if !self.query.is_empty() || self.settings_open {
             return;
         }
-        let Some(ix) = self.selection.lead() else { return };
+        let Some(ix) = self.active_selection().lead() else { return };
         let Some(entry) = self.entries.get(ix) else { return };
         let name = entry.name.clone();
         let input = cx.new(SearchInput::new);
@@ -899,13 +915,13 @@ impl Workspace {
 
     /// Every selected item's (path, name), in list order.
     fn selected_paths(&self) -> Vec<(PathBuf, String)> {
-        self.selection.iter().filter_map(|ix| self.path_at(ix)).collect()
+        self.active_selection().iter().filter_map(|ix| self.path_at(ix)).collect()
     }
 
     /// The lead item (path, name, is_dir) — the details panel's subject
     /// and the natural single target.
     fn lead_item(&self) -> Option<(PathBuf, String, bool)> {
-        let ix = self.selection.lead()?;
+        let ix = self.active_selection().lead()?;
         if self.query.is_empty() {
             let entry = self.entries.get(ix)?;
             Some((entry.path.clone(), entry.name.clone(), entry.is_dir))
@@ -1393,7 +1409,9 @@ impl Workspace {
 
         if self.query.is_empty() {
             self.results.clear();
-            self.selection.clear();
+            // Leave the browse selection intact; only the search's own
+            // selection goes away with the results.
+            self.search_selection.clear();
             return;
         }
 
@@ -1477,9 +1495,9 @@ impl Workspace {
     /// immediately opens the top match.
     fn select_first_result(&mut self) {
         if self.results.is_empty() {
-            self.selection.clear();
+            self.search_selection.clear();
         } else {
-            self.selection.select_one(0);
+            self.search_selection.select_one(0);
         }
         self.results_scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
@@ -2012,7 +2030,7 @@ impl Workspace {
             return div().into_any_element();
         };
         let is_dir = entry.is_dir;
-        let is_selected = self.selection.contains(ix);
+        let is_selected = self.active_selection().contains(ix);
         let (name, path) = (entry.name.clone(), entry.path.clone());
         let detail: SharedString = if is_dir {
             format_modified(entry.modified, std::time::SystemTime::now()).into()
@@ -2061,7 +2079,7 @@ impl Workspace {
                         let is_dir = entry.is_dir;
                         let size = entry.size;
                         let modified = entry.modified;
-                        let is_selected = this.selection.contains(ix);
+                        let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
                         let rename_input = this
@@ -2127,7 +2145,7 @@ impl Workspace {
                     .filter_map(|ix| {
                         let row = this.results.get(ix)?;
                         let is_dir = row.is_dir;
-                        let is_selected = this.selection.contains(ix);
+                        let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
                         let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
@@ -2223,8 +2241,8 @@ impl Workspace {
         // Right-clicking a row outside the current selection selects
         // just it; right-clicking one already in a multi-selection keeps
         // the whole set, so the menu can act on all of it.
-        if !self.selection.contains(ix) {
-            self.selection.select_one(ix);
+        if !self.active_selection().contains(ix) {
+            self.active_selection_mut().select_one(ix);
         }
         self.context_menu = Some(ContextMenu {
             position: Self::clamped_menu_position(position, 280., window),
@@ -2263,7 +2281,7 @@ impl Workspace {
                 // The whole selection is the target; single-item-only
                 // actions (open, rename, reveal, index) drop out when
                 // more than one row is selected.
-                let count = self.selection.len();
+                let count = self.active_selection().len();
                 let heading =
                     describe_items(&self.selected_paths()).unwrap_or_else(|| name.clone());
                 items.push(ui::menu::heading(&theme, heading).into_any_element());
@@ -2293,7 +2311,7 @@ impl Workspace {
                             ui::menu::item(&theme, "menu-rename", "Rename", false)
                                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     this.close_menu(cx);
-                                    this.selection.select_one(ix);
+                                    this.active_selection_mut().select_one(ix);
                                     this.start_rename(window, cx);
                                 }))
                                 .into_any_element(),
@@ -2426,8 +2444,8 @@ impl Workspace {
             notice.clone()
         } else if let Some(err) = &self.load_error {
             format!("error — {err}").into()
-        } else if !self.selection.is_empty() {
-            let (n, total) = (self.selection.len(), self.active_list_len());
+        } else if !self.active_selection().is_empty() {
+            let (n, total) = (self.active_selection().len(), self.active_list_len());
             // Combined size only in browse — search rows carry no size.
             if self.query.is_empty() {
                 let bytes: u64 = self
