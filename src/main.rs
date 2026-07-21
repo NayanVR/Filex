@@ -13,6 +13,7 @@ use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
+use filex::selection::Selection;
 use filex::settings::{SortBy, ThemeMode};
 
 mod settings_store;
@@ -56,6 +57,16 @@ fn open_with_default_app(path: &Path) -> std::io::Result<()> {
 }
 
 const SEARCH_RESULT_LIMIT: usize = 500;
+
+/// A short label for a set of files: the single name quoted, or a count.
+/// `None` for an empty set (callers use it to bail early).
+fn describe_items(items: &[(PathBuf, String)]) -> Option<String> {
+    match items {
+        [] => None,
+        [(_, name)] => Some(format!("“{name}”")),
+        _ => Some(format!("{} items", items.len())),
+    }
+}
 
 fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
     index.read().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -176,9 +187,10 @@ struct Workspace {
     _search_input_subscription: gpui::Subscription,
     results: Vec<SearchRow>,
     search_generation: u64,
-    /// Index into the active list (search results while searching,
-    /// directory entries otherwise).
-    selected: Option<usize>,
+    /// Multi-selection over the active list (search results while
+    /// searching, directory entries otherwise). Reset whenever that list
+    /// changes.
+    selection: Selection,
     /// The settings pane replaces the browse list while open (search
     /// still takes precedence, Spotlight-style).
     settings_open: bool,
@@ -186,11 +198,12 @@ struct Workspace {
     renaming: Option<RenameState>,
     /// Undo stack of completed file operations.
     journal: ops::Journal,
-    /// Two-press delete confirmation: the path armed by the first
-    /// press; the second press on the same path deletes.
-    pending_delete: Option<PathBuf>,
-    /// Internal file clipboard (cmd-c / cmd-x on a row).
-    clipboard: Option<(PathBuf, ClipMode)>,
+    /// Two-press delete confirmation: the set of paths armed by the
+    /// first press; a second press on the same set deletes.
+    pending_delete: Option<Vec<PathBuf>>,
+    /// Internal file clipboard (cmd-c / cmd-x). Holds every path from
+    /// the selection at copy/cut time.
+    clipboard: Option<(Vec<PathBuf>, ClipMode)>,
     /// Open conflict dialog, if any.
     conflict: Option<ConflictState>,
     /// In-flight copy/move jobs (renames and deletes are instant and
@@ -275,7 +288,7 @@ impl Workspace {
             _search_input_subscription: subscription,
             results: Vec::new(),
             search_generation: 0,
-            selected: None,
+            selection: Selection::default(),
             settings_open: false,
             renaming: None,
             journal: ops::Journal::default(),
@@ -565,7 +578,7 @@ impl Workspace {
                 self.cwd = path.to_path_buf();
                 self.entries = entries;
                 self.load_error = None;
-                self.selected = None;
+                self.selection.clear();
                 // Any in-flight rename or armed delete points at rows
                 // that no longer exist; drop them.
                 self.renaming = None;
@@ -638,20 +651,20 @@ impl Workspace {
         if self.query.is_empty() { self.entries.len() } else { self.results.len() }
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    /// Arrow-key navigation. `extend` (shift held) grows the range from
+    /// the anchor instead of moving a single selection.
+    fn move_selection(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
         let len = self.active_list_len();
-        if len == 0 {
-            self.selected = None;
-            return;
-        }
-        let next = match self.selected {
-            Some(ix) => ix.saturating_add_signed(delta).min(len - 1),
-            None if delta > 0 => 0,
-            None => len - 1,
+        let next = if extend {
+            self.selection.extend_lead(delta, len)
+        } else {
+            self.selection.move_lead(delta, len)
         };
-        self.selected = Some(next);
-        let handle = if self.query.is_empty() { &self.browse_scroll } else { &self.results_scroll };
-        handle.scroll_to_item(next, ScrollStrategy::Center);
+        if let Some(next) = next {
+            let handle =
+                if self.query.is_empty() { &self.browse_scroll } else { &self.results_scroll };
+            handle.scroll_to_item(next, ScrollStrategy::Center);
+        }
         cx.notify();
     }
 
@@ -694,7 +707,7 @@ impl Workspace {
         if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
             && let Some(ix) = self.entries.iter().position(|entry| entry.name == name)
         {
-            self.selected = Some(ix);
+            self.selection.select_one(ix);
             self.browse_scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
         cx.notify();
@@ -714,20 +727,56 @@ impl Workspace {
         cx.notify();
     }
 
-    fn copy_path_to_clipboard(&mut self, path: &Path, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.display().to_string()));
-        self.notice = Some("path copied".into());
+    /// Write every selected item's path to the OS clipboard (one per
+    /// line), for pasting into a terminal or another app.
+    fn copy_selected_paths(&mut self, cx: &mut Context<Self>) {
+        let paths: Vec<String> =
+            self.selected_paths().iter().map(|(path, _)| path.display().to_string()).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let notice = if paths.len() == 1 {
+            "path copied".to_string()
+        } else {
+            format!("{} paths copied", paths.len())
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(paths.join("\n")));
+        self.notice = Some(notice.into());
         cx.notify();
     }
 
+    /// Trash every selected item (context-menu "Move to Trash" — no
+    /// two-press confirm, the click is already explicit).
+    fn trash_selected(&mut self, cx: &mut Context<Self>) {
+        let paths = self.selected_paths().into_iter().map(|(path, _)| path).collect();
+        self.delete_paths(paths, cx);
+    }
+
     fn activate_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(ix) = self.selected {
+        if let Some(ix) = self.selection.lead() {
             self.activate(ix, cx);
         }
     }
 
-    fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.selected = Some(ix);
+    /// A left click on row `ix`, dispatched by its keyboard modifiers:
+    /// cmd/ctrl toggles, shift ranges from the anchor, plain click
+    /// selects only it.
+    fn select_click(&mut self, ix: usize, modifiers: gpui::Modifiers, cx: &mut Context<Self>) {
+        if modifiers.secondary() {
+            self.selection.toggle(ix);
+        } else if modifiers.shift {
+            self.selection.range_to(ix);
+        } else {
+            self.selection.select_one(ix);
+        }
+        cx.notify();
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.is_some() || self.settings_open {
+            return;
+        }
+        self.selection.select_all(self.active_list_len());
         cx.notify();
     }
 
@@ -759,7 +808,7 @@ impl Workspace {
         if !self.query.is_empty() || self.settings_open {
             return;
         }
-        let Some(ix) = self.selected else { return };
+        let Some(ix) = self.selection.lead() else { return };
         let Some(entry) = self.entries.get(ix) else { return };
         let name = entry.name.clone();
         let input = cx.new(SearchInput::new);
@@ -800,37 +849,39 @@ impl Workspace {
         self.run_op(FileOp::Rename { path: entry.path.clone(), new_name }, cx);
     }
 
-    /// The selected item of whichever list is active (browse entries,
-    /// or search results while a query is live).
-    fn selected_path(&self) -> Option<(PathBuf, String)> {
+    /// The (path, name) at a list index in whichever list is active
+    /// (browse entries, or search results while a query is live).
+    fn path_at(&self, ix: usize) -> Option<(PathBuf, String)> {
         if self.query.is_empty() {
-            let entry = self.selected.and_then(|ix| self.entries.get(ix))?;
+            let entry = self.entries.get(ix)?;
             Some((entry.path.clone(), entry.name.clone()))
         } else {
-            let row = self.selected.and_then(|ix| self.results.get(ix))?;
+            let row = self.results.get(ix)?;
             Some((row.target.clone(), row.name.to_string()))
         }
     }
 
-    /// cmd-c / cmd-x on a row (reaches us only while the search input
-    /// is empty — otherwise the keys edit query text).
+    /// Every selected item's (path, name), in list order.
+    fn selected_paths(&self) -> Vec<(PathBuf, String)> {
+        self.selection.iter().filter_map(|ix| self.path_at(ix)).collect()
+    }
+
+    /// cmd-c / cmd-x (reaches us only while the search input is empty —
+    /// otherwise the keys edit query text). Captures every selected item.
     fn clip_selected(&mut self, mode: ClipMode, cx: &mut Context<Self>) {
         if self.renaming.is_some() || self.settings_open {
             return;
         }
-        let Some((path, name)) = self.selected_path() else { return };
-        self.clip_path(path, &name, mode, cx);
-    }
-
-    fn clip_path(&mut self, path: PathBuf, name: &str, mode: ClipMode, cx: &mut Context<Self>) {
+        let items = self.selected_paths();
+        let Some(label) = describe_items(&items) else { return };
         self.notice = Some(
             match mode {
-                ClipMode::Copy => format!("copied “{name}” — paste into a folder"),
-                ClipMode::Cut => format!("cut “{name}” — paste to move"),
+                ClipMode::Copy => format!("copied {label} — paste into a folder"),
+                ClipMode::Cut => format!("cut {label} — paste to move"),
             }
             .into(),
         );
-        self.clipboard = Some((path, mode));
+        self.clipboard = Some((items.into_iter().map(|(path, _)| path).collect(), mode));
         cx.notify();
     }
 
@@ -841,7 +892,7 @@ impl Workspace {
         if self.renaming.is_some() || self.settings_open {
             return;
         }
-        let Some((source, mode)) = self.clipboard.clone() else {
+        let Some((sources, mode)) = self.clipboard.clone() else {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 self.search_input.update(cx, |input, cx| {
                     input.set_text(text.replace('\n', " "), cx);
@@ -849,27 +900,101 @@ impl Workspace {
             }
             return;
         };
-        let Some(file_name) = source.file_name() else { return };
-        let dest = self.cwd.join(file_name);
-        if dest == source {
-            self.notice = Some(match mode {
-                ClipMode::Copy => "already here — copy conflicts get options soon".into(),
-                ClipMode::Cut => "already here".into(),
-            });
-            if mode == ClipMode::Cut {
-                self.clipboard = None;
+        // One item keeps the interactive conflict dialog; a multi-paste
+        // auto-resolves conflicts (keep-both) and lands as one undo.
+        if let [source] = &sources[..] {
+            let source = source.clone();
+            let Some(file_name) = source.file_name() else { return };
+            let dest = self.cwd.join(file_name);
+            if dest == source {
+                self.notice = Some(match mode {
+                    ClipMode::Copy => "already here — copy conflicts get options soon".into(),
+                    ClipMode::Cut => "already here".into(),
+                });
+                if mode == ClipMode::Cut {
+                    self.clipboard = None;
+                }
+                cx.notify();
+                return;
             }
-            cx.notify();
+            let op = match mode {
+                ClipMode::Copy => FileOp::Copy { from: source, to: dest },
+                ClipMode::Cut => FileOp::Move { from: source, to: dest },
+            };
+            if mode == ClipMode::Cut {
+                self.clipboard = None; // a move can only happen once
+            }
+            self.run_op(op, cx);
             return;
         }
-        let op = match mode {
-            ClipMode::Copy => FileOp::Copy { from: source, to: dest },
-            ClipMode::Cut => FileOp::Move { from: source, to: dest },
-        };
         if mode == ClipMode::Cut {
-            self.clipboard = None; // a move can only happen once
+            self.clipboard = None;
         }
-        self.run_op(op, cx);
+        self.spawn_paste_batch(sources, mode, cx);
+    }
+
+    /// Paste many clipboard items into the current directory as one undo
+    /// batch. Runs sequentially off-thread; an occupied destination
+    /// auto-resolves to the next free "name 2" variant (no per-item
+    /// prompt), and same-directory items are skipped. One job tracks the
+    /// run; byte progress reflects the item currently copying.
+    fn spawn_paste_batch(&mut self, sources: Vec<PathBuf>, mode: ClipMode, cx: &mut Context<Self>) {
+        let dest_dir = self.cwd.clone();
+        let progress = std::sync::Arc::new(ops::OpProgress::default());
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+        let verb = if mode == ClipMode::Copy { "copying" } else { "moving" };
+        self.jobs.push(Job {
+            id: job_id,
+            label: format!("{verb} {} items", sources.len()).into(),
+            progress: progress.clone(),
+        });
+        self.spawn_job_ticker(job_id, cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let applied = cx
+                .background_executor()
+                .spawn({
+                    let progress = progress.clone();
+                    async move {
+                        let mut applied = Vec::new();
+                        for source in sources {
+                            let Some(name) = source.file_name() else { continue };
+                            let mut dest = dest_dir.join(name);
+                            if dest == source {
+                                continue; // pasting into the same folder
+                            }
+                            if std::fs::symlink_metadata(&dest).is_ok() {
+                                match ops::next_free_name(&dest) {
+                                    Ok(free) => dest = free,
+                                    Err(_) => continue,
+                                }
+                            }
+                            let op = match mode {
+                                ClipMode::Copy => FileOp::Copy { from: source, to: dest },
+                                ClipMode::Cut => FileOp::Move { from: source, to: dest },
+                            };
+                            if let Ok(done) = ops::apply_with_progress(&op, &progress) {
+                                applied.push(done);
+                            }
+                        }
+                        applied
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.jobs.retain(|job| job.id != job_id);
+                if !applied.is_empty() {
+                    this.notice = Some(format!("pasted {} items", applied.len()).into());
+                    this.journal.record(applied);
+                }
+                let cwd = this.cwd.clone();
+                this.load_dir(&cwd, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Move the selected browse entry to the OS trash. With
@@ -880,19 +1005,58 @@ impl Workspace {
         if self.renaming.is_some() || !self.query.is_empty() || self.settings_open {
             return;
         }
-        let Some(entry) = self.selected.and_then(|ix| self.entries.get(ix)) else {
-            return;
-        };
-        let (path, name) = (entry.path.clone(), entry.name.clone());
+        let items = self.selected_paths();
+        let Some(label) = describe_items(&items) else { return };
+        let paths: Vec<PathBuf> = items.into_iter().map(|(path, _)| path).collect();
         let confirm = self.settings.read(cx).settings().confirm_delete;
-        if confirm && self.pending_delete.as_ref() != Some(&path) {
-            self.pending_delete = Some(path);
-            self.notice = Some(format!("press again to move “{name}” to the trash").into());
+        if confirm && self.pending_delete.as_deref() != Some(&paths[..]) {
+            self.pending_delete = Some(paths);
+            self.notice = Some(format!("press again to move {label} to the trash").into());
             cx.notify();
             return;
         }
         self.pending_delete = None;
-        self.run_op(FileOp::Delete { path }, cx);
+        self.delete_paths(paths, cx);
+    }
+
+    /// Move every path to the OS trash as one undo batch (off-thread;
+    /// each trash op is instant but there can be many).
+    fn delete_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let applied = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut applied = Vec::new();
+                    for path in paths {
+                        if let Ok(done) = ops::apply(&FileOp::Delete { path }) {
+                            applied.push(done);
+                        }
+                    }
+                    applied
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if !applied.is_empty() {
+                    this.notice = Some(
+                        if applied.len() == 1 {
+                            applied[0].describe()
+                        } else {
+                            format!("moved {} items to the trash", applied.len())
+                        }
+                        .into(),
+                    );
+                    this.journal.record(applied);
+                }
+                let cwd = this.cwd.clone();
+                this.load_dir(&cwd, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Run a file operation, first probing its destination off-thread:
@@ -981,7 +1145,7 @@ impl Workspace {
                 match result {
                     Ok(applied) => {
                         this.notice = Some(applied.describe().into());
-                        this.journal.record(applied);
+                        this.journal.record(vec![applied]);
                     }
                     Err(err) if err.is::<ops::OpCanceled>() => {
                         this.notice = Some("canceled".into());
@@ -1057,7 +1221,7 @@ impl Workspace {
     /// work runs off-thread; a failed undo goes back on the journal so
     /// the user can fix the cause and retry.
     fn undo_last(&mut self, cx: &mut Context<Self>) {
-        let Some(applied) = self.journal.pop() else {
+        let Some(batch) = self.journal.pop() else {
             self.notice = Some("nothing to undo".into());
             cx.notify();
             return;
@@ -1066,16 +1230,23 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn({
-                    let applied = applied.clone();
-                    async move { ops::undo(&applied) }
+                    let batch = batch.clone();
+                    async move { ops::undo_batch(&batch) }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok(()) => this.notice = Some(format!("undid: {}", applied.describe()).into()),
+                    Ok(()) => {
+                        let label = if batch.len() == 1 {
+                            batch[0].describe()
+                        } else {
+                            format!("{} operations", batch.len())
+                        };
+                        this.notice = Some(format!("undid: {label}").into());
+                    }
                     Err(err) => {
                         this.notice = Some(format!("undo failed: {err:#}").into());
-                        this.journal.restore(applied);
+                        this.journal.restore(batch);
                     }
                 }
                 let cwd = this.cwd.clone();
@@ -1110,9 +1281,10 @@ impl Workspace {
             }
             return;
         }
+        let extend = keystroke.modifiers.shift;
         match keystroke.key.as_str() {
-            "up" => self.move_selection(-1, cx),
-            "down" => self.move_selection(1, cx),
+            "up" => self.move_selection(-1, extend, cx),
+            "down" => self.move_selection(1, extend, cx),
             "enter" => self.activate_selected(cx),
             _ => {}
         }
@@ -1127,7 +1299,7 @@ impl Workspace {
 
         if self.query.is_empty() {
             self.results.clear();
-            self.selected = None;
+            self.selection.clear();
             return;
         }
 
@@ -1208,7 +1380,11 @@ impl Workspace {
     /// New results select the first hit (Spotlight-style), so Enter
     /// immediately opens the top match.
     fn select_first_result(&mut self) {
-        self.selected = (!self.results.is_empty()).then_some(0);
+        if self.results.is_empty() {
+            self.selection.clear();
+        } else {
+            self.selection.select_one(0);
+        }
         self.results_scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
@@ -1631,7 +1807,7 @@ impl Workspace {
                         let is_dir = entry.is_dir;
                         let size = entry.size;
                         let modified = entry.modified;
-                        let is_selected = this.selected == Some(ix);
+                        let is_selected = this.selection.contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let icon = this.render_icon_cell(&name, &path, is_dir, cx);
                         let rename_input = this
@@ -1669,7 +1845,7 @@ impl Workspace {
                                     if event.click_count() >= 2 {
                                         this.activate(ix, cx);
                                     } else {
-                                        this.select(ix, cx);
+                                        this.select_click(ix, event.modifiers(), cx);
                                     }
                                 }))
                                 .on_mouse_down(
@@ -1697,7 +1873,7 @@ impl Workspace {
                     .filter_map(|ix| {
                         let row = this.results.get(ix)?;
                         let is_dir = row.is_dir;
-                        let is_selected = this.selected == Some(ix);
+                        let is_selected = this.selection.contains(ix);
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
                         let icon = this.render_icon_cell(&name, &path, is_dir, cx);
@@ -1717,7 +1893,7 @@ impl Workspace {
                                     if event.click_count() >= 2 {
                                         this.activate(ix, cx);
                                     } else {
-                                        this.select(ix, cx);
+                                        this.select_click(ix, event.modifiers(), cx);
                                     }
                                 }))
                                 .on_mouse_down(
@@ -1790,7 +1966,12 @@ impl Workspace {
                 from_search,
             }
         };
-        self.selected = Some(ix);
+        // Right-clicking a row outside the current selection selects
+        // just it; right-clicking one already in a multi-selection keeps
+        // the whole set, so the menu can act on all of it.
+        if !self.selection.contains(ix) {
+            self.selection.select_one(ix);
+        }
         self.context_menu = Some(ContextMenu {
             position: Self::clamped_menu_position(position, 280., window),
             target,
@@ -1825,66 +2006,74 @@ impl Workspace {
         match &menu.target {
             MenuTarget::Entry { ix, path, name, is_dir, from_search } => {
                 let (ix, is_dir, from_search) = (*ix, *is_dir, *from_search);
-                items.push(ui::menu::heading(&theme, name.clone()).into_any_element());
-                let p = path.clone();
-                items.push(
-                    ui::menu::item(&theme, "menu-open", "Open", false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.open_target(p.clone(), is_dir, from_search, cx);
-                        }))
-                        .into_any_element(),
-                );
-                if from_search {
+                // The whole selection is the target; single-item-only
+                // actions (open, rename, reveal, index) drop out when
+                // more than one row is selected.
+                let count = self.selection.len();
+                let heading =
+                    describe_items(&self.selected_paths()).unwrap_or_else(|| name.clone());
+                items.push(ui::menu::heading(&theme, heading).into_any_element());
+
+                if count <= 1 {
                     let p = path.clone();
                     items.push(
-                        ui::menu::item(&theme, "menu-reveal", "Reveal in Folder", false)
+                        ui::menu::item(&theme, "menu-open", "Open", false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.close_menu(cx);
-                                this.reveal(p.clone(), cx);
+                                this.open_target(p.clone(), is_dir, from_search, cx);
                             }))
                             .into_any_element(),
                     );
-                } else {
-                    items.push(
-                        ui::menu::item(&theme, "menu-rename", "Rename", false)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.close_menu(cx);
-                                this.selected = Some(ix);
-                                this.start_rename(window, cx);
-                            }))
-                            .into_any_element(),
-                    );
+                    if from_search {
+                        let p = path.clone();
+                        items.push(
+                            ui::menu::item(&theme, "menu-reveal", "Reveal in Folder", false)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                    this.close_menu(cx);
+                                    this.reveal(p.clone(), cx);
+                                }))
+                                .into_any_element(),
+                        );
+                    } else {
+                        items.push(
+                            ui::menu::item(&theme, "menu-rename", "Rename", false)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.close_menu(cx);
+                                    this.selection.select_one(ix);
+                                    this.start_rename(window, cx);
+                                }))
+                                .into_any_element(),
+                        );
+                    }
+                    items.push(ui::menu::separator(&theme).into_any_element());
                 }
-                items.push(ui::menu::separator(&theme).into_any_element());
-                let (p, n) = (path.clone(), name.clone());
+
                 items.push(
                     ui::menu::item(&theme, "menu-copy", "Copy", false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
-                            this.clip_path(p.clone(), &n, ClipMode::Copy, cx);
+                            this.clip_selected(ClipMode::Copy, cx);
                         }))
                         .into_any_element(),
                 );
-                let (p, n) = (path.clone(), name.clone());
                 items.push(
                     ui::menu::item(&theme, "menu-cut", "Cut", false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
-                            this.clip_path(p.clone(), &n, ClipMode::Cut, cx);
+                            this.clip_selected(ClipMode::Cut, cx);
                         }))
                         .into_any_element(),
                 );
-                let p = path.clone();
+                let copy_path_label = if count > 1 { "Copy Paths" } else { "Copy Path" };
                 items.push(
-                    ui::menu::item(&theme, "menu-copy-path", "Copy Path", false)
+                    ui::menu::item(&theme, "menu-copy-path", copy_path_label, false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
-                            this.copy_path_to_clipboard(&p, cx);
+                            this.copy_selected_paths(cx);
                         }))
                         .into_any_element(),
                 );
-                if is_dir && !self.service_mode() {
+                if count <= 1 && is_dir && !self.service_mode() {
                     let p = path.clone();
                     items.push(
                         ui::menu::item(&theme, "menu-index", "Index This Folder", false)
@@ -1896,12 +2085,11 @@ impl Workspace {
                     );
                 }
                 items.push(ui::menu::separator(&theme).into_any_element());
-                let p = path.clone();
                 items.push(
                     ui::menu::item(&theme, "menu-trash", "Move to Trash", true)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
-                            this.run_op(FileOp::Delete { path: p.clone() }, cx);
+                            this.trash_selected(cx);
                         }))
                         .into_any_element(),
                 );
@@ -1984,6 +2172,21 @@ impl Workspace {
             notice.clone()
         } else if let Some(err) = &self.load_error {
             format!("error — {err}").into()
+        } else if !self.selection.is_empty() {
+            let (n, total) = (self.selection.len(), self.active_list_len());
+            // Combined size only in browse — search rows carry no size.
+            if self.query.is_empty() {
+                let bytes: u64 = self
+                    .selection
+                    .iter()
+                    .filter_map(|ix| self.entries.get(ix))
+                    .filter(|entry| !entry.is_dir)
+                    .map(|entry| entry.size)
+                    .sum();
+                format!("{n} of {total} selected · {}", format_size(bytes)).into()
+            } else {
+                format!("{n} of {total} selected").into()
+            }
         } else if self.query.is_empty() {
             format!("{} items", self.entries.len()).into()
         } else {
@@ -2025,6 +2228,10 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &search_input::Paste, _window, cx| {
                 this.paste_clipboard(cx);
+            }))
+            // cmd-a while the input is empty selects every row.
+            .on_action(cx.listener(|this, _: &search_input::SelectAll, _window, cx| {
+                this.select_all(cx);
             }))
             // Escape, bubbled by the empty input: close whatever is
             // topmost — conflict dialog first, then the settings pane.

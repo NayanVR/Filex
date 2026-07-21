@@ -215,6 +215,17 @@ pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<Applied
     }
 }
 
+/// Reverse a whole batch (one user action — e.g. a multi-select delete)
+/// in reverse order. Stops at the first failure and reports it; anything
+/// already reversed stays reversed, so the caller should surface the
+/// error rather than blindly retrying. Blocking — run off-thread.
+pub fn undo_batch(batch: &[AppliedOp]) -> Result<()> {
+    for applied in batch.iter().rev() {
+        undo(applied)?;
+    }
+    Ok(())
+}
+
 /// Reverse a completed operation. Blocking — run on a background
 /// executor. Undoing a copy removes the copy (delete-to-trash will
 /// soften this in a later slice).
@@ -251,35 +262,43 @@ pub fn undo(applied: &AppliedOp) -> Result<()> {
 /// instant list operations.
 #[derive(Debug, Default)]
 pub struct Journal {
-    applied: Vec<AppliedOp>,
+    /// Each entry is one user action. A single op (rename, one paste) is
+    /// a one-element batch; a multi-select action (delete N, paste N)
+    /// records the whole set so one undo reverses all of it in order.
+    batches: Vec<Vec<AppliedOp>>,
 }
 
 /// Oldest entries fall off past this; unbounded growth serves nobody.
 const JOURNAL_CAP: usize = 100;
 
 impl Journal {
-    pub fn record(&mut self, op: AppliedOp) {
-        if self.applied.len() == JOURNAL_CAP {
-            self.applied.remove(0);
+    /// Record one user action's completed ops as a single undo unit.
+    /// An empty batch (nothing succeeded) is not recorded.
+    pub fn record(&mut self, batch: Vec<AppliedOp>) {
+        if batch.is_empty() {
+            return;
         }
-        self.applied.push(op);
+        if self.batches.len() == JOURNAL_CAP {
+            self.batches.remove(0);
+        }
+        self.batches.push(batch);
     }
 
-    /// The most recent operation, removed. The caller runs [`undo`] on
-    /// it and should [`Journal::record`]-like push it back (via
+    /// The most recent action's batch, removed. The caller runs
+    /// [`undo_batch`] on it and should push it back (via
     /// [`Journal::restore`]) if the disk undo fails.
-    pub fn pop(&mut self) -> Option<AppliedOp> {
-        self.applied.pop()
+    pub fn pop(&mut self) -> Option<Vec<AppliedOp>> {
+        self.batches.pop()
     }
 
-    /// Put a popped entry back (its disk undo failed; the user can
-    /// retry after fixing the cause).
-    pub fn restore(&mut self, op: AppliedOp) {
-        self.applied.push(op);
+    /// Put a popped batch back (its disk undo failed; the user can retry
+    /// after fixing the cause).
+    pub fn restore(&mut self, batch: Vec<AppliedOp>) {
+        self.batches.push(batch);
     }
 
     pub fn is_empty(&self) -> bool {
-        self.applied.is_empty()
+        self.batches.is_empty()
     }
 }
 
@@ -719,30 +738,48 @@ mod tests {
         assert_eq!(fs::read_to_string(&victim).unwrap(), "bye");
     }
 
+    fn one(name: &str) -> Vec<AppliedOp> {
+        vec![AppliedOp::Copied { to: PathBuf::from(name) }]
+    }
+
     #[test]
     fn journal_caps_and_pops_in_lifo_order() {
         let mut journal = Journal::default();
         assert!(journal.is_empty());
+        // An empty batch (nothing succeeded) is never recorded.
+        journal.record(Vec::new());
+        assert!(journal.is_empty());
         for ix in 0..(JOURNAL_CAP + 10) {
-            journal.record(AppliedOp::Copied { to: PathBuf::from(format!("f{ix}")) });
+            journal.record(one(&format!("f{ix}")));
         }
         // Newest first...
         let top = journal.pop().unwrap();
-        assert_eq!(top, AppliedOp::Copied { to: PathBuf::from(format!("f{}", JOURNAL_CAP + 9)) });
+        assert_eq!(top, one(&format!("f{}", JOURNAL_CAP + 9)));
         // ...and the oldest 10 fell off the bottom.
         let mut count = 1;
-        while let Some(op) = journal.pop() {
+        while let Some(batch) = journal.pop() {
             count += 1;
-            let AppliedOp::Copied { to } = &op else { panic!() };
+            let [AppliedOp::Copied { to }] = &batch[..] else { panic!() };
             assert_ne!(to, &PathBuf::from("f9"), "f0..f9 should have been evicted");
         }
         assert_eq!(count, JOURNAL_CAP);
     }
 
     #[test]
+    fn journal_records_a_multi_op_batch_as_one_unit() {
+        let mut journal = Journal::default();
+        let batch =
+            vec![AppliedOp::Copied { to: "a".into() }, AppliedOp::Copied { to: "b".into() }];
+        journal.record(batch.clone());
+        // One user action = one pop, carrying both ops.
+        assert_eq!(journal.pop(), Some(batch));
+        assert!(journal.is_empty());
+    }
+
+    #[test]
     fn journal_restore_puts_a_failed_undo_back_on_top() {
         let mut journal = Journal::default();
-        journal.record(AppliedOp::Copied { to: PathBuf::from("a") });
+        journal.record(one("a"));
         let popped = journal.pop().unwrap();
         journal.restore(popped.clone());
         assert_eq!(journal.pop(), Some(popped));

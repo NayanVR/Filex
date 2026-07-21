@@ -96,6 +96,22 @@ biggest premium jump after the light theme.
 
 ### 3. Multi-select
 
+**Done 2026-07-21.** Lib-side `filex::selection::Selection` (set of
+indices + anchor + lead), unit-tested in isolation: `select_one`
+(click), `toggle` (cmd/ctrl-click), `range_to` (shift-click),
+`select_all` (cmd-a, propagated from the empty search input like the
+clipboard keys), `move_lead`/`extend_lead` (arrow / shift-arrow). The
+workspace's `selected: Option<usize>` became `selection: Selection`,
+cleared whenever the active list changes. Clipboard holds `Vec<PathBuf>`;
+copy/cut/delete and the context menu act on the whole selection. Batch
+undo: `ops::Journal` now stores `Vec<Vec<AppliedOp>>` (one user action =
+one batch = one undo) with `ops::undo_batch`; multi-delete and multi-
+paste each record one batch. Multi-paste runs sequentially off-thread as
+one job, auto-resolving conflicts to the next free name (single paste
+keeps the interactive dialog). The context menu drops single-only
+actions (open/rename/reveal/index) past one selected row. Status bar
+shows "N of M selected · <combined size>".
+
 Prerequisite for grid view and batch file ops, so it lands before
 both.
 

@@ -175,6 +175,12 @@ impl SearchInput {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        // Empty input: bubble to the workspace so cmd-a selects all rows
+        // (mirrors the clipboard keys).
+        if self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
