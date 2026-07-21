@@ -630,7 +630,7 @@ impl Workspace {
                 None => self.request_thumbnail(path.to_path_buf(), cx),
             }
         }
-        ui::icon::glyph_icon(cx.theme(), kind, is_dir)
+        ui::icon::file_icon(cx.theme(), kind)
     }
 
     /// Length of whichever list selection currently applies to.
@@ -1429,7 +1429,7 @@ impl Workspace {
             .into();
         let theme = *cx.theme();
         ui::sidebar::sidebar_row(&theme, ("service-root", ix))
-            .child(ui::sidebar::root_marker("◆", theme.accent))
+            .child(ui::icon::ui_icon("icons/dot.svg", theme.accent).size(px(14.)))
             .child(div().flex_1().overflow_hidden().child(label))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.navigate(path.clone(), cx);
@@ -1450,13 +1450,13 @@ impl Workspace {
             _ => None,
         };
         let (marker, marker_color) = match &slot.state {
-            RootState::Building => ("…", theme.text_dim),
-            RootState::Ready { .. } => ("●", theme.accent),
-            RootState::Failed(_) => ("✕", theme.warn),
+            RootState::Building => ("icons/loader-circle.svg", theme.text_dim),
+            RootState::Ready { .. } => ("icons/dot.svg", theme.accent),
+            RootState::Failed(_) => ("icons/triangle-alert.svg", theme.warn),
         };
         let menu_path = slot.path.clone();
         ui::sidebar::sidebar_row(&theme, ("root", ix))
-            .child(ui::sidebar::root_marker(marker, marker_color))
+            .child(ui::icon::ui_icon(marker, marker_color).size(px(14.)))
             .child(div().flex_1().overflow_hidden().child(slot.label.clone()))
             .on_mouse_down(
                 MouseButton::Right,
@@ -1477,13 +1477,12 @@ impl Workspace {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        // Emoji glyphs stand in until the real icon set lands (roadmap).
-        let places: Vec<(&str, &str, PathBuf)> = [
-            ("🏠", "Home", std::env::home_dir()),
-            ("💽", "Root", Some(PathBuf::from("/"))),
+        let places: Vec<(&'static str, &str, PathBuf)> = [
+            ("icons/house.svg", "Home", std::env::home_dir()),
+            ("icons/hard-drive.svg", "Root", Some(PathBuf::from("/"))),
         ]
         .into_iter()
-        .filter_map(|(glyph, label, path)| Some((glyph, label, path?)))
+        .filter_map(|(icon, label, path)| Some((icon, label, path?)))
         .collect();
 
         let root_rows: Vec<gpui::AnyElement> = {
@@ -1507,9 +1506,9 @@ impl Workspace {
 
         let sidebar = ui::sidebar::sidebar_panel(&theme)
             .child(ui::sidebar::section_header(&theme, "PLACES"))
-            .children(places.into_iter().enumerate().map(|(ix, (glyph, label, path))| {
+            .children(places.into_iter().enumerate().map(|(ix, (icon, label, path))| {
                 ui::sidebar::sidebar_row(&theme, ("place", ix))
-                    .child(ui::sidebar::root_marker(glyph, theme.text_dim))
+                    .child(ui::icon::ui_icon(icon, theme.text_dim).size(px(16.)))
                     .child(label)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         this.navigate(path.clone(), cx);
@@ -2065,7 +2064,7 @@ impl Render for Workspace {
 
 fn main() {
     let _logging_guard = filex::logging::init("filex");
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(ui::assets::Assets).run(|cx: &mut App| {
         // Register the bundled UI font before anything renders.
         ui::fonts::register(cx);
         // A default theme so `cx.theme()` is valid from the first frame;

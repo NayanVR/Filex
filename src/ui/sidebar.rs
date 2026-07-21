@@ -1,12 +1,13 @@
-//! Sidebar building blocks: the panel container, section headers, the
-//! hoverable row scaffold, and the root state marker.
+//! Sidebar building blocks: the panel container, section headers, and
+//! the hoverable row scaffold. Row content (place/state icons via
+//! [`super::icon`], labels) is supplied by the caller.
 //!
 //! Every sidebar entry (places, indexed roots, action rows, banners)
 //! starts from [`sidebar_row`] so hover feedback and spacing stay
 //! uniform; callers chain their content and `.on_click`, plus style
 //! overrides (dim text for action rows, smaller warn text for banners).
 
-use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
+use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
 use super::theme::Theme;
 
@@ -51,10 +52,4 @@ pub fn sidebar_row(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
         // over the neighboring pane.
         .overflow_hidden()
         .hover(move |s| s.bg(hover))
-}
-
-/// The small state marker at the start of a root row (building / ready
-/// / failed / service-managed). `color` comes from a [`Theme`] slot.
-pub fn root_marker(glyph: &'static str, color: Rgba) -> Div {
-    div().text_xs().text_color(color).child(glyph)
 }
