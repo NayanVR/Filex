@@ -13,6 +13,7 @@ use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
+use filex::recents::Recents;
 use filex::selection::Selection;
 use filex::settings::{SortBy, ThemeMode, ViewMode};
 
@@ -176,6 +177,8 @@ enum MenuTarget {
     Entry { ix: usize, path: PathBuf, name: String, is_dir: bool, from_search: bool },
     /// An indexed root in the sidebar.
     Root { path: PathBuf },
+    /// A pinned folder in the sidebar's Favorites section.
+    Favorite { path: PathBuf },
 }
 
 struct ContextMenu {
@@ -302,6 +305,8 @@ struct Workspace {
     /// Back/forward navigation history for the active tab.
     history_back: Vec<PathBuf>,
     history_forward: Vec<PathBuf>,
+    /// Recently-opened folders/files (local-only usage log).
+    recents: Recents,
 }
 
 impl Workspace {
@@ -394,6 +399,9 @@ impl Workspace {
             active_tab: 0,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            recents: filex::recents::default_recents_file()
+                .map(|file| Recents::load(&file))
+                .unwrap_or_default(),
         };
         this.load_dir(&cwd, cx);
         // Windows probes for the elevated index service first and only
@@ -796,6 +804,7 @@ impl Workspace {
             if let Err(err) = open_with_default_app(&path) {
                 self.notice = Some(format!("couldn't open {}: {err}", path.display()).into());
             }
+            self.record_recent(path, cx);
             if from_search {
                 self.clear_search(cx);
             }
@@ -898,6 +907,7 @@ impl Workspace {
         self.history_back.push(self.cwd.clone());
         self.history_forward.clear();
         self.load_dir(&path, cx);
+        self.record_recent(path, cx);
         cx.notify();
     }
 
@@ -1005,6 +1015,88 @@ impl Workspace {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string())
             .into()
+    }
+
+    fn is_favorite(&self, path: &Path, cx: &App) -> bool {
+        self.settings.read(cx).settings().favorites.iter().any(|p| p == path)
+    }
+
+    /// Pin a folder to the sidebar's Favorites (idempotent).
+    fn pin_favorite(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| {
+                if !settings.favorites.iter().any(|p| p == &path) {
+                    settings.favorites.push(path.clone());
+                }
+            });
+        });
+    }
+
+    fn unpin_favorite(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let path = path.to_path_buf();
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| settings.favorites.retain(|p| p != &path));
+        });
+    }
+
+    /// Move a favorite up (`delta < 0`) or down in the list.
+    fn move_favorite(&mut self, path: &Path, delta: isize, cx: &mut Context<Self>) {
+        let path = path.to_path_buf();
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| {
+                let favorites = &mut settings.favorites;
+                if let Some(i) = favorites.iter().position(|p| p == &path) {
+                    let j = (i as isize + delta).clamp(0, favorites.len() as isize - 1) as usize;
+                    if i != j {
+                        let item = favorites.remove(i);
+                        favorites.insert(j, item);
+                    }
+                }
+            });
+        });
+    }
+
+    fn is_section_collapsed(&self, id: &str, cx: &App) -> bool {
+        self.settings.read(cx).settings().collapsed_sections.iter().any(|s| s == id)
+    }
+
+    fn toggle_section(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| {
+                let sections = &mut settings.collapsed_sections;
+                if let Some(i) = sections.iter().position(|s| s == id) {
+                    sections.remove(i);
+                } else {
+                    sections.push(id.to_string());
+                }
+            });
+        });
+    }
+
+    /// Note `path` as recently opened and persist the log off-thread.
+    fn record_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.recents.record(path);
+        self.persist_recents(cx);
+    }
+
+    fn persist_recents(&self, cx: &Context<Self>) {
+        let Some(file) = filex::recents::default_recents_file() else {
+            return;
+        };
+        let recents = self.recents.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(err) = recents.save(&file) {
+                    tracing::error!("failed to save recents: {err:#}");
+                }
+            })
+            .detach();
+    }
+
+    fn clear_recents(&mut self, cx: &mut Context<Self>) {
+        self.recents.clear();
+        self.persist_recents(cx);
+        cx.notify();
     }
 
     fn clear_search(&mut self, cx: &mut Context<Self>) {
@@ -2012,48 +2104,146 @@ impl Workspace {
             }))
     }
 
+    /// Navigate a recent folder, or open a recent file with its default
+    /// app (a stat on click decides which).
+    fn open_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if path.is_dir() {
+            self.navigate(path, cx);
+        } else {
+            self.open_target(path, false, false, cx);
+        }
+    }
+
+    /// A clickable disclosure header; toggling it persists into settings
+    /// and the Changed event re-renders the sidebar.
+    fn section_header(
+        &self,
+        theme: &Theme,
+        id: &'static str,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> (gpui::Stateful<gpui::Div>, bool) {
+        let collapsed = self.is_section_collapsed(id, cx);
+        let header = ui::sidebar::collapsible_header(theme, id, label, collapsed).on_click(
+            cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                this.toggle_section(id, cx);
+            }),
+        );
+        (header, collapsed)
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let places: Vec<(&'static str, &str, PathBuf)> = [
-            ("icons/house.svg", "Home", std::env::home_dir()),
-            ("icons/hard-drive.svg", "Root", Some(PathBuf::from("/"))),
-        ]
-        .into_iter()
-        .filter_map(|(icon, label, path)| Some((icon, label, path?)))
-        .collect();
+        let favorites = self.settings.read(cx).settings().favorites.clone();
 
-        let root_rows: Vec<gpui::AnyElement> = {
-            #[cfg(target_os = "windows")]
-            if self.service_mode() {
-                self.service_status
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, root)| self.render_service_root_row(ix, root, cx))
-                    .collect()
-            } else {
+        let mut content =
+            div().id("sidebar-scroll").flex().flex_col().flex_1().min_h_0().overflow_y_scroll();
+
+        // PLACES.
+        let (header, collapsed) = self.section_header(&theme, "places", "PLACES", cx);
+        content = content.child(header);
+        if !collapsed {
+            let places: Vec<(&'static str, &str, PathBuf)> = [
+                ("icons/house.svg", "Home", std::env::home_dir()),
+                ("icons/hard-drive.svg", "Root", Some(PathBuf::from("/"))),
+            ]
+            .into_iter()
+            .filter_map(|(icon, label, path)| Some((icon, label, path?)))
+            .collect();
+            content = content.children(places.into_iter().enumerate().map(
+                |(ix, (icon, label, path))| {
+                    ui::sidebar::sidebar_row(&theme, ("place", ix))
+                        .child(ui::icon::ui_icon(icon, theme.text_dim).size(px(16.)))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.navigate(path.clone(), cx);
+                        }))
+                },
+            ));
+        }
+
+        // FAVORITES (only shown once something is pinned).
+        if !favorites.is_empty() {
+            let (header, collapsed) = self.section_header(&theme, "favorites", "FAVORITES", cx);
+            content = content.child(header);
+            if !collapsed {
+                content = content.children(favorites.into_iter().enumerate().map(|(ix, path)| {
+                    let label = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    let (nav, menu) = (path.clone(), path.clone());
+                    ui::sidebar::sidebar_row(&theme, ("favorite", ix))
+                        .child(ui::icon::ui_icon("icons/star.svg", theme.accent).size(px(14.)))
+                        .child(div().flex_1().overflow_hidden().child(label))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.navigate(nav.clone(), cx);
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.open_favorite_menu(menu.clone(), event.position, window, cx);
+                            }),
+                        )
+                }));
+            }
+        }
+
+        // RECENTS (only shown once something's been opened).
+        if !self.recents.is_empty() {
+            let (header, collapsed) = self.section_header(&theme, "recents", "RECENTS", cx);
+            content = content.child(header);
+            if !collapsed {
+                content = content.children(self.recents.entries().iter().enumerate().map(
+                    |(ix, path)| {
+                        let path = path.clone();
+                        let label = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        ui::sidebar::sidebar_row(&theme, ("recent", ix))
+                            .child(ui::icon::ui_icon("icons/clock.svg", theme.text_dim).size(px(14.)))
+                            .child(div().flex_1().overflow_hidden().child(label))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                this.open_recent(path.clone(), cx);
+                            }))
+                    },
+                ));
+                content = content.child(
+                    ui::sidebar::sidebar_row(&theme, "recents-clear")
+                        .text_color(theme.text_dim)
+                        .child(ui::icon::ui_icon("icons/trash-2.svg", theme.text_dim).size(px(13.)))
+                        .child("Clear")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.clear_recents(cx);
+                        })),
+                );
+            }
+        }
+
+        // INDEXED.
+        let (header, collapsed) = self.section_header(&theme, "indexed", "INDEXED", cx);
+        content = content.child(header);
+        if !collapsed {
+            let root_rows: Vec<gpui::AnyElement> = {
+                #[cfg(target_os = "windows")]
+                if self.service_mode() {
+                    self.service_status
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, root)| self.render_service_root_row(ix, root, cx))
+                        .collect()
+                } else {
+                    (0..self.roots.len())
+                        .map(|ix| self.render_root_row(ix, cx).into_any_element())
+                        .collect()
+                }
+                #[cfg(not(target_os = "windows"))]
                 (0..self.roots.len())
                     .map(|ix| self.render_root_row(ix, cx).into_any_element())
                     .collect()
-            }
-            #[cfg(not(target_os = "windows"))]
-            (0..self.roots.len())
-                .map(|ix| self.render_root_row(ix, cx).into_any_element())
-                .collect()
-        };
-
-        let sidebar = ui::sidebar::sidebar_panel(&theme)
-            .child(ui::sidebar::section_header(&theme, "PLACES"))
-            .children(places.into_iter().enumerate().map(|(ix, (icon, label, path))| {
-                ui::sidebar::sidebar_row(&theme, ("place", ix))
-                    .child(ui::icon::ui_icon(icon, theme.text_dim).size(px(16.)))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.navigate(path.clone(), cx);
-                    }))
-            }))
-            .child(ui::sidebar::section_header(&theme, "INDEXED").pt_3())
-            .children(root_rows)
-            .child(
+            };
+            content = content.children(root_rows).child(
                 ui::sidebar::sidebar_row(&theme, "add-root")
                     .text_color(theme.text_dim)
                     .child("+ index current folder")
@@ -2061,12 +2251,14 @@ impl Workspace {
                         this.add_current_folder(cx);
                     })),
             );
+        }
 
-        // Shadowing rebind (not `mut`): the binding is only extended on
-        // macOS, and an unconditional `mut` breaks -D warnings elsewhere.
+        let sidebar = ui::sidebar::sidebar_panel(&theme).child(content);
+
+        // The FDA banner stays pinned below the scrollable sections.
         #[cfg(target_os = "macos")]
         let sidebar = if self.fda_missing {
-            sidebar.child(div().flex_1()).child(
+            sidebar.child(
                 ui::sidebar::sidebar_row(&theme, "fda-banner")
                     .text_xs()
                     .text_color(theme.warn)
@@ -2444,6 +2636,20 @@ impl Workspace {
         cx.notify();
     }
 
+    fn open_favorite_menu(
+        &mut self,
+        path: PathBuf,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(ContextMenu {
+            position: Self::clamped_menu_position(position, 130., window),
+            target: MenuTarget::Favorite { path },
+        });
+        cx.notify();
+    }
+
     fn close_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.take().is_some() {
             cx.notify();
@@ -2535,6 +2741,23 @@ impl Workspace {
                             .into_any_element(),
                     );
                 }
+                if count <= 1 && is_dir {
+                    let pinned = self.is_favorite(path, cx);
+                    let p = path.clone();
+                    let label = if pinned { "Unpin from Sidebar" } else { "Pin to Sidebar" };
+                    items.push(
+                        ui::menu::item(&theme, "menu-pin", label, false)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                this.close_menu(cx);
+                                if pinned {
+                                    this.unpin_favorite(&p, cx);
+                                } else {
+                                    this.pin_favorite(p.clone(), cx);
+                                }
+                            }))
+                            .into_any_element(),
+                    );
+                }
                 items.push(ui::menu::separator(&theme).into_any_element());
                 items.push(
                     ui::menu::item(&theme, "menu-trash", "Move to Trash", true)
@@ -2555,6 +2778,39 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
                             this.remove_root(&p.clone(), cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+            MenuTarget::Favorite { path } => {
+                let label =
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                items.push(ui::menu::heading(&theme, label).into_any_element());
+                let p = path.clone();
+                items.push(
+                    ui::menu::item(&theme, "fav-up", "Move Up", false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.move_favorite(&p, -1, cx);
+                        }))
+                        .into_any_element(),
+                );
+                let p = path.clone();
+                items.push(
+                    ui::menu::item(&theme, "fav-down", "Move Down", false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.move_favorite(&p, 1, cx);
+                        }))
+                        .into_any_element(),
+                );
+                items.push(ui::menu::separator(&theme).into_any_element());
+                let p = path.clone();
+                items.push(
+                    ui::menu::item(&theme, "fav-unpin", "Unpin from Sidebar", true)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.unpin_favorite(&p, cx);
                         }))
                         .into_any_element(),
                 );

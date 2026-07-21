@@ -50,6 +50,11 @@ pub struct Settings {
     pub preview_open: bool,
     /// Width of the details panel in logical pixels (clamped when used).
     pub preview_width: f32,
+    /// User-pinned folders shown in the sidebar's Favorites section,
+    /// in display order.
+    pub favorites: Vec<PathBuf>,
+    /// Ids of sidebar sections the user has collapsed (e.g. "recents").
+    pub collapsed_sections: Vec<String>,
 }
 
 /// The two browse layouts (block 4).
@@ -87,6 +92,8 @@ impl Default for Settings {
             grid_zoom: 1,
             preview_open: false,
             preview_width: 280.,
+            favorites: Vec::new(),
+            collapsed_sections: Vec::new(),
         }
     }
 }
@@ -177,6 +184,8 @@ mod tests {
         assert_eq!(settings.grid_zoom, 1);
         assert!(!settings.preview_open);
         assert_eq!(settings.preview_width, 280.);
+        assert!(settings.favorites.is_empty());
+        assert!(settings.collapsed_sections.is_empty());
     }
 
     #[test]

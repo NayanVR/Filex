@@ -9,6 +9,7 @@
 
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
+use super::icon;
 use super::theme::Theme;
 
 /// Sidebar width. One place so panels/overlays can align to it later.
@@ -28,10 +29,33 @@ pub fn sidebar_panel(theme: &Theme) -> Div {
         .bg(theme.panel)
 }
 
-/// An uppercase section header ("PLACES", "INDEXED"). Sections after
-/// the first chain `.pt_3()` to space themselves from the one above.
-pub fn section_header(theme: &Theme, label: impl Into<SharedString>) -> Div {
-    div().px_3().pb_1().text_xs().text_color(theme.text_dim).child(label.into())
+/// A clickable section header with a disclosure chevron (down when
+/// expanded, right when collapsed). The whole header toggles; callers
+/// render the section's rows only when `!collapsed`.
+pub fn collapsible_header(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    collapsed: bool,
+) -> Stateful<Div> {
+    let (hover, text) = (theme.hover, theme.text);
+    let chevron = if collapsed { "icons/chevron-right.svg" } else { "icons/chevron-down.svg" };
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .mx_2()
+        .px_1()
+        .pt_3()
+        .pb_1()
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(theme.text_dim)
+        .hover(move |s| s.text_color(text).bg(hover))
+        .child(icon::ui_icon(chevron, theme.text_dim).size(px(11.)))
+        .child(label.into())
 }
 
 /// The common sidebar row: inset, rounded, hover-highlighted.
