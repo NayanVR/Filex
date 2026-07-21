@@ -2,8 +2,9 @@
 //! progress bar, cancel control. Shown in a slim bar above the status
 //! bar only while jobs run.
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, relative, svg};
+use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, relative};
 
+use super::icon;
 use super::theme::Theme;
 
 /// Container stacking one [`job_row`] per active job.
@@ -46,10 +47,11 @@ pub fn job_row(
         .child(div().w(px(36.)).text_right().child(percent))
 }
 
-/// The ✕ that cancels a job; callers chain `.on_click`. The glyph
-/// inherits the button's text color so the hover override tints it.
+/// The ✕ that cancels a job; callers chain `.on_click`. The glyph is
+/// tinted explicitly (gpui's `svg()` does not inherit text color); hover
+/// just shifts the background.
 pub fn cancel_button(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    let (hover, warn) = (theme.hover, theme.warn);
+    let hover = theme.hover;
     div()
         .id(id)
         .flex()
@@ -57,9 +59,6 @@ pub fn cancel_button(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
         .p_1()
         .rounded_sm()
         .cursor_pointer()
-        .text_color(theme.text_dim)
-        .hover(move |s| s.bg(hover).text_color(warn))
-        // Plain svg (no forced color) so it inherits text_dim / the
-        // hover warn override above.
-        .child(svg().path("icons/x.svg").size(px(14.)).flex_none())
+        .hover(move |s| s.bg(hover))
+        .child(icon::ui_icon("icons/x.svg", theme.text_dim).size(px(14.)))
 }

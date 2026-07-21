@@ -1492,11 +1492,12 @@ impl Workspace {
         let view = self.settings.read(cx).settings().view;
         let is_grid = view == ViewMode::Grid;
         ui::top_bar::top_bar(&theme)
-            .child(ui::top_bar::toolbar_button(&theme, "up", "icons/arrow-up.svg").on_click(
-                cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.go_up(cx);
-                }),
-            ))
+            .child(
+                ui::top_bar::toolbar_button(&theme, "up", "icons/arrow-up.svg", theme.text_dim)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.go_up(cx);
+                    })),
+            )
             .child(self.render_breadcrumbs(cx))
             .child(
                 ui::top_bar::search_box(&theme, !self.query.is_empty())
@@ -1504,14 +1505,12 @@ impl Workspace {
             )
             // Grid-only zoom stepper.
             .children(is_grid.then(|| {
-                ui::top_bar::toolbar_button(&theme, "zoom-out", "icons/minus.svg").on_click(
-                    cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(-1, cx)),
-                )
+                ui::top_bar::toolbar_button(&theme, "zoom-out", "icons/minus.svg", theme.text_dim)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(-1, cx)))
             }))
             .children(is_grid.then(|| {
-                ui::top_bar::toolbar_button(&theme, "zoom-in", "icons/plus.svg").on_click(
-                    cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(1, cx)),
-                )
+                ui::top_bar::toolbar_button(&theme, "zoom-in", "icons/plus.svg", theme.text_dim)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(1, cx)))
             }))
             // List ⇄ grid toggle: shows the layout it switches to.
             .child(
@@ -1519,15 +1518,20 @@ impl Workspace {
                     &theme,
                     "view-toggle",
                     if is_grid { "icons/list.svg" } else { "icons/layout-grid.svg" },
+                    theme.text_dim,
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_view(cx))),
             )
             .child(
-                ui::top_bar::toolbar_button(&theme, "settings", "icons/settings.svg")
-                    .when(self.settings_open, |s| s.text_color(theme.accent))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.toggle_settings(cx);
-                    })),
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "settings",
+                    "icons/settings.svg",
+                    if self.settings_open { theme.accent } else { theme.text_dim },
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.toggle_settings(cx);
+                })),
             )
     }
 

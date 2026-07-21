@@ -1,7 +1,7 @@
 //! The top bar: navigation button, current path, and the search box
 //! frame (the input entity itself lives in the workspace).
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, svg};
+use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
 
 use super::icon;
 use super::theme::Theme;
@@ -30,10 +30,16 @@ pub fn top_bar(theme: &Theme) -> Div {
 }
 
 /// A small icon button (`icon` is an asset path like
-/// `"icons/settings.svg"`). The glyph inherits the button's text color,
-/// so callers can chain `.text_color(theme.accent)` to mark it active.
-/// Callers chain `.on_click`.
-pub fn toolbar_button(theme: &Theme, id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
+/// `"icons/settings.svg"`). `color` tints the glyph explicitly — gpui's
+/// `svg()` does not inherit an ancestor's text color, so pass
+/// `theme.accent` here (not via a chained `.text_color`) to mark it
+/// active. Callers chain `.on_click`.
+pub fn toolbar_button(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    icon: &'static str,
+    color: Rgba,
+) -> Stateful<Div> {
     let hover = theme.hover;
     div()
         .id(id)
@@ -44,10 +50,7 @@ pub fn toolbar_button(theme: &Theme, id: impl Into<ElementId>, icon: &'static st
         .rounded_md()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
-        .text_color(theme.text_dim)
-        // No explicit color on the glyph: it inherits the button's text
-        // color so the active-state override above tints it.
-        .child(svg().path(icon).size(px(18.)).flex_none())
+        .child(icon::ui_icon(icon, color).size(px(18.)))
 }
 
 /// The breadcrumb strip filling the bar's middle. Children are
