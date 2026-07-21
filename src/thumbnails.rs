@@ -15,8 +15,10 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use gpui::RenderImage;
 
-/// Longest edge of a generated thumbnail, in physical pixels.
-pub const THUMBNAIL_EDGE: u32 = 48;
+/// Longest edge of a generated thumbnail, in physical pixels. Sized for
+/// the largest grid card (block 4); the list view downscales it, which
+/// stays crisp, whereas upscaling a tiny thumbnail into a card would not.
+pub const THUMBNAIL_EDGE: u32 = 128;
 
 /// Cache entries beyond this trigger a wholesale clear (visible rows
 /// repopulate immediately; simple beats LRU bookkeeping at this size).

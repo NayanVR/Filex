@@ -47,23 +47,22 @@ pub fn spinner(path: &'static str, color: Rgba, size: f32, id: impl Into<Element
         .into_any_element()
 }
 
-/// A decoded thumbnail, rendered as a rounded square.
-pub fn thumbnail_icon(imagery: Arc<RenderImage>) -> AnyElement {
+/// A decoded thumbnail, rendered as a rounded square of `edge` px.
+pub fn thumbnail_icon(imagery: Arc<RenderImage>, edge: f32) -> AnyElement {
     img(imagery)
-        .w(px(ICON_SIZE))
-        .h(px(ICON_SIZE))
-        .rounded_sm()
+        .w(px(edge))
+        .h(px(edge))
+        .rounded(px(if edge > 40. { 6. } else { 3. }))
         .object_fit(gpui::ObjectFit::Cover)
         .into_any_element()
 }
 
-/// The file-type mark for `kind`, sized to the icon cell and colored by
-/// [`kind_color`].
-pub fn file_icon(theme: &Theme, kind: FileKind) -> AnyElement {
+/// The file-type mark for `kind` at `edge` px, colored by [`kind_color`].
+pub fn file_icon(theme: &Theme, kind: FileKind, edge: f32) -> AnyElement {
     svg()
         .path(kind_asset(kind))
-        .w(px(ICON_SIZE))
-        .h(px(ICON_SIZE))
+        .w(px(edge))
+        .h(px(edge))
         .flex_none()
         .text_color(kind_color(theme, kind))
         .into_any_element()

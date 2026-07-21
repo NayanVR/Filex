@@ -14,7 +14,7 @@ use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::selection::Selection;
-use filex::settings::{SortBy, ThemeMode};
+use filex::settings::{SortBy, ThemeMode, ViewMode};
 
 mod settings_store;
 mod thumbnails;
@@ -631,19 +631,20 @@ impl Workspace {
         name: &str,
         path: &Path,
         is_dir: bool,
+        edge: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let kind = FileKind::of(name, is_dir);
         if kind == FileKind::Image && self.settings.read(cx).settings().thumbnails_enabled {
             match self.thumbnails.get(path) {
                 Some(ThumbnailState::Ready(imagery)) => {
-                    return ui::icon::thumbnail_icon(imagery.clone());
+                    return ui::icon::thumbnail_icon(imagery.clone(), edge);
                 }
                 Some(_) => {}
                 None => self.request_thumbnail(path.to_path_buf(), cx),
             }
         }
-        ui::icon::file_icon(cx.theme(), kind)
+        ui::icon::file_icon(cx.theme(), kind, edge)
     }
 
     /// Length of whichever list selection currently applies to.
@@ -1463,8 +1464,33 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Flip the browse layout between list and grid (persisted).
+    fn toggle_view(&mut self, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| {
+                settings.view = match settings.view {
+                    ViewMode::List => ViewMode::Grid,
+                    ViewMode::Grid => ViewMode::List,
+                };
+            });
+        });
+    }
+
+    /// Step the grid card size, clamped to the valid range (persisted).
+    fn zoom_grid(&mut self, delta: i8, cx: &mut Context<Self>) {
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| {
+                let max = ui::grid::max_zoom() as i16;
+                settings.grid_zoom =
+                    ((settings.grid_zoom as i16 + delta as i16).clamp(0, max)) as u8;
+            });
+        });
+    }
+
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
+        let view = self.settings.read(cx).settings().view;
+        let is_grid = view == ViewMode::Grid;
         ui::top_bar::top_bar(&theme)
             .child(ui::top_bar::toolbar_button(&theme, "up", "icons/arrow-up.svg").on_click(
                 cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -1475,6 +1501,26 @@ impl Workspace {
             .child(
                 ui::top_bar::search_box(&theme, !self.query.is_empty())
                     .child(self.search_input.clone()),
+            )
+            // Grid-only zoom stepper.
+            .children(is_grid.then(|| {
+                ui::top_bar::toolbar_button(&theme, "zoom-out", "icons/minus.svg").on_click(
+                    cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(-1, cx)),
+                )
+            }))
+            .children(is_grid.then(|| {
+                ui::top_bar::toolbar_button(&theme, "zoom-in", "icons/plus.svg").on_click(
+                    cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(1, cx)),
+                )
+            }))
+            // List ⇄ grid toggle: shows the layout it switches to.
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "view-toggle",
+                    if is_grid { "icons/list.svg" } else { "icons/layout-grid.svg" },
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_view(cx))),
             )
             .child(
                 ui::top_bar::toolbar_button(&theme, "settings", "icons/settings.svg")
@@ -1782,14 +1828,105 @@ impl Workspace {
             )
     }
 
-    fn render_browse_pane(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .child(self.render_column_headers(cx))
-            .child(self.render_file_list(cx))
+    fn render_browse_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        match self.settings.read(cx).settings().view {
+            ViewMode::List => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(self.render_column_headers(cx))
+                .child(self.render_file_list(cx))
+                .into_any_element(),
+            ViewMode::Grid => self.render_grid(window, cx),
+        }
+    }
+
+    /// The card grid: a `uniform_list` whose rows are strips of N cards,
+    /// N derived from the pane width so it reflows on resize. Each row
+    /// builds only its own cards, so the grid is as virtualized as the
+    /// list.
+    fn render_grid(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let zoom = self.settings.read(cx).settings().grid_zoom;
+        let size = ui::grid::card_size(zoom);
+        let cell = ui::grid::cell_width(size);
+        // Approximate content width: the window minus the sidebar and the
+        // grid's own inset. Off-by-one on the odd frame just reflows.
+        let content_w = (f32::from(window.viewport_size().width)
+            - ui::sidebar::SIDEBAR_WIDTH
+            - ui::grid::CARD_GAP * 2.)
+            .max(cell);
+        let cols = ui::grid::columns_for(content_w, cell);
+        let rows = self.entries.len().div_ceil(cols);
+        uniform_list(
+            "grid",
+            rows,
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
+                let theme = *cx.theme();
+                range
+                    .map(|row| {
+                        let start = row * cols;
+                        let end = (start + cols).min(this.entries.len());
+                        let mut strip = ui::grid::grid_row(size);
+                        for ix in start..end {
+                            strip = strip.child(this.render_card(ix, size, &theme, cx));
+                        }
+                        strip
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(self.browse_scroll.clone())
+        .flex_1()
+        .into_any_element()
+    }
+
+    /// One browse card for entry `ix`. Copies the row data out before
+    /// asking for the icon (which needs `&mut self`), mirroring the list
+    /// processor.
+    fn render_card(
+        &mut self,
+        ix: usize,
+        size: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(entry) = self.entries.get(ix) else {
+            return div().into_any_element();
+        };
+        let is_dir = entry.is_dir;
+        let is_selected = self.selection.contains(ix);
+        let (name, path) = (entry.name.clone(), entry.path.clone());
+        let detail: SharedString = if is_dir {
+            format_modified(entry.modified, std::time::SystemTime::now()).into()
+        } else {
+            format_size(entry.size).into()
+        };
+        let icon = self.render_icon_cell(&name, &path, is_dir, size, cx);
+        ui::grid::card(theme, ("card", ix), size, is_selected)
+            .child(ui::grid::card_icon_area(size).child(icon))
+            .child(
+                div()
+                    .w(px(size))
+                    .text_center()
+                    .text_xs()
+                    .overflow_hidden()
+                    .child(name),
+            )
+            .child(div().text_xs().text_color(theme.text_dim).child(detail))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                if event.click_count() >= 2 {
+                    this.activate(ix, cx);
+                } else {
+                    this.select_click(ix, event.modifiers(), cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_entry_menu(ix, false, event.position, window, cx);
+                }),
+            )
             .into_any_element()
     }
 
@@ -1809,7 +1946,7 @@ impl Workspace {
                         let modified = entry.modified;
                         let is_selected = this.selection.contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
-                        let icon = this.render_icon_cell(&name, &path, is_dir, cx);
+                        let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
                         let rename_input = this
                             .renaming
                             .as_ref()
@@ -1876,7 +2013,7 @@ impl Workspace {
                         let is_selected = this.selection.contains(ix);
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
-                        let icon = this.render_icon_cell(&name, &path, is_dir, cx);
+                        let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
                         Some(
                             ui::list_row::list_row(&theme, ix, is_selected)
                                 .child(icon)
@@ -2202,7 +2339,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let searching = !self.query.is_empty();
         let theme = *cx.theme();
         div()
@@ -2268,7 +2405,7 @@ impl Render for Workspace {
                     } else if self.settings_open {
                         self.render_settings_pane(cx)
                     } else {
-                        self.render_browse_pane(cx)
+                        self.render_browse_pane(window, cx)
                     }),
             )
             .children(self.render_jobs(cx))

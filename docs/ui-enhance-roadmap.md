@@ -125,6 +125,20 @@ both.
 
 ### 4. Grid / card view + view toggle + zoom
 
+**Done 2026-07-21.** `ui::grid` provides card scaffolds + a pure,
+unit-tested `columns_for(width, cell)`; `render_grid` is a `uniform_list`
+whose rows are strips of N cards (N from the window width via
+`viewport_size`, reflowing on resize) — virtualized, never one element
+per file. Cards show a large icon/thumbnail, wrapped name, and a
+size/age line, reusing the list's selection + click + context-menu
+paths. Settings gained `view` (list/grid) and `grid_zoom` (index into
+four `CARD_SIZES` steps); a top-bar list⇄grid toggle and a grid-only
+−/+ zoom stepper drive them, both persisted. `render_icon_cell`,
+`file_icon`, and `thumbnail_icon` take an edge size now; `THUMBNAIL_EDGE`
+rose 48→128 so cards are crisp (the list downscales). A real draggable
+zoom slider (the mockup's bottom-right control) is deferred — the
+stepper covers the same size steps.
+
 - A second render mode next to the list: cards with a large icon or
   thumbnail, name, size/age line. Virtualized by chunking cards into
   fixed-height uniform_list rows of N columns (N from pane width ÷

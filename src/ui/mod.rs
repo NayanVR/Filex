@@ -9,6 +9,7 @@
 
 pub mod assets;
 pub mod fonts;
+pub mod grid;
 pub mod icon;
 pub mod job;
 pub mod list_row;

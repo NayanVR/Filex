@@ -41,6 +41,20 @@ pub struct Settings {
     /// Which color theme to render: a fixed light/dark palette, or one
     /// that follows the OS appearance.
     pub theme: ThemeMode,
+    /// Browse layout: a detailed list or a card grid.
+    pub view: ViewMode,
+    /// Grid card size, as an index into the app's fixed size steps
+    /// (clamped to a valid step when consumed).
+    pub grid_zoom: u8,
+}
+
+/// The two browse layouts (block 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    #[default]
+    List,
+    Grid,
 }
 
 /// The three theme choices exposed in settings. `System` follows the
@@ -65,6 +79,8 @@ impl Default for Settings {
             delete_to_trash: true,
             thumbnails_enabled: true,
             theme: ThemeMode::System,
+            view: ViewMode::List,
+            grid_zoom: 1,
         }
     }
 }
@@ -151,6 +167,8 @@ mod tests {
         assert!(settings.delete_to_trash);
         assert!(settings.thumbnails_enabled);
         assert_eq!(settings.theme, ThemeMode::System);
+        assert_eq!(settings.view, ViewMode::List);
+        assert_eq!(settings.grid_zoom, 1);
     }
 
     #[test]
