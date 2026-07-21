@@ -248,11 +248,20 @@ inference, shell integration. Do not start these; flag drift per
 CLAUDE.md. Phase 2 quietly serves this phase anyway (settings surface,
 service split, perf telemetry).
 
+## Phase 2d — UI overhaul (planned 2026-07-21)
+
+Full plan in **docs/ui-enhance-roadmap.md**: theme system + light
+theme + typography, real SVG icon set, multi-select, grid/card view,
+preview/details panel, tabs, sidebar upgrade (favorites/recents/
+drives), then the metadata tier (tags, search filter chips — each
+behind a design doc). AI search and cloud/collab features explicitly
+excluded. Runs as the primary macOS-friendly track now that Phase 2a
+is done; Phase 2b remains the parallel Windows track.
+
 ## Also on the radar (unscheduled)
 
-- Real icon set replacing emoji glyphs (SVG assets, per-platform look;
-  design them animation-ready — spinners, rotating chevrons, state
-  transitions — per the polish principle above).
+- Real icon set replacing emoji glyphs — folded into Phase 2d block 2
+  (see docs/ui-enhance-roadmap.md).
 - Manual UX pass on macOS + release packaging (.app bundle) — dogfood
   feedback should reorder Phase 2a items freely.
 - Thumbnail hard-cancellation + disk cache if profiling ever shows the
