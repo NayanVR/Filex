@@ -11,6 +11,7 @@ use gpui::{
 
 use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
+use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
@@ -307,6 +308,8 @@ struct Workspace {
     history_forward: Vec<PathBuf>,
     /// Recently-opened folders/files (local-only usage log).
     recents: Recents,
+    /// Mounted volumes with capacity, refreshed on a slow timer.
+    drives: Vec<Drive>,
 }
 
 impl Workspace {
@@ -402,6 +405,7 @@ impl Workspace {
             recents: filex::recents::default_recents_file()
                 .map(|file| Recents::load(&file))
                 .unwrap_or_default(),
+            drives: Vec::new(),
         };
         this.load_dir(&cwd, cx);
         // Windows probes for the elevated index service first and only
@@ -414,7 +418,33 @@ impl Workspace {
             this.add_root_slot(path, cx);
         }
         this.spawn_fda_check(cx);
+        this.spawn_drive_refresh(cx);
         this
+    }
+
+    /// Refresh the mounted-volume list on a slow timer (drives change
+    /// rarely; enumerating them hits the disk, so never per-frame). The
+    /// blocking enumeration runs on the background executor.
+    fn spawn_drive_refresh(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let drives =
+                    cx.background_executor().spawn(async { filex::drives::list_drives() }).await;
+                let updated = this
+                    .update(cx, |this, cx| {
+                        if this.drives != drives {
+                            this.drives = drives;
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !updated {
+                    break; // workspace dropped
+                }
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+            }
+        })
+        .detach();
     }
 
     /// Probe for filex-indexd; on success run in service mode, otherwise
@@ -2251,6 +2281,46 @@ impl Workspace {
                         this.add_current_folder(cx);
                     })),
             );
+        }
+
+        // DRIVES (only once the background refresh has found any).
+        if !self.drives.is_empty() {
+            let (header, collapsed) = self.section_header(&theme, "drives", "DRIVES", cx);
+            content = content.child(header);
+            if !collapsed {
+                content = content.children(self.drives.iter().enumerate().map(|(ix, drive)| {
+                    let path = drive.path.clone();
+                    let free_line: SharedString = format!(
+                        "{} free of {}",
+                        format_size(drive.free_bytes),
+                        format_size(drive.total_bytes)
+                    )
+                    .into();
+                    ui::sidebar::drive_row(&theme, ("drive", ix))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    ui::icon::ui_icon("icons/hard-drive.svg", theme.text_dim)
+                                        .size(px(14.)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_sm()
+                                        .overflow_hidden()
+                                        .child(SharedString::from(drive.name.clone())),
+                                ),
+                        )
+                        .child(ui::sidebar::capacity_bar(&theme, drive.used_fraction()))
+                        .child(div().text_xs().text_color(theme.text_dim).child(free_line))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.navigate(path.clone(), cx);
+                        }))
+                }));
+            }
         }
 
         let sidebar = ui::sidebar::sidebar_panel(&theme).child(content);

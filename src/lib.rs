@@ -3,6 +3,7 @@
 //! Library target so that logic modules are reachable from benches and
 //! integration tests; the GPUI app lives in `main.rs`.
 
+pub mod drives;
 pub mod index;
 pub mod listing;
 pub mod logging;

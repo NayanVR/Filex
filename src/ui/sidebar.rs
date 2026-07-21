@@ -7,7 +7,7 @@
 //! uniform; callers chain their content and `.on_click`, plus style
 //! overrides (dim text for action rows, smaller warn text for banners).
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
+use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, relative};
 
 use super::icon;
 use super::theme::Theme;
@@ -56,6 +56,37 @@ pub fn collapsible_header(
         .hover(move |s| s.text_color(text).bg(hover))
         .child(icon::ui_icon(chevron, theme.text_dim).size(px(11.)))
         .child(label.into())
+}
+
+/// A stacked drive entry (taller than a row): name line, capacity bar,
+/// and a free/total line. Callers add the children and chain `.on_click`.
+pub fn drive_row(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
+    let hover = theme.hover;
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap_1()
+        .mx_2()
+        .px_2()
+        .py(px(5.))
+        .rounded_md()
+        .cursor_pointer()
+        .overflow_hidden()
+        .hover(move |s| s.bg(hover))
+}
+
+/// A capacity bar showing `fraction` used (0..=1), turning warn-colored
+/// when the volume is nearly full.
+pub fn capacity_bar(theme: &Theme, fraction: f32) -> Div {
+    let f = fraction.clamp(0., 1.);
+    let fill = if f > 0.9 { theme.warn } else { theme.accent };
+    div()
+        .w_full()
+        .h(px(4.))
+        .rounded_full()
+        .bg(theme.border)
+        .child(div().h_full().rounded_full().bg(fill).w(relative(f)))
 }
 
 /// The common sidebar row: inset, rounded, hover-highlighted.

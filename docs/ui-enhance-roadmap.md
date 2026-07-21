@@ -204,6 +204,20 @@ back/forward. Drag-reorder was left out (the "only if cheap" option).
 
 ### 7. Sidebar upgrade: Favorites, Recents, Drives
 
+**Done 2026-07-21.** Two commits. 7a: Favorites (settings-backed pins;
+folder menu Pin/Unpin, per-item Move Up/Down/Unpin), Recents (new
+unit-tested `filex::recents` — capped/deduped JSON log in the data dir,
+recorded on navigate + file open, with a Clear row), and collapsible
+sections (disclosure headers, collapsed state persisted; the section
+list scrolls with the macOS FDA banner pinned below). 7b: Drives —
+`filex::drives` enumerates mounts with capacity behind a per-OS boundary
+(`/Volumes` + statvfs on macOS, `/proc/mounts` block devices + statvfs
+on Linux, `GetLogicalDrives` + `GetDiskFreeSpaceExW` on Windows; pure
+mount parsing + used-fraction unit-tested). The sidebar DRIVES section
+shows capacity bars (warn-tinted past 90%) and free/total; clicking
+navigates; refreshed on a 30s timer off-thread. Eased collapse animation
+is left instant for now (the chevron swaps state).
+
 - Favorites: user-pinned folders (settings-backed), add via context
   menu ("Pin to Sidebar") and drag later; reorder via menu first.
 - Recents: recently opened files/folders from a small local usage log
