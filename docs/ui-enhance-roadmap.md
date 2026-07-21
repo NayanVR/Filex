@@ -177,6 +177,21 @@ persisted at a fixed default for now); a larger dedicated preview decode
 
 ### 6. Tabs
 
+**Done 2026-07-21.** Split across two commits per the plan. 6a
+disentangled the selection into per-list `selection` (browse) +
+`search_selection` (global). 6b added `TabSnapshot` (cwd, entries,
+load_error, browse selection, scroll, back/forward history): the active
+tab's state stays live on the Workspace so the browse code is untouched,
+and `snapshot_active`/`restore_tab` swap it on switch (transient rename/
+armed-delete are dropped, not saved). `open_tab`/`activate_tab`/
+`close_tab` manage the `Vec<TabSnapshot>`; search stays global and result
+activation targets the active tab. `ui::tabs` renders the strip (shown
+only with 2+ tabs) with per-tab close ✕, middle-click close, and a "+".
+Per-tab back/forward history with top-bar ‹ › buttons (dimmed when
+empty). Keys: cmd-t/ctrl-t new, cmd-w/ctrl-w close (last tab closes the
+window), ctrl-tab / ctrl-shift-tab cycle, cmd-[ / cmd-] (alt-left/right)
+back/forward. Drag-reorder was left out (the "only if cheap" option).
+
 - Multiple browse locations, one window: tab bar under the titlebar
   (mockup's top strip). Each tab owns cwd, selection, scroll,
   history; search stays global (Spotlight model) but result

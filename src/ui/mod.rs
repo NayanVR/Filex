@@ -21,5 +21,6 @@ pub mod search_input;
 pub mod settings_pane;
 pub mod sidebar;
 pub mod status_bar;
+pub mod tabs;
 pub mod theme;
 pub mod top_bar;

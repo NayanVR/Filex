@@ -43,6 +43,7 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("arrow-up"),
     icon!("settings"),
     icon!("search"),
+    icon!("chevron-left"),
     icon!("chevron-right"),
     icon!("chevron-up"),
     icon!("chevron-down"),

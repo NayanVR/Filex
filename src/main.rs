@@ -27,7 +27,21 @@ use ui::theme::{ActiveTheme as _, Theme};
 
 actions!(
     filex,
-    [Quit, CloseWindow, GoUp, ToggleSettings, TogglePreview, RenameSelected, DeleteSelected, Undo]
+    [
+        Quit,
+        GoUp,
+        GoBack,
+        GoForward,
+        ToggleSettings,
+        TogglePreview,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        RenameSelected,
+        DeleteSelected,
+        Undo
+    ]
 );
 
 /// Metadata for the details panel, fetched lazily off-thread per
@@ -187,6 +201,38 @@ struct RenameState {
     _subscription: gpui::Subscription,
 }
 
+/// One browse tab's saved state (block 6). The *active* tab's state
+/// lives directly on the [`Workspace`] (so the existing browse code is
+/// untouched); this holds the inactive tabs, and the active slot is
+/// refreshed from the live fields on every switch. Search is global and
+/// not part of a tab. Transient per-tab UI (an in-progress rename, an
+/// armed delete) is intentionally dropped on switch rather than saved.
+struct TabSnapshot {
+    cwd: PathBuf,
+    entries: Vec<Entry>,
+    load_error: Option<SharedString>,
+    selection: Selection,
+    scroll: UniformListScrollHandle,
+    history_back: Vec<PathBuf>,
+    history_forward: Vec<PathBuf>,
+}
+
+impl TabSnapshot {
+    /// A blank slot; the active tab's slot always holds one of these
+    /// until the next switch refreshes it from the live fields.
+    fn placeholder() -> Self {
+        Self {
+            cwd: PathBuf::new(),
+            entries: Vec::new(),
+            load_error: None,
+            selection: Selection::default(),
+            scroll: UniformListScrollHandle::new(),
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+        }
+    }
+}
+
 struct Workspace {
     focus_handle: FocusHandle,
     cwd: PathBuf,
@@ -249,6 +295,13 @@ struct Workspace {
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
     /// Lazily-fetched metadata for the details panel's current item.
     preview_meta: Option<PreviewMeta>,
+    /// All browse tabs. `tabs[active_tab]` is stale — that tab's live
+    /// state is the fields above; the others are real snapshots.
+    tabs: Vec<TabSnapshot>,
+    active_tab: usize,
+    /// Back/forward navigation history for the active tab.
+    history_back: Vec<PathBuf>,
+    history_forward: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -337,6 +390,10 @@ impl Workspace {
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
             preview_meta: None,
+            tabs: vec![TabSnapshot::placeholder()],
+            active_tab: 0,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
         };
         this.load_dir(&cwd, cx);
         // Windows probes for the elevated index service first and only
@@ -833,6 +890,13 @@ impl Workspace {
     }
 
     fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if path == self.cwd {
+            return;
+        }
+        // A new destination severs the forward history (the tab owns
+        // both stacks).
+        self.history_back.push(self.cwd.clone());
+        self.history_forward.clear();
         self.load_dir(&path, cx);
         cx.notify();
     }
@@ -841,6 +905,106 @@ impl Workspace {
         if let Some(parent) = self.cwd.parent().map(Path::to_path_buf) {
             self.navigate(parent, cx);
         }
+    }
+
+    /// Back/forward through the active tab's history.
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(prev) = self.history_back.pop() {
+            self.history_forward.push(self.cwd.clone());
+            self.load_dir(&prev, cx);
+            cx.notify();
+        }
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(next) = self.history_forward.pop() {
+            self.history_back.push(self.cwd.clone());
+            self.load_dir(&next, cx);
+            cx.notify();
+        }
+    }
+
+    /// Save the live browse state into the active tab's slot.
+    fn snapshot_active(&mut self) -> TabSnapshot {
+        TabSnapshot {
+            cwd: std::mem::take(&mut self.cwd),
+            entries: std::mem::take(&mut self.entries),
+            load_error: self.load_error.take(),
+            selection: std::mem::take(&mut self.selection),
+            scroll: std::mem::replace(&mut self.browse_scroll, UniformListScrollHandle::new()),
+            history_back: std::mem::take(&mut self.history_back),
+            history_forward: std::mem::take(&mut self.history_forward),
+        }
+    }
+
+    /// Load a saved tab into the live browse fields. Transient per-tab UI
+    /// (rename, armed delete) does not survive the switch.
+    fn restore_tab(&mut self, snap: TabSnapshot) {
+        self.cwd = snap.cwd;
+        self.entries = snap.entries;
+        self.load_error = snap.load_error;
+        self.selection = snap.selection;
+        self.browse_scroll = snap.scroll;
+        self.history_back = snap.history_back;
+        self.history_forward = snap.history_forward;
+        self.renaming = None;
+        self.pending_delete = None;
+    }
+
+    /// Switch to tab `i` (no-op if it's already active or out of range).
+    fn activate_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i == self.active_tab || i >= self.tabs.len() {
+            return;
+        }
+        self.tabs[self.active_tab] = self.snapshot_active();
+        let target = std::mem::replace(&mut self.tabs[i], TabSnapshot::placeholder());
+        self.restore_tab(target);
+        self.active_tab = i;
+        self.refresh_preview(cx);
+        cx.notify();
+    }
+
+    /// Open a new tab at `path` and make it active.
+    fn open_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.tabs[self.active_tab] = self.snapshot_active();
+        self.tabs.push(TabSnapshot::placeholder());
+        self.active_tab = self.tabs.len() - 1;
+        self.restore_tab(TabSnapshot::placeholder());
+        self.load_dir(&path, cx);
+        self.refresh_preview(cx);
+        cx.notify();
+    }
+
+    /// Close tab `i`, activating a neighbor if it was the active one.
+    /// Closing the last tab is handled by the caller (it closes the
+    /// window) — this assumes more than one tab remains.
+    fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 || i >= self.tabs.len() {
+            return;
+        }
+        if i == self.active_tab {
+            self.tabs.remove(i);
+            let new_active = i.min(self.tabs.len() - 1);
+            let target = std::mem::replace(&mut self.tabs[new_active], TabSnapshot::placeholder());
+            self.restore_tab(target);
+            self.active_tab = new_active;
+            self.refresh_preview(cx);
+        } else {
+            self.tabs.remove(i);
+            if i < self.active_tab {
+                self.active_tab -= 1;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The folder name shown on tab `i` (the drive/root shows as "/").
+    fn tab_title(&self, i: usize) -> SharedString {
+        let cwd = if i == self.active_tab { &self.cwd } else { &self.tabs[i].cwd };
+        cwd.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.display().to_string())
+            .into()
     }
 
     fn clear_search(&mut self, cx: &mut Context<Self>) {
@@ -1605,7 +1769,22 @@ impl Workspace {
         let settings = self.settings.read(cx).settings();
         let is_grid = settings.view == ViewMode::Grid;
         let preview_open = settings.preview_open;
+        let (can_back, can_forward) = (!self.history_back.is_empty(), !self.history_forward.is_empty());
+        let dim = |enabled: bool| if enabled { theme.text_dim } else { theme.border };
         ui::top_bar::top_bar(&theme)
+            .child(
+                ui::top_bar::toolbar_button(&theme, "back", "icons/chevron-left.svg", dim(can_back))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_back(cx))),
+            )
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "forward",
+                    "icons/chevron-right.svg",
+                    dim(can_forward),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_forward(cx))),
+            )
             .child(
                 ui::top_bar::toolbar_button(&theme, "up", "icons/arrow-up.svg", theme.text_dim)
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -2472,6 +2651,44 @@ impl Workspace {
         ui::status_bar::status_bar(theme, left, self.index_status_text())
     }
 
+    /// The tab strip, shown only with more than one tab open. The "+"
+    /// opens a tab at the active tab's folder.
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.tabs.len() < 2 {
+            return None;
+        }
+        let theme = *cx.theme();
+        let mut bar = ui::tabs::tab_bar(&theme);
+        for i in 0..self.tabs.len() {
+            bar = bar.child(
+                ui::tabs::tab(&theme, ("tab", i), i == self.active_tab)
+                    .child(ui::tabs::tab_label(self.tab_title(i)))
+                    .child(ui::tabs::tab_close(&theme, ("tab-close", i)).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, cx);
+                        },
+                    )))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.activate_tab(i, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                            this.close_tab(i, cx);
+                        }),
+                    ),
+            );
+        }
+        let cwd = self.cwd.clone();
+        bar = bar.child(ui::tabs::new_tab_button(&theme, "new-tab").on_click(cx.listener(
+            move |this, _: &ClickEvent, _window, cx| {
+                this.open_tab(cwd.clone(), cx);
+            },
+        )));
+        Some(bar.into_any_element())
+    }
+
     /// The right-hand details/preview panel for the lead item. `None`
     /// when the panel is closed or the settings pane is showing. Uses
     /// `&mut self` because the preview image may schedule a thumbnail
@@ -2538,8 +2755,29 @@ impl Render for Workspace {
         let theme = *cx.theme();
         div()
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(cx.listener(|this, _: &GoUp, _window, cx| this.go_up(cx)))
+            .on_action(cx.listener(|this, _: &GoBack, _window, cx| this.go_back(cx)))
+            .on_action(cx.listener(|this, _: &GoForward, _window, cx| this.go_forward(cx)))
+            .on_action(cx.listener(|this, _: &NewTab, _window, cx| {
+                let cwd = this.cwd.clone();
+                this.open_tab(cwd, cx);
+            }))
+            // cmd-w closes the active tab; the last tab closes the window.
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.tabs.len() <= 1 {
+                    window.remove_window();
+                } else {
+                    this.close_tab(this.active_tab, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, _window, cx| {
+                let next = (this.active_tab + 1) % this.tabs.len();
+                this.activate_tab(next, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, _window, cx| {
+                let prev = (this.active_tab + this.tabs.len() - 1) % this.tabs.len();
+                this.activate_tab(prev, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleSettings, _window, cx| {
                 this.toggle_settings(cx);
             }))
@@ -2591,6 +2829,7 @@ impl Render for Workspace {
             .bg(theme.bg)
             .text_color(theme.text)
             .child(self.render_top_bar(cx))
+            .children(self.render_tab_bar(cx))
             .child(
                 div()
                     .flex()
@@ -2627,9 +2866,15 @@ fn main() {
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-q", Quit, None),
             #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-t", NewTab, None),
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-up", GoUp, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-[", GoBack, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-]", GoForward, None),
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-,", ToggleSettings, None),
             #[cfg(target_os = "macos")]
@@ -2644,9 +2889,15 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-q", Quit, None),
             #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-w", CloseWindow, None),
+            KeyBinding::new("ctrl-w", CloseTab, None),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-t", NewTab, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("alt-up", GoUp, None),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("alt-left", GoBack, None),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("alt-right", GoForward, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-,", ToggleSettings, None),
             #[cfg(not(target_os = "macos"))]
@@ -2657,6 +2908,9 @@ fn main() {
             // consumes that for text editing.
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-delete", DeleteSelected, None),
+            // Tab cycling is ctrl-tab on every platform.
+            KeyBinding::new("ctrl-tab", NextTab, None),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
             KeyBinding::new("f2", RenameSelected, None),
         ]);
         search_input::bind_keys(cx);
