@@ -3,6 +3,7 @@
 
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
+use super::icon;
 use super::theme::Theme;
 
 /// Fixed row height — `uniform_list` requires every row equal-height,
@@ -46,26 +47,34 @@ pub fn header_row(theme: &Theme, icon_col_width: f32) -> Div {
 /// when this column is the current sort key (`Some(ascending)`).
 /// Callers size it (`.flex_1()` or a fixed width) and chain
 /// `.on_click`; clicking is expected to select-or-flip the sort.
+/// One clickable column header. `active` carries the sort direction
+/// when this column is the current sort key (`Some(ascending)`), shown
+/// as a chevron. The cell is a flex row; callers size it (`.flex_1()`
+/// or a fixed width) and choose alignment (`.justify_end()` for the
+/// right-hand columns), then chain `.on_click`.
 pub fn header_cell(
     theme: &Theme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     active: Option<bool>,
 ) -> Stateful<Div> {
-    let arrow = match active {
-        Some(true) => " ▲",
-        Some(false) => " ▼",
-        None => "",
-    };
     let hover = theme.hover;
     let text = theme.text;
+    let chevron = active.map(|ascending| {
+        let path = if ascending { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" };
+        icon::ui_icon(path, text).size(px(12.))
+    });
     div()
         .id(id)
+        .flex()
+        .items_center()
+        .gap(px(2.))
         .cursor_pointer()
         .rounded_sm()
         .hover(move |s| s.bg(hover))
         .when(active.is_some(), |s| s.text_color(text))
-        .child(format!("{}{arrow}", label.into()))
+        .child(label.into())
+        .children(chevron)
 }
 
 /// The common list-row container: fixed height, selection background,

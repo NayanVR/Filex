@@ -1263,13 +1263,13 @@ impl Workspace {
         for (ix, (label, target)) in segments.into_iter().enumerate() {
             if elide && ix > 0 && ix < tail_start {
                 if ix == 1 {
-                    children.push(ui::top_bar::breadcrumb_separator(&theme, "›").into_any_element());
-                    children.push(ui::top_bar::breadcrumb_separator(&theme, "…").into_any_element());
+                    children.push(ui::top_bar::breadcrumb_chevron(&theme).into_any_element());
+                    children.push(ui::top_bar::breadcrumb_ellipsis(&theme).into_any_element());
                 }
                 continue;
             }
             if ix > 0 {
-                children.push(ui::top_bar::breadcrumb_separator(&theme, "›").into_any_element());
+                children.push(ui::top_bar::breadcrumb_chevron(&theme).into_any_element());
             }
             children.push(
                 ui::top_bar::breadcrumb_segment(&theme, ("crumb", ix), label)
@@ -1290,18 +1290,18 @@ impl Workspace {
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
         ui::top_bar::top_bar(&theme)
-            .child(ui::top_bar::toolbar_button(&theme, "up", "↑").on_click(cx.listener(
-                |this, _: &ClickEvent, _window, cx| {
+            .child(ui::top_bar::toolbar_button(&theme, "up", "icons/arrow-up.svg").on_click(
+                cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.go_up(cx);
-                },
-            )))
+                }),
+            ))
             .child(self.render_breadcrumbs(cx))
             .child(
                 ui::top_bar::search_box(&theme, !self.query.is_empty())
                     .child(self.search_input.clone()),
             )
             .child(
-                ui::top_bar::toolbar_button(&theme, "settings", "⚙")
+                ui::top_bar::toolbar_button(&theme, "settings", "icons/settings.svg")
                     .when(self.settings_open, |s| s.text_color(theme.accent))
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.toggle_settings(cx);
@@ -1449,14 +1449,22 @@ impl Workspace {
             RootState::Failed(err) => Some(err.clone()),
             _ => None,
         };
-        let (marker, marker_color) = match &slot.state {
-            RootState::Building => ("icons/loader-circle.svg", theme.text_dim),
-            RootState::Ready { .. } => ("icons/dot.svg", theme.accent),
-            RootState::Failed(_) => ("icons/triangle-alert.svg", theme.warn),
+        // Building spins (indexing is live); ready/failed are static.
+        // Sidebar rows aren't virtualized, so animating here is fine.
+        let marker = match &slot.state {
+            RootState::Building => {
+                ui::icon::spinner("icons/loader-circle.svg", theme.text_dim, 14., ("root-spin", ix))
+            }
+            RootState::Ready { .. } => {
+                ui::icon::ui_icon("icons/dot.svg", theme.accent).size(px(14.)).into_any_element()
+            }
+            RootState::Failed(_) => ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn)
+                .size(px(14.))
+                .into_any_element(),
         };
         let menu_path = slot.path.clone();
         ui::sidebar::sidebar_row(&theme, ("root", ix))
-            .child(ui::icon::ui_icon(marker, marker_color).size(px(14.)))
+            .child(marker)
             .child(div().flex_1().overflow_hidden().child(slot.label.clone()))
             .on_mouse_down(
                 MouseButton::Right,
@@ -1533,7 +1541,8 @@ impl Workspace {
                 ui::sidebar::sidebar_row(&theme, "fda-banner")
                     .text_xs()
                     .text_color(theme.warn)
-                    .child("⚠ Grant Full Disk Access")
+                    .child(ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn).size(px(14.)))
+                    .child("Grant Full Disk Access")
                     .on_click(|_: &ClickEvent, _window, _cx| {
                         filex::index::macos::open_full_disk_access_settings();
                     }),
@@ -1585,14 +1594,14 @@ impl Workspace {
                 )
                 .w(px(ui::list_row::MODIFIED_COL_WIDTH))
                 .flex_none()
-                .text_right()
+                .justify_end()
                 .on_click(on_sort(SortBy::Modified)),
             )
             .child(
                 ui::list_row::header_cell(&theme, "sort-size", "Size", active(SortBy::Size))
                     .w(px(ui::list_row::SIZE_COL_WIDTH))
                     .flex_none()
-                    .text_right()
+                    .justify_end()
                     .on_click(on_sort(SortBy::Size)),
             )
     }

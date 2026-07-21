@@ -9,8 +9,12 @@
 //! passed color (gpui fills the icon's coverage mask with `text_color`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::{AnyElement, RenderImage, Rgba, Svg, img, prelude::*, px, rgb, svg};
+use gpui::{
+    Animation, AnimationExt as _, AnyElement, ElementId, RenderImage, Rgba, Svg, Transformation,
+    img, linear, percentage, prelude::*, px, rgb, svg,
+};
 
 use filex::listing::FileKind;
 
@@ -25,6 +29,22 @@ pub const ICON_SIZE: f32 = 20.;
 /// and may add a transformation for animation.
 pub fn ui_icon(path: &'static str, color: Rgba) -> Svg {
     svg().path(path).flex_none().text_color(color)
+}
+
+/// A continuously rotating glyph (e.g. `loader-circle` as a busy
+/// spinner). One full turn per second, linear so it reads as steady
+/// motion. `id` must be unique among concurrently animating elements.
+/// Lives outside virtualized lists only — never spin inside a
+/// `uniform_list` row (polish principle in docs/roadmap.md).
+pub fn spinner(path: &'static str, color: Rgba, size: f32, id: impl Into<ElementId>) -> AnyElement {
+    ui_icon(path, color)
+        .size(px(size))
+        .with_animation(
+            id,
+            Animation::new(Duration::from_secs(1)).repeat().with_easing(linear),
+            |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+        )
+        .into_any_element()
 }
 
 /// A decoded thumbnail, rendered as a rounded square.

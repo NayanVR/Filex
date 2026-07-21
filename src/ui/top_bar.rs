@@ -1,8 +1,9 @@
 //! The top bar: navigation button, current path, and the search box
 //! frame (the input entity itself lives in the workspace).
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
+use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, svg};
 
+use super::icon;
 use super::theme::Theme;
 
 /// Bar height. The macOS titlebar is transparent and the traffic
@@ -28,18 +29,25 @@ pub fn top_bar(theme: &Theme) -> Div {
     bar
 }
 
-/// A small glyph button ("↑"). Callers chain `.on_click`.
-pub fn toolbar_button(theme: &Theme, id: impl Into<ElementId>, glyph: &'static str) -> Stateful<Div> {
+/// A small icon button (`icon` is an asset path like
+/// `"icons/settings.svg"`). The glyph inherits the button's text color,
+/// so callers can chain `.text_color(theme.accent)` to mark it active.
+/// Callers chain `.on_click`.
+pub fn toolbar_button(theme: &Theme, id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
     let hover = theme.hover;
     div()
         .id(id)
-        .px_2()
-        .py_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_1()
         .rounded_md()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .text_color(theme.text_dim)
-        .child(glyph)
+        // No explicit color on the glyph: it inherits the button's text
+        // color so the active-state override above tints it.
+        .child(svg().path(icon).size(px(18.)).flex_none())
 }
 
 /// The breadcrumb strip filling the bar's middle. Children are
@@ -66,18 +74,25 @@ pub fn breadcrumb_segment(
         .child(label.into())
 }
 
-/// The "›" between segments (also used, without siblings, as the
-/// non-clickable "…" that stands in for elided middle segments).
-pub fn breadcrumb_separator(theme: &Theme, glyph: &'static str) -> Div {
-    div().text_xs().text_color(theme.text_dim).child(glyph)
+/// The "›" chevron between breadcrumb segments.
+pub fn breadcrumb_chevron(theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .child(icon::ui_icon("icons/chevron-right.svg", theme.text_dim).size(px(14.)))
 }
 
-/// The search box frame; the border lights up while a query is active.
-/// The caller adds the input entity as the child.
+/// The non-clickable "…" that stands in for elided middle segments.
+pub fn breadcrumb_ellipsis(theme: &Theme) -> Div {
+    div().text_xs().text_color(theme.text_dim).child("…")
+}
+
+/// The search box frame: a magnifier, then the input the caller adds.
+/// The border lights up while a query is active.
 pub fn search_box(theme: &Theme, active: bool) -> Div {
     div()
         .flex()
         .items_center()
+        .gap_2()
         .w(px(260.))
         .px_2()
         .py_1()
@@ -86,4 +101,5 @@ pub fn search_box(theme: &Theme, active: bool) -> Div {
         .border_color(if active { theme.accent } else { theme.border })
         .text_sm()
         .text_color(theme.text)
+        .child(icon::ui_icon("icons/search.svg", theme.text_dim).size(px(15.)))
 }

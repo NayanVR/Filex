@@ -67,6 +67,19 @@ helpers carry the scale for now.
 
 ### 2. Real icon set (replaces emoji glyphs)
 
+**Done 2026-07-21.** Lucide SVGs (ISC, `assets/icons/`) served by an
+embedded `AssetSource` (`ui::assets`, `Application::with_assets`);
+gpui's `svg()` tints each coverage mask with the passed theme color.
+`ui::icon` gained `file_icon(theme, kind)` (folder in the accent, curated
+per-kind hues), `ui_icon(path, color)` for any themed glyph, and
+`spinner(...)` (1s linear rotation). Converted: file-type marks, sidebar
+places (house/hard-drive) + root status (dot/loader-circle/triangle-
+alert, building animated), toolbar up/gear, the search magnifier, sort-
+header chevrons, breadcrumb chevrons, the FDA banner, and the job-cancel
+✕. Emoji glyphs where an icon inherits the button color use a plain
+`svg()` (so active/hover tints cascade); the rest pass an explicit color.
+`FileKind::glyph` (emoji) is retained as the documented fallback.
+
 Already flagged in roadmap.md "on the radar" — this is the single
 biggest premium jump after the light theme.
 
