@@ -111,10 +111,15 @@ This is the subtle part; enumerate every path that mutates a file's
 identity.
 
 - **macOS xattr**: travels with the file automatically on a same-volume
-  `rename(2)` and on `NSFileManager` moves; `cp` may drop it (documents
-  it as a limitation). So Finder-side and filex-side moves keep tags for
-  free. Cross-volume copies lose them unless we opt to copy xattrs — v1
-  accepts the loss (matches Finder's own copy behavior in some cases).
+  `rename(2)` and on `NSFileManager` moves; a byte-level copy (our
+  chunked copy path) does **not** carry it. So Finder-side and filex-side
+  *moves* keep tags for free, but a filex-side *copy* would leave the new
+  file's xattr empty — the copy would show tags inside filex (sidecar was
+  duplicated) but none in Finder. **Decision (2026-07-22, "Option B"):
+  harden copy** — on a filex-side copy, macOS `set_tags` is invoked on
+  the destination so the xattr is written onto the copy too, keeping
+  Finder and filex in agreement. (Externally-performed `cp` outside filex
+  can still drop the xattr; that's out of our hands.)
 - **Sidecar (all platforms, since it's the enumeration index)**: keyed
   by path, so it must be **updated by our own file ops**. `filex::ops`
   already produces an `AppliedOp` for every move/rename/delete and an
@@ -234,3 +239,7 @@ small enum mirroring Finder's palette so the two stay aligned.
   just Finder-imported ones. `TagColor` mirrors Finder's 0–7 palette so
   a filex color round-trips into Finder. The details-panel chip UI ships
   with a color picker (phasing step 4).
+- **macOS copy carries the xattr ("Option B").** A filex-side copy
+  writes the tag xattr onto the destination (not just the sidecar), so a
+  copied file shows the same tags in Finder as in filex. Supersedes the
+  earlier "v1 accepts the loss" note. Implemented in phasing step 3.
