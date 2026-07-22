@@ -222,16 +222,30 @@ small enum mirroring Finder's palette so the two stay aligned.
      migration inside the existing off-thread op closures
      (`spawn_apply`, `delete_paths`, `spawn_paste_batch`) and reverses
      it in `undo_last`, and prunes stale keys once at startup.
-3. macOS xattr backend + Finder-interop round-trip.
+3. macOS xattr backend + Finder-interop round-trip. **Done.**
+   - Empirically NSURL's `NSURLTagNamesKey` is **names-only** (it forces
+     color index 0), so it can't meet the "colors round-trip into Finder"
+     decision. Backend instead reads/writes the raw
+     `com.apple.metadata:_kMDItemUserTags` xattr as a binary plist of
+     `"Name\n<idx>"` strings — the portable `encode_finder_tags` /
+     `decode_finder_tags` codec (unit-tested + a real-plist fixture so CI
+     covers the format) plus libc `getxattr`/`setxattr`/`removexattr`.
+   - `MacosTags` (a `PlatformTags` alias, macOS only) wraps `SidecarTags`:
+     `set_tags` writes xattr + sidecar, `tags` prefers the xattr,
+     `all`/`prune` use the sidecar, and a `Copied` migration also writes
+     the xattr onto the copy ("Option B"). Verified on a dev Mac: `plutil`
+     and NSURL both read what we write.
 4. Details-panel chips (read + add/remove).
 5. `tag:` search token + intersect (+ bench).
 6. Sidebar TAGS section.
 
 ## Confirmed decisions (2026-07-22)
 
-- **macOS access: NSURL resource values** (`NSURLTagNamesKey` /
-  `NSURLLabelNumberKey` via objc2-foundation). Apple handles the
-  binary-plist encoding and color mapping.
+- ~~**macOS access: NSURL resource values**~~ **Superseded (phase 3).**
+  Testing showed `NSURLTagNamesKey` is names-only (forces color index 0),
+  which can't satisfy the colors-round-trip decision below. The backend
+  reads/writes the raw `_kMDItemUserTags` xattr (binary plist of
+  `"Name\n<idx>"`) via a portable codec + libc `getxattr`/`setxattr`.
 - **Sidecar keying: absolute path + lazy prune.** Our own ops migrate
   the key; external Windows/Linux moves lose tags and vanished keys are
   pruned on `all()`. Inode-keying is noted as future hardening.

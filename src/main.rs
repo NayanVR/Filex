@@ -15,7 +15,7 @@ use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
-use filex::tags::SidecarTags;
+use filex::tags::PlatformTags;
 use filex::selection::Selection;
 use filex::settings::{SortBy, ThemeMode, ViewMode};
 
@@ -117,7 +117,7 @@ fn describe_items(items: &[(PathBuf, String)]) -> Option<String> {
 /// copying, or dropping the file's tags to follow it), logging rather
 /// than failing — a tag mishap must never derail the file operation
 /// itself. Runs on the background executor (it persists).
-fn migrate_tags(tags: &SidecarTags, applied: &mut ops::AppliedOp) {
+fn migrate_tags(tags: &PlatformTags, applied: &mut ops::AppliedOp) {
     if let Err(err) = tags.apply_applied(applied) {
         tracing::error!("failed to migrate tags: {err:#}");
     }
@@ -323,7 +323,7 @@ struct Workspace {
     /// section and the `tag:` filter, and (on every platform) the store
     /// whose path keys are migrated by our own file ops. Shared into
     /// background closures, which persist it off the UI thread.
-    tags: std::sync::Arc<SidecarTags>,
+    tags: std::sync::Arc<PlatformTags>,
     /// Mounted volumes with capacity, refreshed on a slow timer.
     drives: Vec<Drive>,
 }
@@ -421,7 +421,7 @@ impl Workspace {
             recents: filex::recents::default_recents_file()
                 .map(|file| Recents::load(&file))
                 .unwrap_or_default(),
-            tags: std::sync::Arc::new(SidecarTags::load(
+            tags: std::sync::Arc::new(PlatformTags::load(
                 filex::tags::default_tags_file()
                     .unwrap_or_else(|| std::env::temp_dir().join("filex").join("tags.json")),
             )),

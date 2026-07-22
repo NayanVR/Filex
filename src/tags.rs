@@ -95,6 +95,53 @@ impl Tag {
     }
 }
 
+/// Encode tags into the payload of Finder's `_kMDItemUserTags` extended
+/// attribute: a binary property list holding an array of `"Name\n<idx>"`
+/// strings, where `<idx>` is the Finder color index (0 = none). This is
+/// Finder's exact on-disk format, so a value written here appears in
+/// Finder with its color, and vice-versa. Portable (no macOS APIs) so the
+/// format is testable on CI; the actual xattr I/O is macOS-only.
+pub fn encode_finder_tags(tags: &[Tag]) -> Result<Vec<u8>> {
+    let array = tags
+        .iter()
+        .map(|tag| {
+            let idx = tag.color.map(TagColor::finder_index).unwrap_or(0);
+            plist::Value::String(format!("{}\n{idx}", tag.name))
+        })
+        .collect::<Vec<_>>();
+    let mut buf = Vec::new();
+    plist::Value::Array(array)
+        .to_writer_binary(&mut buf)
+        .context("serializing Finder tags plist")?;
+    Ok(buf)
+}
+
+/// Decode the payload of Finder's `_kMDItemUserTags` xattr (see
+/// [`encode_finder_tags`]). A malformed plist or unexpected shape yields
+/// no tags rather than an error — a file's tags are never worth failing
+/// over. Each element is `"Name"` or `"Name\n<idx>"`; a trailing
+/// `\n<0-7>` is read as the color, anything else is part of the name.
+pub fn decode_finder_tags(bytes: &[u8]) -> Vec<Tag> {
+    let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    let Some(array) = value.as_array() else {
+        return Vec::new();
+    };
+    array.iter().filter_map(|v| v.as_string()).map(decode_finder_tag).collect()
+}
+
+/// One `"Name\n<idx>"` (or bare `"Name"`) entry → a [`Tag`].
+fn decode_finder_tag(entry: &str) -> Tag {
+    if let Some((name, idx)) = entry.rsplit_once('\n')
+        && let Ok(index) = idx.parse::<u8>()
+        && index <= 7
+    {
+        return Tag { name: name.to_string(), color: TagColor::from_finder_index(index) };
+    }
+    Tag::new(entry)
+}
+
 /// Read/write interface for a file's tags. Backends: [`SidecarTags`]
 /// (portable), plus a macOS xattr backend layered on later.
 pub trait TagStore: Send + Sync {
@@ -286,6 +333,242 @@ impl TagStore for SidecarTags {
     }
 }
 
+/// The tag store the app runs against: [`SidecarTags`] everywhere, with
+/// macOS swapping in [`MacosTags`] to add Finder interop on top of the
+/// same sidecar index. The app is written against this alias so it never
+/// branches on platform.
+#[cfg(target_os = "macos")]
+pub type PlatformTags = macos::MacosTags;
+#[cfg(not(target_os = "macos"))]
+pub type PlatformTags = SidecarTags;
+
+/// macOS backend: Finder-interop tag xattr on the file itself, layered
+/// over a [`SidecarTags`] that stays the enumeration index. `set_tags`
+/// writes both; `tags` prefers the xattr so Finder-side edits win;
+/// `all`/`prune`/most migration delegate to the sidecar. Only a copy
+/// needs extra work — the byte-level copy doesn't carry the xattr, so we
+/// write it onto the new file ("Option B", `docs/design-tags.md`).
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Context as _, Result};
+
+    use super::{SidecarTags, Tag, TagStore, decode_finder_tags, encode_finder_tags};
+    use crate::ops::AppliedOp;
+
+    /// Finder's user-tags xattr name (NUL-terminated for the libc calls).
+    const TAGS_XATTR: &[u8] = b"com.apple.metadata:_kMDItemUserTags\0";
+
+    pub struct MacosTags {
+        inner: SidecarTags,
+    }
+
+    impl MacosTags {
+        pub fn load(file: PathBuf) -> Self {
+            Self { inner: SidecarTags::load(file) }
+        }
+
+        /// Lazy prune of the enumeration index — delegates to the sidecar
+        /// (the xattr can't be enumerated without a disk walk).
+        pub fn prune(&self, exists: impl Fn(&Path) -> bool) -> Result<usize> {
+            self.inner.prune(exists)
+        }
+
+        /// Migrate stores for a completed file op. Move/rename/delete only
+        /// touch the sidecar key — the xattr rides along with the file (or
+        /// is gone with a trashed one). A copy additionally gets the
+        /// source's tags written onto the new file's xattr so Finder shows
+        /// the copy tagged too.
+        pub fn apply_applied(&self, op: &mut AppliedOp) -> Result<()> {
+            if let AppliedOp::Copied { from, to } = op {
+                let tags = self.tags(from);
+                return if tags.is_empty() { Ok(()) } else { self.set_tags(to, &tags) };
+            }
+            self.inner.apply_applied(op)
+        }
+
+        /// Reverse [`apply_applied`] for an undone op. `ops::undo` moves
+        /// files (and their xattrs) back or deletes the copy, so only the
+        /// sidecar index needs reversing here.
+        pub fn undo_applied(&self, op: &AppliedOp) -> Result<()> {
+            self.inner.undo_applied(op)
+        }
+    }
+
+    impl TagStore for MacosTags {
+        fn tags(&self, path: &Path) -> Vec<Tag> {
+            // The xattr is authoritative for a single file (Finder edits
+            // win); the sidecar is the fallback for files tagged only via
+            // filex on a filesystem that later lost the xattr.
+            match read_tags_xattr(path) {
+                Some(tags) => tags,
+                None => self.inner.tags(path),
+            }
+        }
+
+        fn set_tags(&self, path: &Path, tags: &[Tag]) -> Result<()> {
+            write_tags_xattr(path, tags)?; // interop channel
+            self.inner.set_tags(path, tags) // enumeration index
+        }
+
+        fn all(&self) -> Vec<(PathBuf, Vec<Tag>)> {
+            self.inner.all()
+        }
+    }
+
+    /// Read and decode the Finder tags xattr; `None` when the file has no
+    /// such xattr or it can't be read (logged, never fatal).
+    fn read_tags_xattr(path: &Path) -> Option<Vec<Tag>> {
+        match get_xattr(path, TAGS_XATTR) {
+            Ok(Some(bytes)) => Some(decode_finder_tags(&bytes)),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!("reading tags xattr for {}: {err:#}", path.display());
+                None
+            }
+        }
+    }
+
+    /// Write the Finder tags xattr, or remove it when clearing all tags.
+    fn write_tags_xattr(path: &Path, tags: &[Tag]) -> Result<()> {
+        if tags.is_empty() {
+            remove_xattr(path, TAGS_XATTR)
+        } else {
+            set_xattr(path, TAGS_XATTR, &encode_finder_tags(tags)?)
+        }
+    }
+
+    fn cstring_path(path: &Path) -> Result<CString> {
+        CString::new(path.as_os_str().as_bytes()).context("path contains an interior NUL byte")
+    }
+
+    /// `getxattr(2)`: two calls (size probe, then read). `Ok(None)` when
+    /// the attribute is absent (`ENOATTR`). Follows symlinks and reads
+    /// from offset 0 — correct for a plain (non-resource-fork) xattr.
+    fn get_xattr(path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        let cpath = cstring_path(path)?;
+        let name = name.as_ptr() as *const libc::c_char;
+        // SAFETY: `cpath`/`name` are valid NUL-terminated C strings that
+        // outlive the call; a null value pointer with size 0 is the
+        // documented way to query the attribute length.
+        let size =
+            unsafe { libc::getxattr(cpath.as_ptr(), name, std::ptr::null_mut(), 0, 0, 0) };
+        if size < 0 {
+            return match std::io::Error::last_os_error() {
+                err if err.raw_os_error() == Some(libc::ENOATTR) => Ok(None),
+                err => Err(err).context("querying xattr size"),
+            };
+        }
+        let mut buf = vec![0u8; size as usize];
+        // SAFETY: `buf` has `size` bytes; the kernel writes at most that.
+        let read = unsafe {
+            libc::getxattr(cpath.as_ptr(), name, buf.as_mut_ptr().cast(), buf.len(), 0, 0)
+        };
+        if read < 0 {
+            return match std::io::Error::last_os_error() {
+                err if err.raw_os_error() == Some(libc::ENOATTR) => Ok(None),
+                err => Err(err).context("reading xattr"),
+            };
+        }
+        buf.truncate(read as usize);
+        Ok(Some(buf))
+    }
+
+    /// `setxattr(2)` — writes `data` as the attribute value.
+    fn set_xattr(path: &Path, name: &[u8], data: &[u8]) -> Result<()> {
+        let cpath = cstring_path(path)?;
+        // SAFETY: all pointers are valid for the call; `data.len()` bounds
+        // the read from `data`.
+        let rc = unsafe {
+            libc::setxattr(
+                cpath.as_ptr(),
+                name.as_ptr() as *const libc::c_char,
+                data.as_ptr().cast(),
+                data.len(),
+                0,
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error()).context("writing xattr");
+        }
+        Ok(())
+    }
+
+    /// `removexattr(2)` — a no-op when the attribute is already absent.
+    fn remove_xattr(path: &Path, name: &[u8]) -> Result<()> {
+        let cpath = cstring_path(path)?;
+        // SAFETY: valid NUL-terminated C strings outliving the call.
+        let rc = unsafe {
+            libc::removexattr(cpath.as_ptr(), name.as_ptr() as *const libc::c_char, 0)
+        };
+        if rc != 0 {
+            return match std::io::Error::last_os_error() {
+                err if err.raw_os_error() == Some(libc::ENOATTR) => Ok(()),
+                err => Err(err).context("removing xattr"),
+            };
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn store() -> (tempfile::TempDir, MacosTags) {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MacosTags::load(dir.path().join("tags.json"));
+            (dir, store)
+        }
+
+        #[test]
+        fn set_tags_writes_finder_xattr_and_reads_it_back() {
+            use super::super::TagColor;
+            let (dir, store) = store();
+            let file = dir.path().join("doc.txt");
+            std::fs::write(&file, "x").unwrap();
+
+            let tags = vec![Tag::new("Work"), Tag::colored("Hot", TagColor::Red)];
+            store.set_tags(&file, &tags).unwrap();
+
+            // tags() reads through the xattr (Finder-authoritative).
+            assert_eq!(store.tags(&file), tags);
+            // The raw xattr is exactly Finder's format.
+            let raw = get_xattr(&file, TAGS_XATTR).unwrap().unwrap();
+            assert_eq!(decode_finder_tags(&raw), tags);
+            // And the sidecar mirrored it for enumeration.
+            assert_eq!(store.all().len(), 1);
+
+            // Clearing removes the xattr entirely.
+            store.set_tags(&file, &[]).unwrap();
+            assert!(get_xattr(&file, TAGS_XATTR).unwrap().is_none());
+            assert!(store.tags(&file).is_empty());
+        }
+
+        #[test]
+        fn copy_carries_the_xattr_onto_the_new_file() {
+            let (dir, store) = store();
+            let from = dir.path().join("a.txt");
+            let to = dir.path().join("b.txt");
+            std::fs::write(&from, "x").unwrap();
+            std::fs::write(&to, "x").unwrap(); // the byte-copy already ran
+            store.set_tags(&from, &[Tag::new("Keep")]).unwrap();
+
+            // Option B: migrating a Copied op writes the tags onto `to`'s
+            // xattr, not just the sidecar.
+            store
+                .apply_applied(&mut AppliedOp::Copied { from: from.clone(), to: to.clone() })
+                .unwrap();
+            let raw = get_xattr(&to, TAGS_XATTR).unwrap().unwrap();
+            assert_eq!(decode_finder_tags(&raw), vec![Tag::new("Keep")]);
+            assert_eq!(store.tags(&to), vec![Tag::new("Keep")]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +710,52 @@ mod tests {
         assert!(store.tags(Path::new("/a")).is_empty());
         store.undo_applied(&deleted).unwrap();
         assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
+    }
+
+    #[test]
+    fn finder_tags_encode_decode_round_trip() {
+        let tags = vec![
+            Tag::new("Work"),
+            Tag::colored("Hot", TagColor::Red),
+            Tag::colored("Blue", TagColor::Blue),
+        ];
+        let bytes = encode_finder_tags(&tags).unwrap();
+        assert_eq!(decode_finder_tags(&bytes), tags);
+        // Empty set is a valid, empty array.
+        assert!(decode_finder_tags(&encode_finder_tags(&[]).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn decodes_a_real_finder_plist_fixture() {
+        // A binary plist produced independently (Python `plistlib`) for
+        // `["Work\n0", "Hot\n6"]` — Finder's exact on-disk shape, so this
+        // proves the decoder reads the genuine format (CI has no macOS).
+        // Work has no color (index 0); Hot is red (index 6).
+        const FIXTURE: &[u8] = &[
+            0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30, 0xa2, 0x01, 0x02, 0x56, 0x57, 0x6f,
+            0x72, 0x6b, 0x0a, 0x30, 0x55, 0x48, 0x6f, 0x74, 0x0a, 0x36, 0x08, 0x0b, 0x12, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x18,
+        ];
+        assert_eq!(
+            decode_finder_tags(FIXTURE),
+            vec![Tag::new("Work"), Tag::colored("Hot", TagColor::Red)]
+        );
+    }
+
+    #[test]
+    fn decode_tolerates_garbage_and_bare_names() {
+        assert!(decode_finder_tags(b"not a plist").is_empty());
+        // A bare "Name" (no color suffix) decodes as an uncolored tag.
+        let bytes = {
+            let mut buf = Vec::new();
+            plist::Value::Array(vec![plist::Value::String("Plain".into())])
+                .to_writer_binary(&mut buf)
+                .unwrap();
+            buf
+        };
+        assert_eq!(decode_finder_tags(&bytes), vec![Tag::new("Plain")]);
     }
 
     #[test]
