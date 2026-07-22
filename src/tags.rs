@@ -20,6 +20,8 @@ use std::sync::RwLock;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::ops::AppliedOp;
+
 /// Default location: `<data_local_dir>/filex/tags.json`.
 pub fn default_tags_file() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("filex").join("tags.json"))
@@ -218,6 +220,48 @@ impl SidecarTags {
         self.persist()?;
         Ok(removed.len())
     }
+
+    /// Migrate the sidecar index to reflect a just-completed file op,
+    /// keeping tags attached to their file across a filex-side
+    /// move/rename/copy/delete (see `docs/design-tags.md`). For a delete
+    /// the removed tags are written back into `op` ([`AppliedOp::Deleted`]'s
+    /// `removed_tags`) so [`undo_applied`] can reinstate them. Blocking I/O
+    /// (persists) — call on a background executor, after the op succeeds.
+    ///
+    /// [`undo_applied`]: Self::undo_applied
+    pub fn apply_applied(&self, op: &mut AppliedOp) -> Result<()> {
+        match op {
+            AppliedOp::Moved { from, to } | AppliedOp::Renamed { from, to } => {
+                self.rename_key(from, to)
+            }
+            AppliedOp::Copied { from, to } => self.copy_key(from, to),
+            AppliedOp::Deleted { original, removed_tags, .. } => {
+                *removed_tags = self.remove_key(original)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Reverse [`apply_applied`] for an op being undone: move/rename put
+    /// the key back `to → from`, an undone copy drops the copy's key, and
+    /// an undone delete restores the tags carried on the op. Blocking I/O
+    /// — call on a background executor.
+    ///
+    /// [`apply_applied`]: Self::apply_applied
+    pub fn undo_applied(&self, op: &AppliedOp) -> Result<()> {
+        match op {
+            AppliedOp::Moved { from, to } | AppliedOp::Renamed { from, to } => {
+                self.rename_key(to, from)
+            }
+            AppliedOp::Copied { to, .. } => {
+                self.remove_key(to)?;
+                Ok(())
+            }
+            AppliedOp::Deleted { original, removed_tags, .. } => {
+                self.restore_key(original, removed_tags.clone())
+            }
+        }
+    }
 }
 
 impl TagStore for SidecarTags {
@@ -319,6 +363,70 @@ mod tests {
         assert_eq!(pruned, 1);
         assert_eq!(store.tags(Path::new("/keep")), vec![Tag::new("K")]);
         assert!(store.tags(Path::new("/gone")).is_empty());
+    }
+
+    use crate::ops::{AppliedOp, TrashRestore};
+
+    #[test]
+    fn apply_applied_migrates_each_op_kind() {
+        let (_dir, store) = store();
+        store.set_tags(Path::new("/a"), &[Tag::new("T")]).unwrap();
+
+        // Copy duplicates the source's tags onto the copy.
+        store
+            .apply_applied(&mut AppliedOp::Copied { from: "/a".into(), to: "/b".into() })
+            .unwrap();
+        assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
+        assert_eq!(store.tags(Path::new("/b")), vec![Tag::new("T")]);
+
+        // Move/rename migrates the key.
+        store
+            .apply_applied(&mut AppliedOp::Moved { from: "/a".into(), to: "/c".into() })
+            .unwrap();
+        assert!(store.tags(Path::new("/a")).is_empty());
+        assert_eq!(store.tags(Path::new("/c")), vec![Tag::new("T")]);
+
+        // Delete drops the key and records the removed tags on the op.
+        let mut del = AppliedOp::Deleted {
+            original: "/c".into(),
+            restore: TrashRestore::Unknown,
+            removed_tags: Vec::new(),
+        };
+        store.apply_applied(&mut del).unwrap();
+        assert!(store.tags(Path::new("/c")).is_empty());
+        let AppliedOp::Deleted { removed_tags, .. } = &del else { panic!() };
+        assert_eq!(removed_tags, &vec![Tag::new("T")]);
+    }
+
+    #[test]
+    fn undo_applied_reverses_migration() {
+        let (_dir, store) = store();
+        store.set_tags(Path::new("/a"), &[Tag::new("T")]).unwrap();
+
+        // Undo of a rename puts the key back.
+        let renamed = AppliedOp::Renamed { from: "/a".into(), to: "/z".into() };
+        store.apply_applied(&mut renamed.clone()).unwrap();
+        store.undo_applied(&renamed).unwrap();
+        assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
+        assert!(store.tags(Path::new("/z")).is_empty());
+
+        // Undo of a copy removes the copy's key, leaving the source.
+        let copied = AppliedOp::Copied { from: "/a".into(), to: "/b".into() };
+        store.apply_applied(&mut copied.clone()).unwrap();
+        store.undo_applied(&copied).unwrap();
+        assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
+        assert!(store.tags(Path::new("/b")).is_empty());
+
+        // Undo of a delete reinstates the tags carried on the op.
+        let mut deleted = AppliedOp::Deleted {
+            original: "/a".into(),
+            restore: TrashRestore::Unknown,
+            removed_tags: Vec::new(),
+        };
+        store.apply_applied(&mut deleted).unwrap();
+        assert!(store.tags(Path::new("/a")).is_empty());
+        store.undo_applied(&deleted).unwrap();
+        assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
     }
 
     #[test]

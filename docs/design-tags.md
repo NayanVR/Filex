@@ -208,8 +208,15 @@ small enum mirroring Finder's palette so the two stay aligned.
 
 ## Phasing (suggested implementation order)
 
-1. `filex::tags` trait + sidecar backend + tests (portable, no UI).
-2. Hook path-key migration into `filex::ops` (+ undo carries old tags).
+1. `filex::tags` trait + sidecar backend + tests (portable, no UI). **Done** (cf0d447).
+2. Hook path-key migration into `filex::ops` (+ undo carries old tags). **Done.**
+   - `AppliedOp::Copied` gained `from` and `AppliedOp::Deleted` gained
+     `removed_tags` so the migration is driven off the journal entry
+     itself; `SidecarTags::{apply_applied,undo_applied}` are the pure,
+     tested seam. The Workspace holds an `Arc<SidecarTags>`, runs
+     migration inside the existing off-thread op closures
+     (`spawn_apply`, `delete_paths`, `spawn_paste_batch`) and reverses
+     it in `undo_last`, and prunes stale keys once at startup.
 3. macOS xattr backend + Finder-interop round-trip.
 4. Details-panel chips (read + add/remove).
 5. `tag:` search token + intersect (+ bench).

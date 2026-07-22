@@ -15,6 +15,7 @@ use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
+use filex::tags::SidecarTags;
 use filex::selection::Selection;
 use filex::settings::{SortBy, ThemeMode, ViewMode};
 
@@ -109,6 +110,16 @@ fn describe_items(items: &[(PathBuf, String)]) -> Option<String> {
         [] => None,
         [(_, name)] => Some(format!("“{name}”")),
         _ => Some(format!("{} items", items.len())),
+    }
+}
+
+/// Migrate the sidecar tag index for a just-completed file op (moving,
+/// copying, or dropping the file's tags to follow it), logging rather
+/// than failing — a tag mishap must never derail the file operation
+/// itself. Runs on the background executor (it persists).
+fn migrate_tags(tags: &SidecarTags, applied: &mut ops::AppliedOp) {
+    if let Err(err) = tags.apply_applied(applied) {
+        tracing::error!("failed to migrate tags: {err:#}");
     }
 }
 
@@ -308,6 +319,11 @@ struct Workspace {
     history_forward: Vec<PathBuf>,
     /// Recently-opened folders/files (local-only usage log).
     recents: Recents,
+    /// Sidecar tag index: the enumeration source for the sidebar TAGS
+    /// section and the `tag:` filter, and (on every platform) the store
+    /// whose path keys are migrated by our own file ops. Shared into
+    /// background closures, which persist it off the UI thread.
+    tags: std::sync::Arc<SidecarTags>,
     /// Mounted volumes with capacity, refreshed on a slow timer.
     drives: Vec<Drive>,
 }
@@ -405,9 +421,14 @@ impl Workspace {
             recents: filex::recents::default_recents_file()
                 .map(|file| Recents::load(&file))
                 .unwrap_or_default(),
+            tags: std::sync::Arc::new(SidecarTags::load(
+                filex::tags::default_tags_file()
+                    .unwrap_or_else(|| std::env::temp_dir().join("filex").join("tags.json")),
+            )),
             drives: Vec::new(),
         };
         this.load_dir(&cwd, cx);
+        this.spawn_tag_prune(cx);
         // Windows probes for the elevated index service first and only
         // falls back to in-process indexing if it's absent; elsewhere
         // indexing is always in-process.
@@ -1129,6 +1150,22 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Drop sidecar tag keys whose file no longer exists — lazy cleanup
+    /// (design-tags.md) for files moved/deleted outside filex, where we
+    /// never saw the `from→to` pairing. Runs once at startup, off-thread.
+    fn spawn_tag_prune(&self, cx: &mut Context<Self>) {
+        let tags = self.tags.clone();
+        cx.background_executor()
+            .spawn(async move {
+                match tags.prune(|path| path.exists()) {
+                    Ok(n) if n > 0 => tracing::debug!("pruned {n} stale tag entries"),
+                    Ok(_) => {}
+                    Err(err) => tracing::error!("failed to prune tags: {err:#}"),
+                }
+            })
+            .detach();
+    }
+
     fn clear_search(&mut self, cx: &mut Context<Self>) {
         // The input owns the text; its Changed event clears our mirror
         // and re-runs the (now empty) search.
@@ -1347,6 +1384,7 @@ impl Workspace {
         });
         self.spawn_job_ticker(job_id, cx);
         cx.notify();
+        let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
             let applied = cx
                 .background_executor()
@@ -1370,7 +1408,8 @@ impl Workspace {
                                 ClipMode::Copy => FileOp::Copy { from: source, to: dest },
                                 ClipMode::Cut => FileOp::Move { from: source, to: dest },
                             };
-                            if let Ok(done) = ops::apply_with_progress(&op, &progress) {
+                            if let Ok(mut done) = ops::apply_with_progress(&op, &progress) {
+                                migrate_tags(&tags, &mut done);
                                 applied.push(done);
                             }
                         }
@@ -1421,13 +1460,15 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
+        let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
             let applied = cx
                 .background_executor()
                 .spawn(async move {
                     let mut applied = Vec::new();
                     for path in paths {
-                        if let Ok(done) = ops::apply(&FileOp::Delete { path }) {
+                        if let Ok(mut done) = ops::apply(&FileOp::Delete { path }) {
+                            migrate_tags(&tags, &mut done);
                             applied.push(done);
                         }
                     }
@@ -1528,12 +1569,17 @@ impl Workspace {
             self.spawn_job_ticker(job_id, cx);
             cx.notify();
         }
+        let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let progress = progress.clone();
-                    async move { ops::apply_with_progress(&op, &progress) }
+                    async move {
+                        let mut applied = ops::apply_with_progress(&op, &progress)?;
+                        migrate_tags(&tags, &mut applied);
+                        anyhow::Ok(applied)
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -1622,12 +1668,23 @@ impl Workspace {
             cx.notify();
             return;
         };
+        let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn({
                     let batch = batch.clone();
-                    async move { ops::undo_batch(&batch) }
+                    async move {
+                        ops::undo_batch(&batch)?;
+                        // Only reverse tag migration once the files are
+                        // back; a failed file undo leaves both untouched.
+                        for op in batch.iter().rev() {
+                            if let Err(err) = tags.undo_applied(op) {
+                                tracing::error!("failed to undo tag migration: {err:#}");
+                            }
+                        }
+                        anyhow::Ok(())
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {

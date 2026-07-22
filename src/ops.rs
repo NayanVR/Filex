@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::tags::Tag;
+
 /// Shared handle between a running operation and the UI: byte-level
 /// progress plus a cancellation flag, all atomics so the background
 /// worker and the render loop never lock.
@@ -130,10 +132,17 @@ pub fn next_free_name(dest: &Path) -> Result<PathBuf> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppliedOp {
     Moved { from: PathBuf, to: PathBuf },
-    /// Undo removes the copy. The original is never touched.
-    Copied { to: PathBuf },
+    /// Undo removes the copy at `to`; the original at `from` is never
+    /// touched. `from` is retained so the tag index can copy the source's
+    /// tags onto the new copy (see [`SidecarTags::apply_applied`]).
+    ///
+    /// [`SidecarTags::apply_applied`]: crate::tags::SidecarTags::apply_applied
+    Copied { from: PathBuf, to: PathBuf },
     Renamed { from: PathBuf, to: PathBuf },
-    Deleted { original: PathBuf, restore: TrashRestore },
+    /// `removed_tags` carries the sidecar tags dropped when the item was
+    /// trashed, so an undo can reinstate them. [`apply`] leaves it empty —
+    /// it never touches tags; the tag layer fills it after the delete.
+    Deleted { original: PathBuf, restore: TrashRestore, removed_tags: Vec<Tag> },
 }
 
 /// What undo needs to bring a trashed item back — shaped by what each
@@ -161,7 +170,7 @@ impl AppliedOp {
     pub fn describe(&self) -> String {
         match self {
             Self::Moved { to, .. } => format!("moved to {}", to.display()),
-            Self::Copied { to } => format!("copied to {}", to.display()),
+            Self::Copied { to, .. } => format!("copied to {}", to.display()),
             Self::Renamed { from, to } => format!(
                 "renamed {} to {}",
                 from.file_name().unwrap_or_default().to_string_lossy(),
@@ -199,7 +208,7 @@ pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<Applied
                 remove_any(to);
                 return Err(err);
             }
-            Ok(AppliedOp::Copied { to: to.clone() })
+            Ok(AppliedOp::Copied { from: from.clone(), to: to.clone() })
         }
         FileOp::Rename { path, new_name } => {
             let to = rename_target(path, new_name)?;
@@ -210,7 +219,7 @@ pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<Applied
         }
         FileOp::Delete { path } => {
             let restore = trash_backend::delete_to_trash(path)?;
-            Ok(AppliedOp::Deleted { original: path.clone(), restore })
+            Ok(AppliedOp::Deleted { original: path.clone(), restore, removed_tags: Vec::new() })
         }
     }
 }
@@ -235,7 +244,7 @@ pub fn undo(applied: &AppliedOp) -> Result<()> {
             ensure_target_free(from)?;
             move_path(to, from, &OpProgress::default())
         }
-        AppliedOp::Copied { to } => {
+        AppliedOp::Copied { to, .. } => {
             let meta = std::fs::symlink_metadata(to)
                 .with_context(|| format!("inspecting {}", to.display()))?;
             if meta.is_dir() {
@@ -251,7 +260,7 @@ pub fn undo(applied: &AppliedOp) -> Result<()> {
             std::fs::rename(to, from)
                 .with_context(|| format!("renaming {} back", to.display()))
         }
-        AppliedOp::Deleted { original, restore } => {
+        AppliedOp::Deleted { original, restore, .. } => {
             trash_backend::restore_from_trash(restore, original)
         }
     }
@@ -739,7 +748,7 @@ mod tests {
     }
 
     fn one(name: &str) -> Vec<AppliedOp> {
-        vec![AppliedOp::Copied { to: PathBuf::from(name) }]
+        vec![AppliedOp::Copied { from: PathBuf::from("src"), to: PathBuf::from(name) }]
     }
 
     #[test]
@@ -759,7 +768,7 @@ mod tests {
         let mut count = 1;
         while let Some(batch) = journal.pop() {
             count += 1;
-            let [AppliedOp::Copied { to }] = &batch[..] else { panic!() };
+            let [AppliedOp::Copied { to, .. }] = &batch[..] else { panic!() };
             assert_ne!(to, &PathBuf::from("f9"), "f0..f9 should have been evicted");
         }
         assert_eq!(count, JOURNAL_CAP);
@@ -769,7 +778,10 @@ mod tests {
     fn journal_records_a_multi_op_batch_as_one_unit() {
         let mut journal = Journal::default();
         let batch =
-            vec![AppliedOp::Copied { to: "a".into() }, AppliedOp::Copied { to: "b".into() }];
+            vec![
+                AppliedOp::Copied { from: "s".into(), to: "a".into() },
+                AppliedOp::Copied { from: "s".into(), to: "b".into() },
+            ];
         journal.record(batch.clone());
         // One user action = one pop, carrying both ops.
         assert_eq!(journal.pop(), Some(batch));

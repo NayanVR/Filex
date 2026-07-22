@@ -234,8 +234,11 @@ is left instant for now (the chevron swaps state).
 - **Tags**: real metadata, not UI. macOS: interop with Finder tags
   via xattr (they show in both apps). Windows/Linux: sidecar store in
   the data dir. Tag chips in the details panel + sidebar tag section
-  + `tag:` search filter. Needs a short design doc first (storage,
-  rename/move behavior, watcher interaction).
+  + `tag:` search filter. Design doc: `docs/design-tags.md`.
+  Progress: phase 1 (portable `TagStore` + sidecar backend) and phase 2
+  (Workspace store + path-key migration through the `ops::AppliedOp`
+  hooks + startup prune) done; phases 3–6 (macOS xattr, details chips,
+  `tag:` search, sidebar section) pending.
 - **Search filter chips** ("larger than 2MB", "modified today",
   `kind:image size:>2mb`): requires size/mtime in the index, which
   today stores names only by design. This is an index schema change
