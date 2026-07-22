@@ -215,12 +215,15 @@ small enum mirroring Finder's palette so the two stay aligned.
 5. `tag:` search token + intersect (+ bench).
 6. Sidebar TAGS section.
 
-## Open decisions to confirm before coding
+## Confirmed decisions (2026-07-22)
 
-- macOS access: **NSURL resource values** (preferred) vs raw
-  getxattr/setxattr — spike both briefly, pick the one that round-trips
-  Finder colors cleanly.
-- Sidecar keying: **path + lazy prune** (v1) — confirm we accept
-  external-move tag loss on Windows/Linux, or invest in inode-keying now.
-- Whether v1 ships tag **colors** for filex-created tags or defers the
-  picker.
+- **macOS access: NSURL resource values** (`NSURLTagNamesKey` /
+  `NSURLLabelNumberKey` via objc2-foundation). Apple handles the
+  binary-plist encoding and color mapping.
+- **Sidecar keying: absolute path + lazy prune.** Our own ops migrate
+  the key; external Windows/Linux moves lose tags and vanished keys are
+  pruned on `all()`. Inode-keying is noted as future hardening.
+- **Colors: full picker in v1.** filex-created tags can be colored, not
+  just Finder-imported ones. `TagColor` mirrors Finder's 0–7 palette so
+  a filex color round-trips into Finder. The details-panel chip UI ships
+  with a color picker (phasing step 4).

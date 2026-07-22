@@ -11,3 +11,4 @@ pub mod ops;
 pub mod recents;
 pub mod selection;
 pub mod settings;
+pub mod tags;
