@@ -15,7 +15,7 @@ use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
-use filex::tags::PlatformTags;
+use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
 use filex::selection::Selection;
 use filex::settings::{SortBy, ThemeMode, ViewMode};
 
@@ -216,6 +216,21 @@ struct RenameState {
     _subscription: gpui::Subscription,
 }
 
+/// An in-progress tag edit in the details panel: which file it targets,
+/// the input owning the typed tag name, the currently-chosen color, and
+/// (when editing an existing chip rather than adding) that tag's original
+/// name so commit replaces it in place.
+struct TagEditor {
+    path: PathBuf,
+    input: gpui::Entity<SearchInput>,
+    color: Option<TagColor>,
+    /// `Some(original_name)` when recoloring/renaming an existing tag;
+    /// `None` when adding a new one.
+    existing: Option<String>,
+    /// Watches for Dismissed (escape) to cancel.
+    _subscription: gpui::Subscription,
+}
+
 /// One browse tab's saved state (block 6). The *active* tab's state
 /// lives directly on the [`Workspace`] (so the existing browse code is
 /// untouched); this holds the inactive tabs, and the active slot is
@@ -310,6 +325,12 @@ struct Workspace {
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
     /// Lazily-fetched metadata for the details panel's current item.
     preview_meta: Option<PreviewMeta>,
+    /// The lead item's tags, cached so rendering never reads the store
+    /// (which on macOS is an xattr syscall). Refreshed off-thread when the
+    /// selection changes or an edit lands.
+    preview_tags: Vec<Tag>,
+    /// Open tag editor in the details panel, if any.
+    tag_editor: Option<TagEditor>,
     /// All browse tabs. `tabs[active_tab]` is stale — that tab's live
     /// state is the fields above; the others are real snapshots.
     tabs: Vec<TabSnapshot>,
@@ -414,6 +435,8 @@ impl Workspace {
             results_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
             preview_meta: None,
+            preview_tags: Vec::new(),
+            tag_editor: None,
             tabs: vec![TabSnapshot::placeholder()],
             active_tab: 0,
             history_back: Vec::new(),
@@ -1269,15 +1292,20 @@ impl Workspace {
     fn refresh_preview(&mut self, cx: &mut Context<Self>) {
         if !self.settings.read(cx).settings().preview_open {
             self.preview_meta = None;
+            self.clear_tag_state();
             return;
         }
         let Some((path, _, _)) = self.lead_item() else {
             self.preview_meta = None;
+            self.clear_tag_state();
             return;
         };
         if self.preview_meta.as_ref().map(|m| m.path.as_path()) == Some(path.as_path()) {
-            return; // already have this item's metadata
+            return; // already have this item's metadata (and tags)
         }
+        // A new item is selected: drop stale tag state and reload its tags.
+        self.clear_tag_state();
+        self.spawn_refresh_tags(path.clone(), cx);
         self.preview_meta = None; // drop stale while the fetch is in flight
         cx.spawn(async move |this, cx| {
             let meta = cx
@@ -1297,6 +1325,148 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Drop the details panel's cached tags and any open tag editor
+    /// (selection moved, or the panel closed).
+    fn clear_tag_state(&mut self) {
+        self.preview_tags.clear();
+        self.tag_editor = None;
+    }
+
+    /// Read the lead item's tags into `preview_tags` off-thread — the
+    /// store read is an xattr syscall on macOS, so it never runs on the UI
+    /// thread. Applied only if the selection hasn't moved on.
+    fn spawn_refresh_tags(&self, path: PathBuf, cx: &mut Context<Self>) {
+        let store = self.tags.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn({
+                    let store = store.clone();
+                    let path = path.clone();
+                    async move { store.tags(&path) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.lead_item().map(|(p, _, _)| p).as_deref() == Some(path.as_path()) {
+                    this.preview_tags = fetched;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Persist `tags` for `path` through the store off-thread (xattr +
+    /// sidecar), then mirror them into `preview_tags` if the item is still
+    /// selected. A failure surfaces as a notice, never a crash.
+    fn spawn_set_tags(&mut self, path: PathBuf, tags: Vec<Tag>, cx: &mut Context<Self>) {
+        let store = self.tags.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let store = store.clone();
+                    let path = path.clone();
+                    let tags = tags.clone();
+                    async move { store.set_tags(&path, &tags) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        if this.lead_item().map(|(p, _, _)| p).as_deref() == Some(path.as_path())
+                        {
+                            this.preview_tags = tags;
+                        }
+                    }
+                    Err(err) => this.notice = Some(format!("{err:#}").into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open the details-panel tag editor. `existing` prefills to
+    /// recolor/rename an existing chip; `None` starts a fresh tag.
+    fn open_tag_editor(
+        &mut self,
+        existing: Option<Tag>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((path, _, _)) = self.lead_item() else { return };
+        let input = cx.new(SearchInput::new);
+        let (seed, color, original) = match existing {
+            Some(tag) => (tag.name.clone(), tag.color, Some(tag.name)),
+            None => (String::new(), None, None),
+        };
+        input.update(cx, |input, cx| {
+            input.set_placeholder("tag name", cx);
+            if !seed.is_empty() {
+                input.set_text(seed, cx);
+                input.select_all_text(cx);
+            }
+        });
+        let subscription =
+            cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
+                if matches!(event, SearchInputEvent::Dismissed) {
+                    this.cancel_tag_editor(window, cx);
+                }
+            });
+        window.focus(&input.focus_handle(cx));
+        self.tag_editor =
+            Some(TagEditor { path, input, color, existing: original, _subscription: subscription });
+        cx.notify();
+    }
+
+    fn cancel_tag_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tag_editor.take().is_some() {
+            window.focus(&self.search_input.focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    /// Set the pending color in the open editor (clicking a swatch).
+    fn set_editor_color(&mut self, color: Option<TagColor>, cx: &mut Context<Self>) {
+        if let Some(editor) = self.tag_editor.as_mut() {
+            editor.color = color;
+            cx.notify();
+        }
+    }
+
+    /// Commit the tag editor: fold the typed name + chosen color into the
+    /// item's tag set (adding, or replacing the edited tag in place) and
+    /// persist it. An empty name is treated as cancel.
+    fn commit_tag_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.tag_editor.take() else { return };
+        window.focus(&self.search_input.focus_handle(cx));
+        let name = editor.input.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            cx.notify();
+            return;
+        }
+        let new_tag = Tag { name, color: editor.color };
+        let tags =
+            filex::tags::upsert_tag(&self.preview_tags, editor.existing.as_deref(), new_tag);
+        self.spawn_set_tags(editor.path, tags, cx);
+        cx.notify();
+    }
+
+    /// Remove the tag currently being edited (the editor's Remove button).
+    fn remove_editing_tag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.tag_editor.take() else { return };
+        window.focus(&self.search_input.focus_handle(cx));
+        if let Some(original) = editor.existing {
+            let mut tags = self.preview_tags.clone();
+            tags.retain(|t| t.name != original);
+            self.spawn_set_tags(editor.path, tags, cx);
+        }
+        cx.notify();
     }
 
     /// cmd-c / cmd-x (reaches us only while the search input is empty —
@@ -1731,6 +1901,14 @@ impl Workspace {
             // enter lands here and commits.
             if keystroke.key.as_str() == "enter" {
                 self.commit_rename(window, cx);
+            }
+            return;
+        }
+        if self.tag_editor.is_some() {
+            // Same as rename: the input handles escape (Dismissed → cancel);
+            // enter commits the tag.
+            if keystroke.key.as_str() == "enter" {
+                self.commit_tag_editor(window, cx);
             }
             return;
         }
@@ -3127,8 +3305,106 @@ impl Workspace {
         }
         let panel = panel
             .child(ui::details::divider(&theme))
-            .child(ui::details::meta_row(&theme, "Where", where_value));
+            .child(ui::details::meta_row(&theme, "Where", where_value))
+            .child(ui::details::divider(&theme))
+            .child(self.render_tags_section(&path, &theme, cx));
         Some(panel.into_any_element())
+    }
+
+    /// The details-panel "Tags" section: the item's chips (each opens the
+    /// editor), an add affordance, and the inline editor when open.
+    fn render_tags_section(
+        &self,
+        path: &Path,
+        theme: &ui::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut chips = ui::details::wrap_row();
+        for (i, tag) in self.preview_tags.iter().enumerate() {
+            let for_edit = tag.clone();
+            chips = chips.child(
+                ui::details::tag_chip(theme, ("tag-chip", i), tag.name.clone(), tag.color)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_tag_editor(Some(for_edit.clone()), window, cx);
+                    })),
+            );
+        }
+        chips = chips.child(ui::details::add_tag_chip(theme, "tag-add").on_click(cx.listener(
+            |this, _: &ClickEvent, window, cx| this.open_tag_editor(None, window, cx),
+        )));
+
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(ui::details::section_label(theme, "Tags"))
+            .child(chips);
+
+        if let Some(editor) = self.tag_editor.as_ref().filter(|e| e.path == path) {
+            section = section.child(self.render_tag_editor(editor, theme, cx));
+        }
+        section.into_any_element()
+    }
+
+    /// The inline tag editor card: name input, color swatches, and the
+    /// Save / Remove / Cancel buttons.
+    fn render_tag_editor(
+        &self,
+        editor: &TagEditor,
+        theme: &ui::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let selected = editor.color;
+        let is_existing = editor.existing.is_some();
+
+        let input_box = div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.accent)
+            .text_sm()
+            .child(editor.input.clone());
+
+        let mut swatches = ui::details::wrap_row().child(
+            ui::details::tag_swatch(theme, "tag-sw-none", None, selected.is_none()).on_click(
+                cx.listener(|this, _: &ClickEvent, _window, cx| this.set_editor_color(None, cx)),
+            ),
+        );
+        for color in TagColor::all() {
+            swatches = swatches.child(
+                ui::details::tag_swatch(
+                    theme,
+                    ("tag-sw", color.finder_index() as usize),
+                    Some(color),
+                    selected == Some(color),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.set_editor_color(Some(color), cx);
+                })),
+            );
+        }
+
+        let mut footer = div().flex().items_center().gap_2().child(
+            ui::details::tag_button(theme, "tag-save", if is_existing { "Save" } else { "Add" }, false)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.commit_tag_editor(window, cx);
+                })),
+        );
+        if is_existing {
+            footer = footer.child(
+                ui::details::tag_button(theme, "tag-remove", "Remove", true).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.remove_editing_tag(window, cx);
+                    }),
+                ),
+            );
+        }
+        footer = footer.child(ui::details::tag_button(theme, "tag-cancel", "Cancel", false).on_click(
+            cx.listener(|this, _: &ClickEvent, window, cx| this.cancel_tag_editor(window, cx)),
+        ));
+
+        ui::details::tag_editor_box(theme).child(input_box).child(swatches).child(footer).into_any_element()
     }
 }
 

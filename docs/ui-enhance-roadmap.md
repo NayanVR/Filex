@@ -235,12 +235,12 @@ is left instant for now (the chevron swaps state).
   via xattr (they show in both apps). Windows/Linux: sidecar store in
   the data dir. Tag chips in the details panel + sidebar tag section
   + `tag:` search filter. Design doc: `docs/design-tags.md`.
-  Progress: phases 1–3 done — portable `TagStore` + sidecar backend
+  Progress: phases 1–4 done — portable `TagStore` + sidecar backend
   (1); Workspace store + path-key migration through the `ops::AppliedOp`
   hooks + startup prune (2); macOS Finder-interop backend writing the
-  raw `_kMDItemUserTags` xattr, verified reading in Finder/`plutil` (3).
-  Phases 4–6 (details chips + color picker, `tag:` search, sidebar
-  section) pending.
+  raw `_kMDItemUserTags` xattr, verified reading in Finder/`plutil` (3);
+  details-panel chips + inline color-picker editor (4). Phases 5–6
+  (`tag:` search, sidebar section) pending.
 - **Search filter chips** ("larger than 2MB", "modified today",
   `kind:image size:>2mb`): requires size/mtime in the index, which
   today stores names only by design. This is an index schema change

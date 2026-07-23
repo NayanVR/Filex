@@ -235,7 +235,16 @@ small enum mirroring Finder's palette so the two stay aligned.
      `all`/`prune` use the sidecar, and a `Copied` migration also writes
      the xattr onto the copy ("Option B"). Verified on a dev Mac: `plutil`
      and NSURL both read what we write.
-4. Details-panel chips (read + add/remove).
+4. Details-panel chips (read + add/remove). **Done.**
+   - A "Tags" section in `render_details_panel`: color-tinted chips
+     (dot + name) that each open an inline editor, plus a "+ Tag" add
+     affordance. The editor (name input + swatch row for none/7 colors +
+     Save/Remove/Cancel) reuses the rename input pattern; the
+     add/rename/recolor/dedup rule is the pure `tags::upsert_tag`.
+   - Rendering reads a cached `preview_tags` (never the store) so the
+     macOS xattr read stays off the UI thread; edits persist off-thread
+     and update the cache. `ui::details` gained `tag_chip`, `tag_swatch`,
+     the color map, and the editor primitives.
 5. `tag:` search token + intersect (+ bench).
 6. Sidebar TAGS section.
 

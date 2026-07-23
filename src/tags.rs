@@ -131,6 +131,33 @@ pub fn decode_finder_tags(bytes: &[u8]) -> Vec<Tag> {
     array.iter().filter_map(|v| v.as_string()).map(decode_finder_tag).collect()
 }
 
+/// Fold `new` into a tag set for the details-panel editor. When
+/// `replacing` names an existing tag it is swapped out **in place**
+/// (preserving order); otherwise `new` is appended. Either way the result
+/// holds at most one tag per name — a collision with `new.name` is
+/// dropped so re-adding a name just updates its color. Pure so the
+/// editor's add/rename/recolor rule is unit-tested off the GPUI layer.
+pub fn upsert_tag(tags: &[Tag], replacing: Option<&str>, new: Tag) -> Vec<Tag> {
+    let mut out = Vec::with_capacity(tags.len() + 1);
+    let mut inserted = false;
+    for tag in tags {
+        if replacing == Some(tag.name.as_str()) {
+            if !inserted {
+                out.push(new.clone());
+                inserted = true;
+            }
+        } else if tag.name == new.name {
+            continue; // de-dup: the incoming tag's color wins
+        } else {
+            out.push(tag.clone());
+        }
+    }
+    if !inserted {
+        out.push(new);
+    }
+    out
+}
+
 /// One `"Name\n<idx>"` (or bare `"Name"`) entry → a [`Tag`].
 fn decode_finder_tag(entry: &str) -> Tag {
     if let Some((name, idx)) = entry.rsplit_once('\n')
@@ -710,6 +737,48 @@ mod tests {
         assert!(store.tags(Path::new("/a")).is_empty());
         store.undo_applied(&deleted).unwrap();
         assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
+    }
+
+    #[test]
+    fn upsert_adds_replaces_and_dedups() {
+        let base = vec![Tag::new("A"), Tag::colored("B", TagColor::Blue), Tag::new("C")];
+
+        // Add a fresh tag → appended.
+        assert_eq!(
+            upsert_tag(&base, None, Tag::colored("D", TagColor::Red)),
+            vec![
+                Tag::new("A"),
+                Tag::colored("B", TagColor::Blue),
+                Tag::new("C"),
+                Tag::colored("D", TagColor::Red)
+            ]
+        );
+
+        // Re-add an existing name (no `replacing`) → color updated, moved
+        // to the end (its old occurrence dropped).
+        assert_eq!(
+            upsert_tag(&base, None, Tag::colored("B", TagColor::Green)),
+            vec![Tag::new("A"), Tag::new("C"), Tag::colored("B", TagColor::Green)]
+        );
+
+        // Recolor in place (replacing == new.name) → order preserved.
+        assert_eq!(
+            upsert_tag(&base, Some("B"), Tag::colored("B", TagColor::Yellow)),
+            vec![Tag::new("A"), Tag::colored("B", TagColor::Yellow), Tag::new("C")]
+        );
+
+        // Rename in place, colliding with another existing tag → the
+        // renamed tag takes B's slot and the collided "C" is removed.
+        assert_eq!(
+            upsert_tag(&base, Some("B"), Tag::new("C")),
+            vec![Tag::new("A"), Tag::new("C")]
+        );
+
+        // `replacing` a name that isn't present → appended.
+        assert_eq!(
+            upsert_tag(&base, Some("Z"), Tag::new("D")),
+            vec![Tag::new("A"), Tag::colored("B", TagColor::Blue), Tag::new("C"), Tag::new("D")]
+        );
     }
 
     #[test]
