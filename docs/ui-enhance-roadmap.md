@@ -247,8 +247,14 @@ is left instant for now (the chevron swaps state).
   `kind:image size:>2mb`): requires size/mtime in the index, which
   today stores names only by design. This is an index schema change
   with memory and freshness costs — design doc + benchmarks before
-  building, per the perf rule. Until then, chips can cover what needs
-  no index change (kind: from extension).
+  building, per the perf rule. Design doc: `docs/design-search-chips.md`
+  (written 2026-07-23; **full-v1 path chosen** — size/mtime go into the
+  index). Progress: **design complete, awaiting decision sign-off**;
+  no code yet. The doc's crux is the per-OS population asymmetry
+  (macOS ~free via `getattrlistbulk`, Linux `statx` cost, Windows USN
+  has no size/mtime → lazy backfill) and the live-freshness gap
+  (`FsDelta` has no metadata-change event today). `kind:`/`ext:` need
+  no schema change and ship first.
 
 ## Explicitly out of scope
 
