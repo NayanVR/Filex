@@ -9,6 +9,7 @@ pub mod listing;
 pub mod logging;
 pub mod ops;
 pub mod recents;
+pub mod search_filter;
 pub mod selection;
 pub mod settings;
 pub mod tags;
