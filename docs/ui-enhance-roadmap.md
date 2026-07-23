@@ -239,8 +239,9 @@ is left instant for now (the chevron swaps state).
   (1); Workspace store + path-key migration through the `ops::AppliedOp`
   hooks + startup prune (2); macOS Finder-interop backend writing the
   raw `_kMDItemUserTags` xattr, verified reading in Finder/`plutil` (3);
-  details-panel chips + inline color-picker editor (4). Phases 5–6
-  (`tag:` search, sidebar section) pending.
+  details-panel chips + inline color-picker editor (4); `tag:` search
+  token with a pure tokenizer + sidecar intersect, benched at 100k (5).
+  Phase 6 (sidebar TAGS section) pending.
 - **Search filter chips** ("larger than 2MB", "modified today",
   `kind:image size:>2mb`): requires size/mtime in the index, which
   today stores names only by design. This is an index schema change

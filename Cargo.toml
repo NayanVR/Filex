@@ -39,6 +39,10 @@ unicode-segmentation = "1.13.3"
 name = "search_bench"
 harness = false
 
+[[bench]]
+name = "tag_bench"
+harness = false
+
 [dev-dependencies]
 criterion = "0.8.2"
 tempfile = "3.27.0"

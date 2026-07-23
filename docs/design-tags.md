@@ -245,7 +245,15 @@ small enum mirroring Finder's palette so the two stay aligned.
      macOS xattr read stays off the UI thread; edits persist off-thread
      and update the cache. `ui::details` gained `tag_chip`, `tag_swatch`,
      the color map, and the editor primitives.
-5. `tag:` search token + intersect (+ bench).
+5. `tag:` search token + intersect (+ bench). **Done.**
+   - Pure `tags::parse_tag_query` splits `tag:NAME` tokens (case-
+     insensitive, AND, deduped) from the filename text; `tags_match` +
+     `SidecarTags::paths_with_all_tags` are the intersect. `update_search`
+     runs the filename search on the remaining text and filters results by
+     the tagged set (client-side even in Windows service mode); a tag-only
+     query lists tagged files straight from the sidecar. `tag_bench`
+     measures the intersect at 100k entries: ~0.7–1.0 ms, well under a
+     keystroke.
 6. Sidebar TAGS section.
 
 ## Confirmed decisions (2026-07-22)

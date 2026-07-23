@@ -123,6 +123,43 @@ fn migrate_tags(tags: &PlatformTags, applied: &mut ops::AppliedOp) {
     }
 }
 
+/// Build search rows for a set of tagged paths (a `tag:`-only query,
+/// where there's no filename text to rank). Paths that no longer exist
+/// are skipped — a light visual prune — and the list is capped at
+/// `limit`. Blocking (it stats each path) — call off the UI thread.
+fn rows_from_tagged_paths(paths: Vec<PathBuf>, limit: usize) -> Vec<SearchRow> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some(SearchRow {
+                name: name.into(),
+                path_label: path.display().to_string().into(),
+                is_dir: meta.is_dir(),
+                target: path,
+            })
+        })
+        .take(limit)
+        .collect()
+}
+
+/// Keep only the rows whose path carries every one of `required` tags
+/// (the filename-search ∩ `tag:` intersection). A no-op when `required`
+/// is empty. Blocking (scans the sidecar) — call off the UI thread.
+fn filter_rows_by_tags(
+    rows: Vec<SearchRow>,
+    store: &PlatformTags,
+    required: &[String],
+) -> Vec<SearchRow> {
+    if required.is_empty() {
+        return rows;
+    }
+    let tagged: std::collections::HashSet<PathBuf> =
+        store.paths_with_all_tags(required).into_iter().collect();
+    rows.into_iter().filter(|row| tagged.contains(&row.target)).collect()
+}
+
 fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
     index.read().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1923,12 +1960,20 @@ impl Workspace {
 
     /// Kick off a merged query across every ready root on the background
     /// executor. Stale completions are dropped by generation check.
+    ///
+    /// The query first has its `tag:NAME` tokens split out (a pure
+    /// [`parse_tag_query`](filex::tags::parse_tag_query)); the remaining
+    /// text runs the normal filename search and the results are
+    /// intersected with the paths carrying every named tag. A tag-only
+    /// query (no filename text) lists the tagged files directly from the
+    /// sidecar index, skipping the filename search entirely.
     fn update_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation += 1;
         let generation = self.search_generation;
         cx.notify();
 
-        if self.query.is_empty() {
+        let parsed = filex::tags::parse_tag_query(&self.query);
+        if parsed.is_empty() {
             self.results.clear();
             // Leave the browse selection intact; only the search's own
             // selection goes away with the results.
@@ -1936,23 +1981,53 @@ impl Workspace {
             return;
         }
 
-        // Service mode: the query goes over IPC; a failed roundtrip falls
-        // back to local indexing and re-runs.
+        // Tag-only query: no filename text to rank, so list the tagged
+        // files straight from the sidecar (works the same in service mode
+        // — tags are always a client-side store).
+        if parsed.text.is_empty() {
+            let store = self.tags.clone();
+            let required = parsed.tags;
+            cx.spawn(async move |this, cx| {
+                let rows = cx
+                    .background_executor()
+                    .spawn(async move {
+                        rows_from_tagged_paths(
+                            store.paths_with_all_tags(&required),
+                            SEARCH_RESULT_LIMIT,
+                        )
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.search_generation == generation {
+                        this.results = rows;
+                        this.select_first_result();
+                        this.refresh_preview(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+
+        let text = parsed.text;
+        let required = parsed.tags;
+
+        // Service mode: the text query goes over IPC; a failed roundtrip
+        // falls back to local indexing and re-runs. The tag filter is
+        // applied client-side (the service knows nothing about tags).
         #[cfg(target_os = "windows")]
         if let Some(client) = self.service.clone() {
-            let query = self.query.clone();
+            let store = self.tags.clone();
+            let text = text.clone();
+            let required = required.clone();
             cx.spawn(async move |this, cx| {
                 let result = cx
                     .background_executor()
-                    .spawn(async move { client.search(&query, SEARCH_RESULT_LIMIT as u32) })
-                    .await;
-                this.update(cx, |this, cx| {
-                    if this.search_generation != generation {
-                        return;
-                    }
-                    match result {
-                        Ok(hits) => {
-                            this.results = hits
+                    .spawn(async move {
+                        client.search(&text, SEARCH_RESULT_LIMIT as u32).map(|hits| {
+                            let rows = hits
                                 .into_iter()
                                 .map(|hit| SearchRow {
                                     name: hit.name.into(),
@@ -1961,6 +2036,17 @@ impl Workspace {
                                     target: hit.path,
                                 })
                                 .collect();
+                            filter_rows_by_tags(rows, &store, &required)
+                        })
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.search_generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(rows) => {
+                            this.results = rows;
                             this.select_first_result();
                             this.refresh_preview(cx);
                             cx.notify();
@@ -1982,13 +2068,13 @@ impl Workspace {
         if indexes.is_empty() {
             return; // still building; root readiness re-runs the query
         }
-        let query = self.query.clone();
+        let store = self.tags.clone();
 
         cx.spawn(async move |this, cx| {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
-                    manager::search_all(&indexes, &query, SEARCH_RESULT_LIMIT)
+                    let rows = manager::search_all(&indexes, &text, SEARCH_RESULT_LIMIT)
                         .into_iter()
                         .map(|hit| SearchRow {
                             name: hit.name.into(),
@@ -1996,7 +2082,8 @@ impl Workspace {
                             is_dir: hit.is_dir,
                             target: hit.path,
                         })
-                        .collect::<Vec<_>>()
+                        .collect();
+                    filter_rows_by_tags(rows, &store, &required)
                 })
                 .await;
             this.update(cx, |this, cx| {

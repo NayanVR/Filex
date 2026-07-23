@@ -158,6 +158,56 @@ pub fn upsert_tag(tags: &[Tag], replacing: Option<&str>, new: Tag) -> Vec<Tag> {
     out
 }
 
+/// A search query split into its filename text and its `tag:` filters.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TagQuery {
+    /// The filename text, with the `tag:` tokens removed (may be empty).
+    pub text: String,
+    /// Required tag names — lowercased, de-duplicated, first-seen order.
+    /// A path must carry *all* of them (AND).
+    pub tags: Vec<String>,
+}
+
+impl TagQuery {
+    /// Nothing to search on — no filename text and no tag filters.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.tags.is_empty()
+    }
+}
+
+/// Split `tag:NAME` tokens out of a raw query. The remaining whitespace-
+/// separated words form the filename [`text`](TagQuery::text); each
+/// `tag:NAME` adds a required tag ([`tags`](TagQuery::tags)). The `tag:`
+/// prefix and the names match case-insensitively, so names are lowercased
+/// here; a bare `tag:` (no name) is ignored. This is the first
+/// `key:value` filter — the search-chips block reuses the same splitter.
+pub fn parse_tag_query(raw: &str) -> TagQuery {
+    let mut text_words = Vec::new();
+    let mut tags = Vec::new();
+    for word in raw.split_whitespace() {
+        // Lowercased copy just for the prefix test / tag name; the
+        // filename text keeps the word's original case.
+        let lowered = word.to_ascii_lowercase();
+        if let Some(name) = lowered.strip_prefix("tag:") {
+            if !name.is_empty() && !tags.iter().any(|t| t == name) {
+                tags.push(name.to_string());
+            }
+        } else {
+            text_words.push(word);
+        }
+    }
+    TagQuery { text: text_words.join(" "), tags }
+}
+
+/// Does `tags` carry every name in `required`? `required` is assumed
+/// lowercased (as [`parse_tag_query`] produces); comparison is
+/// case-insensitive. Empty `required` trivially matches.
+pub fn tags_match(tags: &[Tag], required: &[String]) -> bool {
+    required
+        .iter()
+        .all(|req| tags.iter().any(|tag| tag.name.eq_ignore_ascii_case(req)))
+}
+
 /// One `"Name\n<idx>"` (or bare `"Name"`) entry → a [`Tag`].
 fn decode_finder_tag(entry: &str) -> Tag {
     if let Some((name, idx)) = entry.rsplit_once('\n')
@@ -275,6 +325,22 @@ impl SidecarTags {
         }
         self.write().insert(path.to_path_buf(), tags);
         self.persist()
+    }
+
+    /// Absolute paths carrying every tag in `required` (lowercased,
+    /// matched case-insensitively) — the data source for the `tag:`
+    /// filter. Scans the in-memory index under the read lock, cloning only
+    /// the matching paths, so it stays cheap even at 100k tagged entries
+    /// (see `benches/tag_bench.rs`). Empty `required` returns nothing.
+    pub fn paths_with_all_tags(&self, required: &[String]) -> Vec<PathBuf> {
+        if required.is_empty() {
+            return Vec::new();
+        }
+        self.read()
+            .iter()
+            .filter(|(_, tags)| tags_match(tags, required))
+            .map(|(path, _)| path.clone())
+            .collect()
     }
 
     /// Drop keys whose path no longer exists (lazy cleanup for files
@@ -402,6 +468,12 @@ mod macos {
         /// (the xattr can't be enumerated without a disk walk).
         pub fn prune(&self, exists: impl Fn(&Path) -> bool) -> Result<usize> {
             self.inner.prune(exists)
+        }
+
+        /// Paths carrying all `required` tags — delegates to the sidecar
+        /// (the enumeration index), same as [`SidecarTags`].
+        pub fn paths_with_all_tags(&self, required: &[String]) -> Vec<PathBuf> {
+            self.inner.paths_with_all_tags(required)
         }
 
         /// Migrate stores for a completed file op. Move/rename/delete only
@@ -779,6 +851,59 @@ mod tests {
             upsert_tag(&base, Some("Z"), Tag::new("D")),
             vec![Tag::new("A"), Tag::colored("B", TagColor::Blue), Tag::new("C"), Tag::new("D")]
         );
+    }
+
+    #[test]
+    fn parse_tag_query_splits_text_and_tags() {
+        // Plain text, no tags.
+        assert_eq!(
+            parse_tag_query("annual report"),
+            TagQuery { text: "annual report".into(), tags: vec![] }
+        );
+        // Embedded tag token, case-insensitive prefix + name, deduped.
+        assert_eq!(
+            parse_tag_query("Report TAG:Work tag:work tag:Urgent"),
+            TagQuery { text: "Report".into(), tags: vec!["work".into(), "urgent".into()] }
+        );
+        // Tag-only query: empty text.
+        assert_eq!(
+            parse_tag_query("tag:blue"),
+            TagQuery { text: String::new(), tags: vec!["blue".into()] }
+        );
+        // A bare `tag:` contributes nothing; text case is preserved.
+        assert_eq!(
+            parse_tag_query("  Foo   tag:   Bar "),
+            TagQuery { text: "Foo Bar".into(), tags: vec![] }
+        );
+        assert!(parse_tag_query("   ").is_empty());
+    }
+
+    #[test]
+    fn tags_match_requires_all_case_insensitively() {
+        let tags = vec![Tag::new("Work"), Tag::colored("Urgent", TagColor::Red)];
+        assert!(tags_match(&tags, &["work".into()]));
+        assert!(tags_match(&tags, &["work".into(), "urgent".into()]));
+        assert!(tags_match(&tags, &[])); // vacuous
+        assert!(!tags_match(&tags, &["work".into(), "home".into()]));
+    }
+
+    #[test]
+    fn paths_with_all_tags_intersects() {
+        let (_dir, store) = store();
+        store.set_tags(Path::new("/a"), &[Tag::new("Work"), Tag::new("Urgent")]).unwrap();
+        store.set_tags(Path::new("/b"), &[Tag::new("Work")]).unwrap();
+        store.set_tags(Path::new("/c"), &[Tag::new("Home")]).unwrap();
+
+        let mut work = store.paths_with_all_tags(&["work".into()]);
+        work.sort();
+        assert_eq!(work, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        // AND across tags.
+        assert_eq!(
+            store.paths_with_all_tags(&["work".into(), "urgent".into()]),
+            vec![PathBuf::from("/a")]
+        );
+        // No filter → nothing (callers treat "no tags" separately).
+        assert!(store.paths_with_all_tags(&[]).is_empty());
     }
 
     #[test]
