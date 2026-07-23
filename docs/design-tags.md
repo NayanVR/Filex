@@ -254,7 +254,15 @@ small enum mirroring Finder's palette so the two stay aligned.
      query lists tagged files straight from the sidecar. `tag_bench`
      measures the intersect at 100k entries: ~0.7–1.0 ms, well under a
      keystroke.
-6. Sidebar TAGS section.
+6. Sidebar TAGS section. **Done.**
+   - A collapsible "TAGS" section in `render_sidebar` (mirrors the block-7
+     sections), one row per distinct tag (colored dot + name); clicking
+     runs a `tag:NAME` search. The distinct list is the pure
+     `tags::distinct_tags`, cached in `sidebar_tags` and recomputed
+     off-thread at startup and after any tag change (edits + file-op
+     migrations) — rendering never scans the store.
+
+**Block 8 item 1 (Tags) is complete** across all six phases.
 
 ## Confirmed decisions (2026-07-22)
 

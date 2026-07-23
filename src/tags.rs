@@ -199,6 +199,17 @@ pub fn parse_tag_query(raw: &str) -> TagQuery {
     TagQuery { text: text_words.join(" "), tags }
 }
 
+/// The distinct tags across an index, for the sidebar TAGS list:
+/// de-duplicated by name (case-insensitive, first spelling/color wins)
+/// and sorted by name. Pure so the sidebar's grouping is unit-tested.
+pub fn distinct_tags<'a>(tags: impl Iterator<Item = &'a Tag>) -> Vec<Tag> {
+    let mut seen: BTreeMap<String, Tag> = BTreeMap::new();
+    for tag in tags {
+        seen.entry(tag.name.to_lowercase()).or_insert_with(|| tag.clone());
+    }
+    seen.into_values().collect()
+}
+
 /// Does `tags` carry every name in `required`? `required` is assumed
 /// lowercased (as [`parse_tag_query`] produces); comparison is
 /// case-insensitive. Empty `required` trivially matches.
@@ -876,6 +887,19 @@ mod tests {
             TagQuery { text: "Foo Bar".into(), tags: vec![] }
         );
         assert!(parse_tag_query("   ").is_empty());
+    }
+
+    #[test]
+    fn distinct_tags_dedups_by_name_and_sorts() {
+        let a = [Tag::colored("Work", TagColor::Blue), Tag::new("Urgent")];
+        let b = [Tag::colored("work", TagColor::Red), Tag::new("Archive")];
+        let all: Vec<&Tag> = a.iter().chain(b.iter()).collect();
+        // Sorted by (lowercased) name; "Work" appears once, first color won.
+        assert_eq!(
+            distinct_tags(all.into_iter()),
+            vec![Tag::new("Archive"), Tag::new("Urgent"), Tag::colored("Work", TagColor::Blue)]
+        );
+        assert!(distinct_tags(std::iter::empty()).is_empty());
     }
 
     #[test]

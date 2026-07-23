@@ -368,6 +368,10 @@ struct Workspace {
     preview_tags: Vec<Tag>,
     /// Open tag editor in the details panel, if any.
     tag_editor: Option<TagEditor>,
+    /// Distinct tags across the store, for the sidebar TAGS section.
+    /// Cached (rendering never scans the store) and refreshed off-thread
+    /// whenever tags change.
+    sidebar_tags: Vec<Tag>,
     /// All browse tabs. `tabs[active_tab]` is stale — that tab's live
     /// state is the fields above; the others are real snapshots.
     tabs: Vec<TabSnapshot>,
@@ -474,6 +478,7 @@ impl Workspace {
             preview_meta: None,
             preview_tags: Vec::new(),
             tag_editor: None,
+            sidebar_tags: Vec::new(),
             tabs: vec![TabSnapshot::placeholder()],
             active_tab: 0,
             history_back: Vec::new(),
@@ -489,6 +494,7 @@ impl Workspace {
         };
         this.load_dir(&cwd, cx);
         this.spawn_tag_prune(cx);
+        this.refresh_sidebar_tags(cx);
         // Windows probes for the elevated index service first and only
         // falls back to in-process indexing if it's absent; elsewhere
         // indexing is always in-process.
@@ -1226,6 +1232,37 @@ impl Workspace {
             .detach();
     }
 
+    /// Recompute the sidebar's distinct-tag list off-thread (the store
+    /// scan/clone must not run on the UI thread) and cache it. Called at
+    /// startup and after any change to the store.
+    fn refresh_sidebar_tags(&self, cx: &mut Context<Self>) {
+        let store = self.tags.clone();
+        cx.spawn(async move |this, cx| {
+            let distinct = cx
+                .background_executor()
+                .spawn(async move {
+                    let all = store.all();
+                    filex::tags::distinct_tags(all.iter().flat_map(|(_, tags)| tags.iter()))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.sidebar_tags = distinct;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Run a `tag:NAME` search (clicking a sidebar tag), focusing the
+    /// search field so it can be refined.
+    fn search_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.search_input.focus_handle(cx));
+        self.search_input.update(cx, |input, cx| {
+            input.set_text(format!("tag:{name}"), cx);
+        });
+    }
+
     fn clear_search(&mut self, cx: &mut Context<Self>) {
         // The input owns the text; its Changed event clears our mirror
         // and re-runs the (now empty) search.
@@ -1418,6 +1455,7 @@ impl Workspace {
                         {
                             this.preview_tags = tags;
                         }
+                        this.refresh_sidebar_tags(cx);
                     }
                     Err(err) => this.notice = Some(format!("{err:#}").into()),
                 }
@@ -1632,6 +1670,9 @@ impl Workspace {
                 }
                 let cwd = this.cwd.clone();
                 this.load_dir(&cwd, cx);
+                // A file op may have migrated tags (moved/copied/dropped
+                // keys), so refresh the sidebar's distinct-tag list.
+                this.refresh_sidebar_tags(cx);
                 cx.notify();
             })
             .ok();
@@ -1696,6 +1737,9 @@ impl Workspace {
                 }
                 let cwd = this.cwd.clone();
                 this.load_dir(&cwd, cx);
+                // A file op may have migrated tags (moved/copied/dropped
+                // keys), so refresh the sidebar's distinct-tag list.
+                this.refresh_sidebar_tags(cx);
                 cx.notify();
             })
             .ok();
@@ -1803,6 +1847,9 @@ impl Workspace {
                 }
                 let cwd = this.cwd.clone();
                 this.load_dir(&cwd, cx);
+                // A file op may have migrated tags (moved/copied/dropped
+                // keys), so refresh the sidebar's distinct-tag list.
+                this.refresh_sidebar_tags(cx);
                 cx.notify();
             })
             .ok();
@@ -1911,6 +1958,9 @@ impl Workspace {
                 }
                 let cwd = this.cwd.clone();
                 this.load_dir(&cwd, cx);
+                // A file op may have migrated tags (moved/copied/dropped
+                // keys), so refresh the sidebar's distinct-tag list.
+                this.refresh_sidebar_tags(cx);
                 cx.notify();
             })
             .ok();
@@ -2570,6 +2620,27 @@ impl Workspace {
                             this.clear_recents(cx);
                         })),
                 );
+            }
+        }
+
+        // TAGS (only once something's been tagged). Clicking a tag runs a
+        // `tag:NAME` search.
+        if !self.sidebar_tags.is_empty() {
+            let (header, collapsed) = self.section_header(&theme, "tags", "TAGS", cx);
+            content = content.child(header);
+            if !collapsed {
+                content = content.children(self.sidebar_tags.iter().enumerate().map(
+                    |(ix, tag)| {
+                        let name = tag.name.clone();
+                        let dot = ui::details::tag_dot_color(&theme, tag.color);
+                        ui::sidebar::sidebar_row(&theme, ("tag", ix))
+                            .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
+                            .child(div().flex_1().overflow_hidden().child(SharedString::from(name.clone())))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.search_tag(name.clone(), window, cx);
+                            }))
+                    },
+                ));
             }
         }
 
