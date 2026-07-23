@@ -262,10 +262,12 @@ is left instant for now (the chevron swaps state).
   assumption (that fast path isn't built; statting during the `jwalk`
   walk is ~6.7× slower bootstrap), so population is now **lazy
   background backfill on all OSes** (Option C): bootstrap stays
-  names-only, size/mtime fill in after the index is searchable. Pending:
-  2b backfill (brings `size:`/`modified:` alive), live freshness
-  (`FsDelta` has no metadata-change event yet), Windows/IPC, and the
-  chip UI.
+  names-only, size/mtime fill in after the index is searchable. Phase 2b
+  **done** — a `MetaBackfiller` thread per `LiveIndex` stats entries in
+  the background and populates them, so `size:`/`modified:` now work
+  (converging over the first seconds of a fresh index). Pending: live
+  freshness (`FsDelta` has no metadata-change event yet, so in-place
+  edits go stale until re-indexed), Windows/IPC, and the chip UI.
 
 ## Explicitly out of scope
 

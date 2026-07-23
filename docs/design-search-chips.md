@@ -329,10 +329,16 @@ the path unless a filter token is present (same stance as `tag:`).
    stat cost we're avoiding; a footprint test pins the +16 B/entry. The
    `size:`/`modified:` predicates already run in the scan — they just wait
    on populated entries.
-2b. **Backfill (next).** A low-priority background pass that stats entries
-   and calls `set_meta`, integrated with the writer/snapshot model; this
-   is what brings `size:`/`modified:` alive. `getattrlistbulk`/`statx`
-   batching are later optimizations of it.
+2b. **Backfill (done).** `MetaBackfiller` — a low-priority thread per
+   `LiveIndex` that collects unpopulated entries (`unpopulated_batch`),
+   stats them off-lock in batches of 512, and writes results back under
+   short write locks via `backfill_meta` (name-guarded against the id
+   remap a compaction does mid-flight). It idles-polls once caught up (for
+   entries added by live updates, until the freshness layer populates
+   those inline). Dropped before the shutdown snapshot save. This brings
+   `size:`/`modified:` alive: they converge over the first seconds of a
+   fresh index. `getattrlistbulk`/`statx` batching remain later
+   optimizations of this pass.
 3. Live freshness: modify→`Upsert`→re-stat across the three watchers,
    with debounce coalescing; behavioral suite.
 5. Windows: the backfill's USN-forward + on-demand population + IPC filter

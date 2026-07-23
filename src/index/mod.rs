@@ -327,6 +327,41 @@ impl VolumeIndex {
         }
     }
 
+    /// Up to `limit` live entries still lacking populated metadata, as
+    /// `(id, name, absolute path)` — the background backfill's work queue.
+    /// Directories are included (they get an mtime; size stays 0).
+    pub fn unpopulated_batch(&self, limit: usize) -> Vec<(EntryId, String, PathBuf)> {
+        let mut out = Vec::new();
+        for (ix, entry) in self.entries.iter().enumerate().skip(1) {
+            if out.len() >= limit {
+                break;
+            }
+            if entry.is_tombstone() || entry.has_meta() {
+                continue;
+            }
+            let id = EntryId(ix as u32);
+            let (Some(name), Some(path)) = (self.name_of(id), self.path_of(id)) else {
+                continue;
+            };
+            out.push((id, name.to_string(), path));
+        }
+        out
+    }
+
+    /// Populate metadata for a backfilled entry, but only if `id` still
+    /// names the same entry (`expected_name`) — guards against the id
+    /// remap a compaction performs between the off-lock stat and this
+    /// apply. Returns whether it was applied.
+    pub fn backfill_meta(&mut self, id: EntryId, expected_name: &str, size: u64, mtime: i64) -> bool {
+        let matches = self
+            .entry(id)
+            .is_some_and(|e| !e.is_tombstone() && self.name_bytes(e.name) == expected_name.as_bytes());
+        if matches {
+            self.set_meta(id, size, mtime);
+        }
+        matches
+    }
+
     /// Look up a live entry by its platform-native key (NTFS FRN).
     pub fn entry_by_native_key(&self, native_key: u64) -> Option<EntryId> {
         if native_key == 0 {
@@ -718,6 +753,97 @@ impl Drop for SnapshotSaver {
     }
 }
 
+/// How many entries the backfill stats per pass before writing them back.
+const BACKFILL_BATCH: usize = 512;
+
+/// Populates `size`/`mtime` on entries the bootstrap left name-only, off
+/// the critical path (Option C, `docs/design-search-chips.md`). On a
+/// low-priority thread it stats entries in batches and writes the results
+/// back under short write locks, so `size:`/`modified:` filters converge
+/// over the first seconds of a fresh index without slowing time-to-
+/// searchable. Once caught up it polls slowly for entries added by live
+/// updates (the freshness layer will populate those inline later).
+struct MetaBackfiller {
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MetaBackfiller {
+    fn spawn(index: watcher::SharedIndex) -> Result<Self> {
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = std::thread::Builder::new().name("filex-meta-backfill".into()).spawn({
+            let shutdown = shutdown.clone();
+            move || backfill_loop(&index, &shutdown)
+        })?;
+        Ok(Self { shutdown, thread: Some(thread) })
+    }
+}
+
+impl Drop for MetaBackfiller {
+    fn drop(&mut self) {
+        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok();
+        }
+    }
+}
+
+/// Read the entry's modification time as unix seconds (0 if unavailable).
+fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The backfill worker loop (see [`MetaBackfiller`]). Sleeps in short
+/// ticks so `shutdown` is observed promptly.
+fn backfill_loop(
+    index: &watcher::SharedIndex,
+    shutdown: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering;
+    let tick = std::time::Duration::from_millis(500);
+    while !shutdown.load(Ordering::Relaxed) {
+        let batch = {
+            let idx = index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            idx.unpopulated_batch(BACKFILL_BATCH)
+        };
+        if batch.is_empty() {
+            // Caught up: poll slowly (~2s) for entries added by live
+            // updates, in shutdown-observing ticks.
+            for _ in 0..4 {
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(tick);
+            }
+            continue;
+        }
+        // Stat off-lock. A vanished/unreadable entry is marked with 0/0 so
+        // it isn't re-collected forever (the watcher will remove it).
+        let mut updates = Vec::with_capacity(batch.len());
+        for (id, name, path) in batch {
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            let (size, mtime) = std::fs::symlink_metadata(&path)
+                .map(|meta| (meta.len(), mtime_secs(&meta)))
+                .unwrap_or((0, 0));
+            updates.push((id, name, size, mtime));
+        }
+        {
+            let mut idx = index.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (id, name, size, mtime) in updates {
+                idx.backfill_meta(id, &name, size, mtime);
+            }
+        }
+        // Yield between batches so the writer/readers aren't starved.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 impl Persistence {
     fn checkpoint(&self) -> persist::Checkpoint {
         match &self.source {
@@ -752,6 +878,7 @@ impl Persistence {
 pub struct LiveIndex {
     pub index: watcher::SharedIndex,
     saver: Option<SnapshotSaver>,
+    backfiller: Option<MetaBackfiller>,
     watcher: Option<PlatformWatcher>,
     writer: Option<watcher::IndexWriter>,
     persistence: Option<Persistence>,
@@ -775,6 +902,7 @@ impl LiveIndex {
 
 impl Drop for LiveIndex {
     fn drop(&mut self) {
+        drop(self.backfiller.take()); // stop backfill writes before the save
         drop(self.saver.take()); // stop marker source; its sender closes
         drop(self.watcher.take()); // stop events; delta senders close
         drop(self.writer.take()); // join: every sent delta is now applied
@@ -889,10 +1017,14 @@ fn assemble_live_index(
 
     let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
     let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change, save_hook)?;
+    // Populate size/mtime that bootstrap left name-only, off the critical
+    // path (Option C). Idle-polls once caught up.
+    let backfiller = Some(MetaBackfiller::spawn(shared.clone())?);
 
     Ok(LiveIndex {
         index: shared,
         saver,
+        backfiller,
         watcher,
         writer: Some(writer),
         persistence,
@@ -1146,6 +1278,62 @@ mod tests {
             recent.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
             vec!["notes.txt"]
         );
+    }
+
+    #[test]
+    fn unpopulated_batch_shrinks_and_backfill_meta_guards() {
+        let (mut index, _docs, report, ..) = sample_index();
+        let before = index.unpopulated_batch(100).len();
+        assert!(before >= 4); // docs, Report.pdf, notes.txt, src, main.rs
+
+        // Guard: applies for the right name, rejects a mismatched one
+        // (as a compaction id-remap would produce).
+        assert!(index.backfill_meta(report, "Report.pdf", 100, 5));
+        assert!(!index.backfill_meta(report, "Wrong.pdf", 999, 9));
+        // One fewer unpopulated; the rejected update didn't stick.
+        assert_eq!(index.unpopulated_batch(100).len(), before - 1);
+        assert_eq!(
+            index
+                .search_filtered("", &[crate::search_filter::Filter::Size(
+                    crate::search_filter::Bound::Ge(50),
+                )], 10)
+                .iter()
+                .filter_map(|h| index.name_of(h.id))
+                .collect::<Vec<_>>(),
+            vec!["Report.pdf"]
+        );
+    }
+
+    #[test]
+    fn backfiller_thread_populates_size_for_search() {
+        use crate::index::walker::IndexSource;
+        use crate::search_filter::{Bound, Filter};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.bin"), vec![0u8; 5000]).unwrap();
+        std::fs::write(dir.path().join("small.txt"), b"hi").unwrap();
+        let index = walker::FsWalkSource::default().bootstrap(dir.path()).unwrap();
+        // Before backfill nothing has size metadata.
+        assert!(index.search_filtered("", &[Filter::Size(Bound::Ge(5000))], 10).is_empty());
+
+        let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
+        let backfiller = MetaBackfiller::spawn(shared.clone()).unwrap();
+
+        // Bounded wait for the background pass to fill size/mtime.
+        let mut names: Vec<String> = Vec::new();
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let idx = shared.read().unwrap();
+            names = idx
+                .search_filtered("", &[Filter::Size(Bound::Ge(5000))], 10)
+                .iter()
+                .filter_map(|h| idx.name_of(h.id).map(str::to_string))
+                .collect();
+            if !names.is_empty() {
+                break;
+            }
+        }
+        drop(backfiller);
+        assert_eq!(names, vec!["big.bin".to_string()]);
     }
 
     #[test]
