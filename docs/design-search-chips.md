@@ -81,8 +81,8 @@ pub fn parse_query(raw: &str) -> Query;   // pure, unit-tested
 - **`size:`** units `b`/`kb`/`mb`/`gb`/`tb`, case-insensitive, integer or
   decimal (`1.5gb`). **Decision: base-1024** (`1mb == 1048576`), matching
   Finder's "Size" column and most tools' expectations for filtering; the
-  UI can label it MiB internally but chips read "MB". *(Open decision — see
-  end — if you prefer base-1000.)*
+  UI can label it MiB internally but chips read "MB". *(Confirmed
+  2026-07-23; see Confirmed decisions.)*
 - **`modified:`** keywords `today`, `yesterday`, `week` (last 7 days),
   `month`, `year`; relative `<7d`/`>30d`/`<2h`; absolute ISO dates
   `2026-01-01` and ranges `2026-01-01..2026-02-01`. Evaluated against a
@@ -291,16 +291,22 @@ the path unless a filter token is present (same stance as `tag:`).
 6. Chip UI: v1a tokens-as-text (with step 1), then v1b removable chips in
    `ui::search_input`.
 
-## Open decisions to confirm
+## Confirmed decisions (2026-07-23)
 
-- **Size units: base-1024 vs base-1000.** Recommend 1024 (Finder-like).
-- **Windows size/mtime coverage in v1.** Accept the best-effort/lazy model
-  (filters work everywhere, Windows converges as backfill runs), **or**
-  ship `size:`/`modified:` on macOS+Linux only and keep Windows to
-  `kind:`/`ext:` until backfill is proven? Recommend best-effort/lazy with
-  a visible "indexing metadata…" state.
-- **Date grammar surface.** Is keyword + relative + ISO enough for v1, or
-  do you want natural ranges ("last month") now? Recommend the former.
-- **Chips in v1 or fast-follow.** Recommend v1a (text) ships with the
-  grammar; v1b (chips) immediately after — but confirm chips aren't
-  required in the very first cut.
+- **Full v1 — size/mtime go in the global index** (not just name-derivable
+  `kind:`/`ext:`). The schema change, per-OS population, freshness, and
+  benchmarks above are in scope.
+- **Size units: base-1024** (`1mb == 1048576`). Chips read "MB"/"GB" but
+  mean MiB/GiB, matching Finder's Size column.
+- **Windows size/mtime: best-effort / lazy.** `size:`/`modified:` are
+  available on every OS; on Windows the bootstrap leaves them unknown and
+  they converge via USN-forward updates + a background backfill pass, with
+  a visible "indexing metadata…" state while it runs. (Not macOS+Linux-
+  only.)
+- **Date grammar: keyword + relative + ISO** — `today`/`yesterday`/`week`/
+  `month`/`year`, relative `<7d`/`>30d`/`<2h`, ISO `2026-01-01` and `A..B`
+  ranges. No natural-language ranges ("last month") in v1.
+- **Chips: text-first, chips fast-follow.** v1a ships the grammar as
+  literal text tokens (`size:>2mb` filters immediately); v1b adds the
+  removable pill chips in `ui::search_input` as the next commit. Chips are
+  **not** required in the first user-visible cut.
