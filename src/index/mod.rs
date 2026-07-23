@@ -39,6 +39,11 @@ const MAX_PATH_DEPTH: usize = 4096;
 
 const FLAG_DIR: u8 = 1 << 0;
 const FLAG_TOMBSTONE: u8 = 1 << 1;
+/// Set once `size`/`mtime` have been populated for this entry. Bootstrap
+/// inserts names only (this bit clear); a background backfill and the live
+/// watchers set it (search-chips phase 2, `docs/design-search-chips.md`).
+/// Distinguishes a real 0-byte file from "size unknown".
+const FLAG_HAS_META: u8 = 1 << 2;
 
 /// (offset, len) into a name pool. Filenames are ≤255 bytes on every
 /// filesystem we target, so u16 lengths are safe (enforced on insert).
@@ -58,6 +63,12 @@ struct FileEntry {
     /// Windows, 0 elsewhere / when unknown. Lets journal-based delta
     /// sources (USN) address entries without any path resolution.
     native_key: u64,
+    /// File size in bytes; meaningful only when [`FLAG_HAS_META`] is set
+    /// (0 otherwise, and always 0 for directories).
+    size: u64,
+    /// Last-modified time, unix seconds; meaningful only when
+    /// [`FLAG_HAS_META`] is set.
+    mtime: i64,
 }
 
 impl FileEntry {
@@ -67,6 +78,11 @@ impl FileEntry {
 
     fn is_tombstone(&self) -> bool {
         self.flags & FLAG_TOMBSTONE != 0
+    }
+
+    /// Whether `size`/`mtime` have been populated (else they're unknown).
+    fn has_meta(&self) -> bool {
+        self.flags & FLAG_HAS_META != 0
     }
 }
 
@@ -186,6 +202,8 @@ impl VolumeIndex {
             parent: ROOT,
             flags: FLAG_DIR,
             native_key: root_key,
+            size: 0,
+            mtime: 0,
         });
         if root_key != 0 {
             index.by_native_key.insert(root_key, ROOT);
@@ -284,6 +302,10 @@ impl VolumeIndex {
             parent,
             flags: if is_dir { FLAG_DIR } else { 0 },
             native_key,
+            // Bootstrap inserts names only; size/mtime are filled in later
+            // (backfill / live watchers) via `set_meta`.
+            size: 0,
+            mtime: 0,
         });
         self.children.entry(parent).or_default().push(id);
         if native_key != 0 {
@@ -291,6 +313,18 @@ impl VolumeIndex {
         }
         self.generation += 1;
         Ok(id)
+    }
+
+    /// Record an entry's size and modification time (unix seconds),
+    /// marking it as having populated metadata. Used by the background
+    /// backfill and the live watchers; a no-op for an unknown id.
+    pub fn set_meta(&mut self, id: EntryId, size: u64, mtime: i64) {
+        if let Some(entry) = self.entries.get_mut(id.0 as usize) {
+            entry.size = if entry.is_dir() { 0 } else { size };
+            entry.mtime = mtime;
+            entry.flags |= FLAG_HAS_META;
+            self.generation += 1;
+        }
     }
 
     /// Look up a live entry by its platform-native key (NTFS FRN).
@@ -446,6 +480,12 @@ impl VolumeIndex {
                 let Ok(new_child) = fresh.insert_with_key(new_parent, name, is_dir, key) else {
                     continue; // unreachable on a consistent index
                 };
+                // Carry populated size/mtime across the rebuild.
+                if let Some(old) = self.entry(old_child)
+                    && old.has_meta()
+                {
+                    fresh.set_meta(new_child, old.size, old.mtime);
+                }
                 if is_dir {
                     stack.push((old_child, new_child));
                 }
@@ -553,11 +593,13 @@ impl VolumeIndex {
                     _ => MatchKind::Substring,
                 };
                 let name = std::str::from_utf8(self.name_bytes(entry.name)).ok()?;
+                let has_meta = entry.has_meta();
                 let item = crate::search_filter::ItemMeta {
                     name,
                     is_dir: entry.is_dir(),
-                    size: None,
-                    mtime: None,
+                    // Size is meaningless for directories; mtime isn't.
+                    size: (has_meta && !entry.is_dir()).then_some(entry.size),
+                    mtime: has_meta.then_some(entry.mtime),
                 };
                 if filters.iter().all(|f| f.matches(&item)) {
                     Some((kind, entry.name_lower.len, ix as u32))
@@ -1079,6 +1121,31 @@ mod tests {
         let hits = index.search_filtered("", &[Filter::Ext("pdf".into())], 100);
         let names: Vec<_> = hits.iter().filter_map(|h| index.name_of(h.id)).collect();
         assert_eq!(names, vec!["Report.pdf"]);
+    }
+
+    #[test]
+    fn search_filtered_size_and_mtime_need_populated_meta() {
+        use crate::search_filter::{Bound, Filter};
+        let (mut index, _docs, report, notes, ..) = sample_index();
+
+        // Before backfill, size:/modified: match nothing (meta unknown).
+        assert!(index.search_filtered("", &[Filter::Size(Bound::Gt(0))], 100).is_empty());
+
+        index.set_meta(report, 5000, 1_000); // Report.pdf: 5 KB, old
+        index.set_meta(notes, 10, 9_000); // notes.txt: tiny, newer
+
+        // size:>1kb ⇒ only Report.pdf.
+        let big = index.search_filtered("", &[Filter::Size(Bound::Gt(1024))], 100);
+        assert_eq!(
+            big.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            vec!["Report.pdf"]
+        );
+        // modified:>5000s ⇒ only notes.txt.
+        let recent = index.search_filtered("", &[Filter::Modified(Bound::Gt(5_000))], 100);
+        assert_eq!(
+            recent.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            vec!["notes.txt"]
+        );
     }
 
     #[test]

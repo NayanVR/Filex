@@ -121,7 +121,34 @@ struct FileEntry {
   0/0 where a source can't supply them — see per-OS population); the
   browse-side listing already stats and can pass real values.
 
-## Populating size/mtime per OS (the asymmetric part)
+## Populating size/mtime — lazy background backfill (decided 2026-07-23)
+
+**The `getattrlistbulk` fast path this doc assumed does not exist.** The
+real bootstrap is `jwalk` on *every* OS (`walker.rs`: platform sources
+"*will* implement the trait"); `jwalk` yields name + type without a stat,
+so populating size/mtime during the walk means a `stat` per entry — on
+macOS too, not "~free". Benchmarked (`benches/bootstrap_bench.rs`, 30k-file
+tree, warm cache): names-only **~11.7 ms** vs with-`stat` **~78.8 ms** —
+**~6.7× slower** (+2.2 µs/file → ~+1.3 s for a 500k home dir, ~+5 s for a
+2M volume; cold cache worse).
+
+**Decision (Option C): don't stat during the walk. Populate lazily in the
+background.** Bootstrap stays names-only and fast (no regression to
+time-to-searchable — "performance is the product"); a low-priority
+background pass fills size/mtime *after* the index is searchable, and the
+live watchers keep them fresh. `size:`/`modified:` return partial results
+that converge over the first few seconds of a fresh index — the same trade
+the doc already accepted for Windows, now applied uniformly. Entries carry
+a `FLAG_HAS_META` bit so a real 0-byte file is distinct from "not yet
+populated"; unpopulated entries never positively match a `size:`/
+`modified:` filter. `getattrlistbulk` (macOS) / `statx` batching (Linux)
+remain *future* optimizations of the backfill, not prerequisites.
+
+The per-OS notes below describe those eventual fast paths; under Option C
+they inform how each platform's *backfill* is made cheaper later, not the
+bootstrap walk.
+
+## Per-OS metadata fast paths (future backfill optimizations)
 
 This is where "full v1" earns its cost. The three bootstrap backends give
 metadata very differently:
@@ -295,14 +322,20 @@ the path unless a filter token is present (same stance as `tag:`).
      splits `tag:` (sidecar intersect) from index filters (`search_all`);
      Windows service mode post-filters `kind:`/`ext:` client-side until the
      IPC filter payload lands (phase 5).
-2. Schema: `size`/`mtime` on `FileEntry`, `FORMAT_VERSION` bump,
-   `insert*` + persistence + tests. macOS `getattrlistbulk` population +
-   footprint/bootstrap benches.
+2. **Schema (done).** `size:u64`/`mtime:i64` + `FLAG_HAS_META` on
+   `FileEntry`, `FORMAT_VERSION 2→3`, persistence, `set_meta`, compaction
+   carries meta, `search_filtered` reads the fields when populated.
+   Bootstrap stays names-only (Option C). `bootstrap_bench` records the
+   stat cost we're avoiding; a footprint test pins the +16 B/entry. The
+   `size:`/`modified:` predicates already run in the scan — they just wait
+   on populated entries.
+2b. **Backfill (next).** A low-priority background pass that stats entries
+   and calls `set_meta`, integrated with the writer/snapshot model; this
+   is what brings `size:`/`modified:` alive. `getattrlistbulk`/`statx`
+   batching are later optimizations of it.
 3. Live freshness: modify→`Upsert`→re-stat across the three watchers,
    with debounce coalescing; behavioral suite.
-4. `size:`/`modified:` predicates in the scan + filter-query bench; Linux
-   `statx` population (decided by bench #2).
-5. Windows population (lazy USN + background backfill) + IPC filter
+5. Windows: the backfill's USN-forward + on-demand population + IPC filter
    plumbing + protocol bump.
 6. Chip UI: v1a tokens-as-text (with step 1), then v1b removable chips in
    `ui::search_input`.
@@ -322,6 +355,11 @@ the path unless a filter token is present (same stance as `tag:`).
 - **Date grammar: keyword + relative + ISO** — `today`/`yesterday`/`week`/
   `month`/`year`, relative `<7d`/`>30d`/`<2h`, ISO `2026-01-01` and `A..B`
   ranges. No natural-language ranges ("last month") in v1.
+- **Population: lazy background backfill (Option C), all OSes.** Confirmed
+  after benchmarking showed statting during the walk makes bootstrap
+  ~6.7× slower and the assumed `getattrlistbulk` fast path isn't built.
+  Bootstrap stays names-only; size/mtime backfill in the background; a
+  `FLAG_HAS_META` bit marks populated entries.
 - **Chips: text-first, chips fast-follow.** v1a ships the grammar as
   literal text tokens (`size:>2mb` filters immediately); v1b adds the
   removable pill chips in `ui::search_input` as the next commit. Chips are

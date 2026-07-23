@@ -256,11 +256,16 @@ is left instant for now (the chevron swaps state).
   (`search_filtered`), chosen as "Option A" after benchmarking showed
   post-filtering under-returns past the result limit and can't do
   filter-only queries; the no-filter keystroke is provably unchanged.
-  Phases 2–5 (size/mtime schema + per-OS population + freshness) and 6
-  (chip UI) pending. The remaining crux is the per-OS population
-  asymmetry (macOS ~free via `getattrlistbulk`, Linux `statx` cost,
-  Windows USN has no size/mtime → lazy backfill) and the live-freshness
-  gap (`FsDelta` has no metadata-change event today).
+  Phase 2 schema **done** — `size`/`mtime` + `FLAG_HAS_META` on
+  `FileEntry`, `FORMAT_VERSION 2→3`, persistence, scan reads them.
+  Benchmarking killed the doc's "macOS ~free via `getattrlistbulk`"
+  assumption (that fast path isn't built; statting during the `jwalk`
+  walk is ~6.7× slower bootstrap), so population is now **lazy
+  background backfill on all OSes** (Option C): bootstrap stays
+  names-only, size/mtime fill in after the index is searchable. Pending:
+  2b backfill (brings `size:`/`modified:` alive), live freshness
+  (`FsDelta` has no metadata-change event yet), Windows/IPC, and the
+  chip UI.
 
 ## Explicitly out of scope
 

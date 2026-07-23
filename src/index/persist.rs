@@ -21,7 +21,7 @@ use super::{EntryId, FLAG_TOMBSTONE, FileEntry, NameRef, ROOT, VolumeIndex};
 const MAGIC: &[u8; 8] = b"FXIDX\0\0\0";
 /// v2: entries carry a native key (NTFS FRN); older snapshots are
 /// rejected and rebuilt by a fresh walk.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Where the platform journal stood when the snapshot was written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +81,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-const ENTRY_ENCODED_LEN: usize = 25; // 4+2 + 4+2 + 4 + 1 + 8
+const ENTRY_ENCODED_LEN: usize = 41; // 4+2 + 4+2 + 4 + 1 + 8 + 8(size) + 8(mtime)
 
 /// Write a snapshot atomically (temp file + rename in the same directory).
 pub fn save(index: &VolumeIndex, checkpoint: Checkpoint, path: &Path) -> Result<()> {
@@ -118,6 +118,8 @@ pub fn save(index: &VolumeIndex, checkpoint: Checkpoint, path: &Path) -> Result<
         buf.extend_from_slice(&entry.parent.0.to_le_bytes());
         buf.push(entry.flags);
         buf.extend_from_slice(&entry.native_key.to_le_bytes());
+        buf.extend_from_slice(&entry.size.to_le_bytes());
+        buf.extend_from_slice(&entry.mtime.to_le_bytes());
     }
 
     let parent = path.parent().context("snapshot path has no parent dir")?;
@@ -216,6 +218,8 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
         let parent = EntryId(r.u32()?);
         let flags = r.u8()?;
         let native_key = r.u64()?;
+        let size = r.u64()?;
+        let mtime = r.u64()? as i64; // stored as raw le bytes of the i64
 
         let name_end = name.offset as usize + name.len as usize;
         let lower_end = name_lower.offset as usize + name_lower.len as usize;
@@ -229,7 +233,7 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
             "entry {i}: parent {} out of range",
             parent.0
         );
-        entries.push(FileEntry { name, name_lower, parent, flags, native_key });
+        entries.push(FileEntry { name, name_lower, parent, flags, native_key, size, mtime });
     }
 
     // Rebuild the children and native-key maps from the entry table;
@@ -292,7 +296,9 @@ mod tests {
         let mut index = VolumeIndex::new("/vol");
         let docs = index.insert(ROOT, "docs", true).unwrap();
         let report = index.insert(docs, "Report.pdf", false).unwrap();
-        index.insert(ROOT, "Übersicht.md", false).unwrap();
+        let uber = index.insert(ROOT, "Übersicht.md", false).unwrap();
+        // Populated metadata must survive the round-trip (format v3).
+        index.set_meta(uber, 4096, 1_700_000_000);
         // Exercise tombstones and renames in the persisted state.
         let temp = index.insert(ROOT, "temp.bin", false).unwrap();
         index.remove(temp).unwrap();
@@ -302,6 +308,14 @@ mod tests {
 
     fn tmp_snapshot_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("test.fxidx")
+    }
+
+    #[test]
+    fn entry_footprint_grew_by_size_and_mtime() {
+        // v3 (search-chips phase 2) added size:u64 + mtime:i64 = 16 bytes
+        // per entry over v2's 25 — ~+32 MB at 2M files. In-memory the two
+        // fields cost the same 16 bytes on top of the arena entry.
+        assert_eq!(ENTRY_ENCODED_LEN, 25 + 16);
     }
 
     #[test]
@@ -333,6 +347,17 @@ mod tests {
         assert_eq!(index.search("übersicht", 10).len(), 1);
         assert!(index.search("temp.bin", 10).is_empty()); // tombstone survives
         assert!(index.resolve(Path::new("docs")).is_some()); // children rebuilt
+
+        // size/mtime (format v3) survive: Übersicht.md is the only 4 KB
+        // file and the only one modified after 2023.
+        use crate::search_filter::{Bound, Filter};
+        let by_size = index.search_filtered("", &[Filter::Size(Bound::Ge(4096))], 10);
+        assert_eq!(
+            by_size.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            vec!["Übersicht.md"]
+        );
+        let by_mtime = index.search_filtered("", &[Filter::Modified(Bound::Gt(1_600_000_000))], 10);
+        assert_eq!(by_mtime.len(), 1);
     }
 
     #[test]
@@ -414,9 +439,10 @@ mod tests {
         }
 
         // Flip the last entry's parent to an out-of-range id.
-        // Entry tail layout: parent u32, flags u8, native_key u64.
+        // Entry tail layout: parent u32, flags u8, native_key u64, size
+        // u64, mtime i64 → parent starts 29 bytes from the end.
         let mut corrupt = bytes.clone();
-        let parent_field = corrupt.len() - 13;
+        let parent_field = corrupt.len() - 29;
         corrupt[parent_field..parent_field + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         std::fs::write(&path, &corrupt).unwrap();
         assert!(load(&path, Path::new("/vol")).is_err());
@@ -437,9 +463,10 @@ mod tests {
         assert_eq!(loaded.entry_by_native_key(11), loaded.resolve(Path::new("docs/a.txt")));
 
         // Corrupt: give the last entry the same key as the root (5).
+        // native_key sits before size(u64)+mtime(i64), i.e. 24 from the end.
         let mut bytes = std::fs::read(&path).unwrap();
-        let key_field = bytes.len() - 8;
-        bytes[key_field..].copy_from_slice(&5u64.to_le_bytes());
+        let key_field = bytes.len() - 24;
+        bytes[key_field..key_field + 8].copy_from_slice(&5u64.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         assert!(load(&path, Path::new("/vol")).unwrap_err().to_string().contains("duplicate"));
     }
