@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result, bail};
 
 use super::watcher::SharedIndex;
 use super::{MatchKind, SearchHit};
+use crate::search_filter::Filter;
 
 /// Default location of the root list: `<data_local_dir>/filex/roots.list`,
 /// one absolute path per line (UTF-8; blank lines ignored).
@@ -92,13 +93,18 @@ pub struct MergedHit {
 /// Search every index and merge by the same ranking a single index uses
 /// (match kind, then name length). Locks are taken one index at a time,
 /// read-only; a poisoned index still answers.
-pub fn search_all(indexes: &[SharedIndex], query: &str, limit: usize) -> Vec<MergedHit> {
+pub fn search_all(
+    indexes: &[SharedIndex],
+    query: &str,
+    filters: &[Filter],
+    limit: usize,
+) -> Vec<MergedHit> {
     let mut merged: Vec<MergedHit> = Vec::new();
     for shared in indexes {
         let index = shared
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        merged.extend(index.search(query, limit).into_iter().filter_map(
+        merged.extend(index.search_filtered(query, filters, limit).into_iter().filter_map(
             |SearchHit { id, kind, name_len }| {
                 Some(MergedHit {
                     name: index.name_of(id)?.to_string(),
@@ -180,7 +186,7 @@ mod tests {
         b.insert(ROOT, "main", true).unwrap(); // exact match
         b.insert(ROOT, "test_main.py", false).unwrap(); // word boundary
 
-        let hits = search_all(&[shared(a), shared(b)], "main", 10);
+        let hits = search_all(&[shared(a), shared(b)], "main", &[], 10);
         let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
         // exact (b) > prefix (a) > boundary (b) > substring (a)
         assert_eq!(names, ["main", "main.rs", "test_main.py", "domain.txt"]);
@@ -196,8 +202,8 @@ mod tests {
             a.insert(ROOT, &format!("file-{i}.txt"), false).unwrap();
         }
         let indexes = [shared(a)];
-        assert_eq!(search_all(&indexes, "file", 3).len(), 3);
-        assert!(search_all(&indexes, "", 10).is_empty());
-        assert!(search_all(&[], "file", 10).is_empty());
+        assert_eq!(search_all(&indexes, "file", &[], 3).len(), 3);
+        assert!(search_all(&indexes, "", &[], 10).is_empty());
+        assert!(search_all(&[], "file", &[], 10).is_empty());
     }
 }

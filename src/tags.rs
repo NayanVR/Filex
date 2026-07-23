@@ -158,46 +158,11 @@ pub fn upsert_tag(tags: &[Tag], replacing: Option<&str>, new: Tag) -> Vec<Tag> {
     out
 }
 
-/// A search query split into its filename text and its `tag:` filters.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct TagQuery {
-    /// The filename text, with the `tag:` tokens removed (may be empty).
-    pub text: String,
-    /// Required tag names — lowercased, de-duplicated, first-seen order.
-    /// A path must carry *all* of them (AND).
-    pub tags: Vec<String>,
-}
-
-impl TagQuery {
-    /// Nothing to search on — no filename text and no tag filters.
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.tags.is_empty()
-    }
-}
-
-/// Split `tag:NAME` tokens out of a raw query. The remaining whitespace-
-/// separated words form the filename [`text`](TagQuery::text); each
-/// `tag:NAME` adds a required tag ([`tags`](TagQuery::tags)). The `tag:`
-/// prefix and the names match case-insensitively, so names are lowercased
-/// here; a bare `tag:` (no name) is ignored. This is the first
-/// `key:value` filter — the search-chips block reuses the same splitter.
-pub fn parse_tag_query(raw: &str) -> TagQuery {
-    let mut text_words = Vec::new();
-    let mut tags = Vec::new();
-    for word in raw.split_whitespace() {
-        // Lowercased copy just for the prefix test / tag name; the
-        // filename text keeps the word's original case.
-        let lowered = word.to_ascii_lowercase();
-        if let Some(name) = lowered.strip_prefix("tag:") {
-            if !name.is_empty() && !tags.iter().any(|t| t == name) {
-                tags.push(name.to_string());
-            }
-        } else {
-            text_words.push(word);
-        }
-    }
-    TagQuery { text: text_words.join(" "), tags }
-}
+// The `tag:` splitter that used to live here (`parse_tag_query`) is
+// superseded by the general `key:value` tokenizer in
+// [`crate::search_filter::parse_query`], which emits `tag:` as
+// `Filter::Tag`. The pieces below stay: they serve the sidecar intersect
+// and the sidebar list, which operate on the store, not the query string.
 
 /// The distinct tags across an index, for the sidebar TAGS list:
 /// de-duplicated by name (case-insensitive, first spelling/color wins)
@@ -862,31 +827,6 @@ mod tests {
             upsert_tag(&base, Some("Z"), Tag::new("D")),
             vec![Tag::new("A"), Tag::colored("B", TagColor::Blue), Tag::new("C"), Tag::new("D")]
         );
-    }
-
-    #[test]
-    fn parse_tag_query_splits_text_and_tags() {
-        // Plain text, no tags.
-        assert_eq!(
-            parse_tag_query("annual report"),
-            TagQuery { text: "annual report".into(), tags: vec![] }
-        );
-        // Embedded tag token, case-insensitive prefix + name, deduped.
-        assert_eq!(
-            parse_tag_query("Report TAG:Work tag:work tag:Urgent"),
-            TagQuery { text: "Report".into(), tags: vec!["work".into(), "urgent".into()] }
-        );
-        // Tag-only query: empty text.
-        assert_eq!(
-            parse_tag_query("tag:blue"),
-            TagQuery { text: String::new(), tags: vec!["blue".into()] }
-        );
-        // A bare `tag:` contributes nothing; text case is preserved.
-        assert_eq!(
-            parse_tag_query("  Foo   tag:   Bar "),
-            TagQuery { text: "Foo Bar".into(), tags: vec![] }
-        );
-        assert!(parse_tag_query("   ").is_empty());
     }
 
     #[test]

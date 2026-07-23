@@ -251,7 +251,9 @@ impl IndexHost for MultiRootHost {
     fn search(&self, query: &str, limit: usize) -> Vec<RemoteHit> {
         let indexes: Vec<SharedIndex> =
             self.roots.iter().map(|(_, index)| index.clone()).collect();
-        manager::search_all(&indexes, query, limit)
+        // Filters are applied client-side today; the IPC frame carries no
+        // filter payload yet (that is search-chips phase 5).
+        manager::search_all(&indexes, query, &[], limit)
             .into_iter()
             .map(|hit| RemoteHit { name: hit.name, path: hit.path, is_dir: hit.is_dir })
             .collect()

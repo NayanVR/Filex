@@ -278,7 +278,23 @@ the path unless a filter token is present (same stance as `tag:`).
 
 1. `search_filter` grammar module (`parse_query` + predicate evaluators),
    `tag:` folded in — pure, tested. `kind:`/`ext:` wired into
-   `search_all` (works immediately, no schema change).
+   `search_all` (works immediately, no schema change). **Done.**
+   - `filex::search_filter` (phase 1a): `parse_query` → text + typed
+     `Filter`s; base-1024 sizes; keyword/relative/ISO dates; unknown keys
+     fall back to text. `tags::parse_tag_query` removed — `tag:` is now a
+     `Filter::Tag`.
+   - Wiring (phase 1b): **Option A chosen after benchmarking** — the
+     predicate runs *inside* `VolumeIndex::search_filtered` (a branch that
+     leaves the no-filter keystroke on the untouched `search` fast path),
+     not as a post-filter on results. Benched at 200k (`benches/
+     filter_bench.rs`): no-filter path unchanged (~1.07 ms, == baseline);
+     text+filter ~1.25 ms; filter-only full-scan ~5 ms. Post-filtering
+     ("Option B") was rejected: ~0.1 ms faster on text+filter but it
+     **silently under-returns past the result limit** and **can't serve a
+     filter-only query** (`kind:image` with no text). `update_search`
+     splits `tag:` (sidecar intersect) from index filters (`search_all`);
+     Windows service mode post-filters `kind:`/`ext:` client-side until the
+     IPC filter payload lands (phase 5).
 2. Schema: `size`/`mtime` on `FileEntry`, `FORMAT_VERSION` bump,
    `insert*` + persistence + tests. macOS `getattrlistbulk` population +
    footprint/bootstrap benches.

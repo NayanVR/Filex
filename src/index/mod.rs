@@ -498,6 +498,81 @@ impl VolumeIndex {
             .map(|(kind, name_len, id)| SearchHit { id: EntryId(id), kind, name_len })
             .collect()
     }
+
+    /// Like [`search`](Self::search), but each candidate must also satisfy
+    /// every index-evaluable `filter` (`kind:`/`ext:`, and `size:`/
+    /// `modified:` once the arena carries those fields). With no filters
+    /// this is exactly [`search`](Self::search) — the branch keeps the
+    /// common no-filter keystroke on the untouched fast path. An empty
+    /// `query` with filters present is a filter-only scan (rank by name
+    /// length). `tag:` filters are a no-op here (tags live in the sidecar,
+    /// intersected by the caller).
+    ///
+    /// Prototype for docs/design-search-chips.md "Option A"; benchmarked
+    /// against post-filtering in `benches/filter_bench.rs`.
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        filters: &[crate::search_filter::Filter],
+        limit: usize,
+    ) -> Vec<SearchHit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        if filters.is_empty() {
+            return self.search(query, limit);
+        }
+        let needle = (!query.is_empty()).then(|| query.to_lowercase());
+        let finder = needle.as_ref().map(|n| memmem::Finder::new(n.as_bytes()));
+
+        let top = self
+            .entries
+            .par_iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, e)| !e.is_tombstone())
+            .filter_map(|(ix, entry)| {
+                // Name-match first (cheapest cut) when there's a needle;
+                // filter-only queries rank every survivor by name length.
+                let kind = match (&finder, &needle) {
+                    (Some(finder), Some(needle)) => {
+                        let haystack = self.name_lower_bytes(entry.name_lower);
+                        let pos = finder.find(haystack)?;
+                        if pos == 0 {
+                            if haystack.len() == needle.len() {
+                                MatchKind::Exact
+                            } else {
+                                MatchKind::Prefix
+                            }
+                        } else if !haystack[pos - 1].is_ascii_alphanumeric() {
+                            MatchKind::WordBoundary
+                        } else {
+                            MatchKind::Substring
+                        }
+                    }
+                    _ => MatchKind::Substring,
+                };
+                let name = std::str::from_utf8(self.name_bytes(entry.name)).ok()?;
+                let item = crate::search_filter::ItemMeta {
+                    name,
+                    is_dir: entry.is_dir(),
+                    size: None,
+                    mtime: None,
+                };
+                if filters.iter().all(|f| f.matches(&item)) {
+                    Some((kind, entry.name_lower.len, ix as u32))
+                } else {
+                    None
+                }
+            })
+            .fold(|| TopK::new(limit), TopK::push)
+            .reduce(|| TopK::new(limit), TopK::merge);
+
+        top.into_sorted()
+            .into_iter()
+            .map(|(kind, name_len, id)| SearchHit { id: EntryId(id), kind, name_len })
+            .collect()
+    }
 }
 
 /// The live-update source for the OS we're built for, feeding
@@ -978,6 +1053,32 @@ mod tests {
         let src = index.insert(ROOT, "src", true).unwrap();
         let main_rs = index.insert(src, "main.rs", false).unwrap();
         (index, docs, report, notes, src, main_rs)
+    }
+
+    #[test]
+    fn search_filtered_matches_search_and_filters() {
+        use crate::listing::FileKind;
+        use crate::search_filter::Filter;
+        let (index, ..) = sample_index();
+
+        // No filters ⇒ identical to plain search.
+        let plain = index.search("r", 100);
+        let filtered = index.search_filtered("r", &[], 100);
+        assert_eq!(plain.len(), filtered.len());
+        assert_eq!(
+            plain.iter().map(|h| h.id).collect::<Vec<_>>(),
+            filtered.iter().map(|h| h.id).collect::<Vec<_>>()
+        );
+
+        // text + kind:code ⇒ only main.rs (not Report.pdf / notes.txt).
+        let hits = index.search_filtered("", &[Filter::Kind(FileKind::Code)], 100);
+        let names: Vec<_> = hits.iter().filter_map(|h| index.name_of(h.id)).collect();
+        assert_eq!(names, vec!["main.rs"]);
+
+        // filter-only ext:pdf ⇒ only Report.pdf.
+        let hits = index.search_filtered("", &[Filter::Ext("pdf".into())], 100);
+        let names: Vec<_> = hits.iter().filter_map(|h| index.name_of(h.id)).collect();
+        assert_eq!(names, vec!["Report.pdf"]);
     }
 
     #[test]

@@ -249,12 +249,18 @@ is left instant for now (the chevron swaps state).
   with memory and freshness costs — design doc + benchmarks before
   building, per the perf rule. Design doc: `docs/design-search-chips.md`
   (written 2026-07-23; **full-v1 path chosen** — size/mtime go into the
-  index). Progress: **design complete, awaiting decision sign-off**;
-  no code yet. The doc's crux is the per-OS population asymmetry
-  (macOS ~free via `getattrlistbulk`, Linux `statx` cost, Windows USN
-  has no size/mtime → lazy backfill) and the live-freshness gap
-  (`FsDelta` has no metadata-change event today). `kind:`/`ext:` need
-  no schema change and ship first.
+  index). Progress: design ratified; **phase 1 done** — the pure
+  `filex::search_filter` `key:value` grammar (`kind:`/`ext:`/`size:`/
+  `modified:`/`tag:`, base-1024, keyword/relative/ISO dates) plus its
+  wiring: `kind:`/`ext:` filter inside the index scan
+  (`search_filtered`), chosen as "Option A" after benchmarking showed
+  post-filtering under-returns past the result limit and can't do
+  filter-only queries; the no-filter keystroke is provably unchanged.
+  Phases 2–5 (size/mtime schema + per-OS population + freshness) and 6
+  (chip UI) pending. The remaining crux is the per-OS population
+  asymmetry (macOS ~free via `getattrlistbulk`, Linux `statx` cost,
+  Windows USN has no size/mtime → lazy backfill) and the live-freshness
+  gap (`FsDelta` has no metadata-change event today).
 
 ## Explicitly out of scope
 

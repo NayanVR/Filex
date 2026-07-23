@@ -15,6 +15,7 @@ use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
+use filex::search_filter::Filter;
 use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
 use filex::selection::Selection;
 use filex::settings::{SortBy, ThemeMode, ViewMode};
@@ -158,6 +159,29 @@ fn filter_rows_by_tags(
     let tagged: std::collections::HashSet<PathBuf> =
         store.paths_with_all_tags(required).into_iter().collect();
     rows.into_iter().filter(|row| tagged.contains(&row.target)).collect()
+}
+
+/// Post-filter rows by the index-evaluable filters (`kind:`/`ext:`) using
+/// each row's name — the client-side path for Windows service mode, where
+/// the service applies no filters yet (that's phase 5). `size:`/`modified:`
+/// can't be evaluated without the index fields, so they match nothing
+/// here; that's the documented service-mode limitation.
+#[cfg(target_os = "windows")]
+fn filter_rows_by_meta(rows: Vec<SearchRow>, filters: &[Filter]) -> Vec<SearchRow> {
+    if filters.is_empty() {
+        return rows;
+    }
+    rows.into_iter()
+        .filter(|row| {
+            let item = filex::search_filter::ItemMeta {
+                name: row.name.as_ref(),
+                is_dir: row.is_dir,
+                size: None,
+                mtime: None,
+            };
+            filters.iter().all(|f| f.matches(&item))
+        })
+        .collect()
 }
 
 fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
@@ -2011,18 +2035,24 @@ impl Workspace {
     /// Kick off a merged query across every ready root on the background
     /// executor. Stale completions are dropped by generation check.
     ///
-    /// The query first has its `tag:NAME` tokens split out (a pure
-    /// [`parse_tag_query`](filex::tags::parse_tag_query)); the remaining
-    /// text runs the normal filename search and the results are
-    /// intersected with the paths carrying every named tag. A tag-only
-    /// query (no filename text) lists the tagged files directly from the
-    /// sidecar index, skipping the filename search entirely.
+    /// The raw query is split (a pure
+    /// [`parse_query`](filex::search_filter::parse_query)) into filename
+    /// text, index-evaluable filters (`kind:`/`ext:`/`size:`/`modified:`),
+    /// and `tag:` filters. The text + index filters run in the index scan
+    /// (`search_filtered`); the results are then intersected with the
+    /// paths carrying every named tag (the sidecar store). A query with no
+    /// filename text and no index filters — only `tag:` — lists the tagged
+    /// files straight from the sidecar, skipping the index scan.
     fn update_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation += 1;
         let generation = self.search_generation;
         cx.notify();
 
-        let parsed = filex::tags::parse_tag_query(&self.query);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let parsed = filex::search_filter::parse_query(&self.query, now);
         if parsed.is_empty() {
             self.results.clear();
             // Leave the browse selection intact; only the search's own
@@ -2031,12 +2061,24 @@ impl Workspace {
             return;
         }
 
-        // Tag-only query: no filename text to rank, so list the tagged
-        // files straight from the sidecar (works the same in service mode
-        // — tags are always a client-side store).
-        if parsed.text.is_empty() {
+        // Tags live in the sidecar (intersected after the scan); the rest
+        // are evaluated inside the index scan.
+        let mut tags_required = Vec::new();
+        let mut index_filters = Vec::new();
+        for filter in parsed.filters {
+            match filter {
+                Filter::Tag(name) => tags_required.push(name),
+                other => index_filters.push(other),
+            }
+        }
+        let text = parsed.text;
+
+        // Tag-only query (no text, no index filters): list the tagged files
+        // straight from the sidecar (works the same in service mode — tags
+        // are always a client-side store).
+        if text.is_empty() && index_filters.is_empty() {
             let store = self.tags.clone();
-            let required = parsed.tags;
+            let required = tags_required;
             cx.spawn(async move |this, cx| {
                 let rows = cx
                     .background_executor()
@@ -2061,17 +2103,16 @@ impl Workspace {
             return;
         }
 
-        let text = parsed.text;
-        let required = parsed.tags;
-
         // Service mode: the text query goes over IPC; a failed roundtrip
-        // falls back to local indexing and re-runs. The tag filter is
-        // applied client-side (the service knows nothing about tags).
+        // falls back to local indexing and re-runs. The service applies no
+        // filters yet (phase 5), so `kind:`/`ext:` are post-filtered
+        // client-side and tags intersected via the sidecar.
         #[cfg(target_os = "windows")]
         if let Some(client) = self.service.clone() {
             let store = self.tags.clone();
             let text = text.clone();
-            let required = required.clone();
+            let tags_required = tags_required.clone();
+            let index_filters = index_filters.clone();
             cx.spawn(async move |this, cx| {
                 let result = cx
                     .background_executor()
@@ -2086,7 +2127,8 @@ impl Workspace {
                                     target: hit.path,
                                 })
                                 .collect();
-                            filter_rows_by_tags(rows, &store, &required)
+                            let rows = filter_rows_by_meta(rows, &index_filters);
+                            filter_rows_by_tags(rows, &store, &tags_required)
                         })
                     })
                     .await;
@@ -2124,7 +2166,7 @@ impl Workspace {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
-                    let rows = manager::search_all(&indexes, &text, SEARCH_RESULT_LIMIT)
+                    let rows = manager::search_all(&indexes, &text, &index_filters, SEARCH_RESULT_LIMIT)
                         .into_iter()
                         .map(|hit| SearchRow {
                             name: hit.name.into(),
@@ -2133,7 +2175,7 @@ impl Workspace {
                             target: hit.path,
                         })
                         .collect();
-                    filter_rows_by_tags(rows, &store, &required)
+                    filter_rows_by_tags(rows, &store, &tags_required)
                 })
                 .await;
             this.update(cx, |this, cx| {
