@@ -217,7 +217,16 @@ Sequence matters here:
 
 1. **SCM service wrapper** for `filex-indexd` using the
    `windows-service` crate (StartServiceCtrlDispatcher, stop/shutdown
-   control codes → clean LiveIndex drop so snapshots save).
+   control codes → clean LiveIndex drop so snapshots save). **Done.**
+   `filex-indexd` now attaches to the SCM via `service_dispatcher::start`
+   and runs a control handler: Stop/Shutdown set a flag and self-connect
+   the pipe (`wake_pipe_server`) so the now-interruptible
+   `run_pipe_server` returns and the `LiveIndex`es drop (snapshots save);
+   the service reports Running→Stopped. When *not* launched by the SCM
+   (dev run / legacy Task Scheduler), it falls back to console mode
+   (`ERROR_FAILED_SERVICE_CONTROLLER_CONNECT`). Compiles for the Windows
+   target (`--no-default-features --bins`); runtime install/start/stop is
+   verified with the step-2 MSI on a Windows runner.
 2. **MSI installer** via WiX (`cargo-wix`): installs app + service with
    ServiceInstall/ServiceControl tables — the one-time-admin-consent
    moment that gives standard users the USN fast path forever. CI's

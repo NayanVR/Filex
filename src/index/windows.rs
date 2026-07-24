@@ -102,7 +102,7 @@ pub fn event_to_delta(
 #[cfg(target_os = "windows")]
 pub use imp::{
     DirChangesWatcher, UsnBootstrap, UsnJournalInfo, UsnJournalWatcher, connect_index_pipe,
-    query_usn_journal, run_pipe_server, usn_bootstrap, volume_root_drive,
+    query_usn_journal, run_pipe_server, usn_bootstrap, volume_root_drive, wake_pipe_server,
 };
 
 #[cfg(target_os = "windows")]
@@ -314,12 +314,20 @@ mod imp {
     /// connections have been served (None = forever). The pipe's default
     /// security descriptor already restricts writing to the creating user
     /// and administrators, which is the intended audience.
+    /// Serve the index over the named pipe until `accept_limit` is reached
+    /// (tests) or `shutdown` is set (the SCM service stop). Because
+    /// `ConnectNamedPipe` blocks, a stop is delivered by setting the flag
+    /// and self-connecting the pipe ([`wake_pipe_server`]) so the accept
+    /// returns and the loop observes the flag; returning lets the caller
+    /// drop its `LiveIndex`es so snapshots save.
     pub fn run_pipe_server(
         pipe_name: &str,
         host: std::sync::Arc<dyn crate::index::ipc::IndexHost>,
         accept_limit: Option<usize>,
+        shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<()> {
         use std::os::windows::io::FromRawHandle as _;
+        use std::sync::atomic::Ordering;
         use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
         use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
         use windows::Win32::System::Pipes::{
@@ -327,8 +335,13 @@ mod imp {
             PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
         };
 
+        let stopping = || shutdown.as_ref().is_some_and(|s| s.load(Ordering::Relaxed));
+
         let mut served = 0usize;
         while accept_limit.is_none_or(|limit| served < limit) {
+            if stopping() {
+                break;
+            }
             // SAFETY: standard named-pipe creation; name outlives the call.
             let handle = unsafe {
                 CreateNamedPipeW(
@@ -355,6 +368,13 @@ mod imp {
                 unsafe { CloseHandle(handle).ok() };
                 return Err(err).context("waiting for a pipe client");
             }
+            // A connection that arrived only to wake us for shutdown: drop
+            // it and stop, rather than spawning a handler for a dead client.
+            if stopping() {
+                // SAFETY: closing the instance we just accepted.
+                unsafe { CloseHandle(handle).ok() };
+                break;
+            }
             served += 1;
 
             // SAFETY: ownership of the connected instance moves into the
@@ -375,6 +395,14 @@ mod imp {
             })?;
         }
         Ok(())
+    }
+
+    /// Unblock a [`run_pipe_server`] `ConnectNamedPipe` wait by making a
+    /// throwaway self-connection, so its loop can observe a set shutdown
+    /// flag and return. Best-effort — a failure just means there was no
+    /// pending accept to wake.
+    pub fn wake_pipe_server(pipe_name: &str) {
+        drop(connect_index_pipe(pipe_name, 1));
     }
 
     /// Connect to the index service's pipe. `attempts` > 1 retries with a
@@ -948,7 +976,7 @@ mod tests {
             let pipe_name = format!(r"\\.\pipe\filex-test-{}", std::process::id());
             let server = std::thread::spawn({
                 let pipe_name = pipe_name.clone();
-                move || run_pipe_server(&pipe_name, host, Some(1))
+                move || run_pipe_server(&pipe_name, host, Some(1), None)
             });
 
             let stream = connect_index_pipe(&pipe_name, 20).unwrap();
