@@ -136,7 +136,7 @@ fn kind_rank(entry: &Entry) -> (u8, String) {
 
 /// Broad category of a file, derived from its extension — drives the
 /// list icon and decides which files get thumbnails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileKind {
     Directory,
     Image,

@@ -161,29 +161,6 @@ fn filter_rows_by_tags(
     rows.into_iter().filter(|row| tagged.contains(&row.target)).collect()
 }
 
-/// Post-filter rows by the index-evaluable filters (`kind:`/`ext:`) using
-/// each row's name — the client-side path for Windows service mode, where
-/// the service applies no filters yet (that's phase 5). `size:`/`modified:`
-/// can't be evaluated without the index fields, so they match nothing
-/// here; that's the documented service-mode limitation.
-#[cfg(target_os = "windows")]
-fn filter_rows_by_meta(rows: Vec<SearchRow>, filters: &[Filter]) -> Vec<SearchRow> {
-    if filters.is_empty() {
-        return rows;
-    }
-    rows.into_iter()
-        .filter(|row| {
-            let item = filex::search_filter::ItemMeta {
-                name: row.name.as_ref(),
-                is_dir: row.is_dir,
-                size: None,
-                mtime: None,
-            };
-            filters.iter().all(|f| f.matches(&item))
-        })
-        .collect()
-}
-
 fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
     index.read().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -2103,10 +2080,10 @@ impl Workspace {
             return;
         }
 
-        // Service mode: the text query goes over IPC; a failed roundtrip
-        // falls back to local indexing and re-runs. The service applies no
-        // filters yet (phase 5), so `kind:`/`ext:` are post-filtered
-        // client-side and tags intersected via the sidecar.
+        // Service mode: the text query + index filters go over IPC and are
+        // applied service-side (where the index with size/mtime lives); a
+        // failed roundtrip falls back to local indexing and re-runs. `tag:`
+        // stays client-side — the service has no sidecar.
         #[cfg(target_os = "windows")]
         if let Some(client) = self.service.clone() {
             let store = self.tags.clone();
@@ -2117,7 +2094,7 @@ impl Workspace {
                 let result = cx
                     .background_executor()
                     .spawn(async move {
-                        client.search(&text, SEARCH_RESULT_LIMIT as u32).map(|hits| {
+                        client.search(&text, &index_filters, SEARCH_RESULT_LIMIT as u32).map(|hits| {
                             let rows = hits
                                 .into_iter()
                                 .map(|hit| SearchRow {
@@ -2127,7 +2104,6 @@ impl Workspace {
                                     target: hit.path,
                                 })
                                 .collect();
-                            let rows = filter_rows_by_meta(rows, &index_filters);
                             filter_rows_by_tags(rows, &store, &tags_required)
                         })
                     })

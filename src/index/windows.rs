@@ -955,7 +955,7 @@ mod tests {
             let reader = stream.try_clone().unwrap();
             let mut client = RemoteIndex::connect(reader, stream).unwrap();
 
-            let hits = client.search("pipe-hit", 10).unwrap();
+            let hits = client.search("pipe-hit", &[], 10).unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].name, "pipe-hit.txt");
             assert_eq!(client.status().unwrap().roots[0].files, 1);

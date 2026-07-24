@@ -14,6 +14,8 @@
 //! change adds (until then, [`Filter::matches`] reports them unknown, so
 //! they never positively match).
 
+use serde::{Deserialize, Serialize};
+
 use crate::listing::FileKind;
 
 /// Seconds in a day — the unit the date grammar reasons in.
@@ -21,7 +23,7 @@ const DAY: i64 = 86_400;
 
 /// A comparison a numeric field must satisfy: `<op> operand`, or an
 /// inclusive `lo..=hi` range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Bound<T> {
     Lt(T),
     Le(T),
@@ -47,7 +49,7 @@ impl<T: PartialOrd + Copy> Bound<T> {
 }
 
 /// One structured filter parsed out of the query. Multiple filters AND.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Filter {
     /// `tag:NAME` — lowercased; evaluated against the sidecar tag store,
     /// not the index (see [`crate::tags`]).

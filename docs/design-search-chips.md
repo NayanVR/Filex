@@ -350,8 +350,19 @@ the path unless a filter token is present (same stance as `tag:`).
    → NativeUpsert. Fixture-tested per platform; macOS live-tested. Batch
    coalescing of repeated same-path upserts is a noted future
    optimization (CLOSE_WRITE/sticky-USN keep the event rate low).
-5. Windows: the backfill's USN-forward + on-demand population + IPC filter
-   plumbing + protocol bump.
+5. Windows (done). **Population came free from Option C:** `filex-indexd`
+   builds each root via `start_live_index` → `assemble_live_index`, which
+   spawns the `MetaBackfiller`, so the service's index gets size/mtime the
+   same way the in-process one does (kept fresh by phase 3's USN
+   data-change reason). All that remained was the **IPC filter payload**:
+   `Request::Search` gained `filters`, carried as a small JSON blob (serde
+   on `Filter`/`Bound`/`FileKind`); the service applies them in-scan via
+   `search_all` (`MultiRootHost::search`), `tag:` stays client-side, and
+   `PROTOCOL_VERSION` bumped 1→2 (the exact-match handshake makes a
+   mixed pair fall back to in-process). The client-side `kind:`/`ext:`
+   post-filter is removed. Not cross-compiled locally (a C dep's build
+   script blocks the Windows target on macOS); the edits are mechanical
+   signature changes over the macOS-checked IPC types.
 6. Chip UI: v1a tokens-as-text (with step 1), then v1b removable chips in
    `ui::search_input`.
 

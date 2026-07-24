@@ -265,9 +265,15 @@ is left instant for now (the chevron swaps state).
   names-only, size/mtime fill in after the index is searchable. Phase 2b
   **done** — a `MetaBackfiller` thread per `LiveIndex` stats entries in
   the background and populates them, so `size:`/`modified:` now work
-  (converging over the first seconds of a fresh index). Pending: live
-  freshness (`FsDelta` has no metadata-change event yet, so in-place
-  edits go stale until re-indexed), Windows/IPC, and the chip UI.
+  (converging over the first seconds of a fresh index). Phase 3 (live
+  freshness) **done** — modify events now re-stat across FSEvents/
+  inotify/fanotify/USN, so in-place edits stay current. Phase 5
+  (Windows) **done** — the service backfills size/mtime the same way
+  (via `start_live_index`), and the IPC search frame now carries the
+  filters (JSON blob, protocol v2) so `size:`/`modified:` apply
+  service-side. Only phase 6 remains — the removable **chip UI** (v1b);
+  tokens-as-text already filter, so the whole grammar is usable now on
+  all platforms.
 
 ## Explicitly out of scope
 

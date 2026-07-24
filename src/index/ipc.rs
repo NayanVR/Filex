@@ -24,7 +24,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use super::manager;
 use super::watcher::SharedIndex;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The well-known endpoint of the index service on Windows.
 pub const PIPE_NAME: &str = r"\\.\pipe\filex-index";
@@ -45,7 +45,10 @@ const TAG_ERROR: u8 = 255;
 pub enum Request {
     Hello { version: u32 },
     Status,
-    Search { query: String, limit: u32 },
+    /// `filters` are the index-evaluable filters (`kind:`/`ext:`/`size:`/
+    /// `modified:`) applied service-side; `tag:` stays client-side (the
+    /// service has no sidecar), so it is never sent here.
+    Search { query: String, limit: u32, filters: Vec<crate::search_filter::Filter> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,10 +128,13 @@ pub fn encode_request(request: &Request) -> Vec<u8> {
             buf.extend_from_slice(&version.to_le_bytes());
         }
         Request::Status => buf.push(TAG_STATUS),
-        Request::Search { query, limit } => {
+        Request::Search { query, limit, filters } => {
             buf.push(TAG_SEARCH);
             put_string(&mut buf, query);
             buf.extend_from_slice(&limit.to_le_bytes());
+            // The filter list rides as a small JSON blob (tiny — a handful
+            // of filters); the frame envelope stays hand-rolled.
+            put_string(&mut buf, &serde_json::to_string(filters).unwrap_or_default());
         }
     }
     buf
@@ -139,7 +145,12 @@ pub fn decode_request(payload: &[u8]) -> Result<Request> {
     let request = match c.u8()? {
         TAG_HELLO => Request::Hello { version: c.u32()? },
         TAG_STATUS => Request::Status,
-        TAG_SEARCH => Request::Search { query: c.string()?, limit: c.u32()? },
+        TAG_SEARCH => Request::Search {
+            query: c.string()?,
+            limit: c.u32()?,
+            // Unparseable/absent filter blob → no filters (forward-safe).
+            filters: serde_json::from_str(&c.string()?).unwrap_or_default(),
+        },
         tag => bail!("unknown request tag {tag}"),
     };
     ensure!(c.finished(), "trailing bytes in request frame");
@@ -237,7 +248,12 @@ pub fn write_frame(writer: &mut impl Write, payload: &[u8]) -> Result<()> {
 /// What the service exposes over IPC. Object-safe so transports hold a
 /// `&dyn IndexHost`.
 pub trait IndexHost: Send + Sync {
-    fn search(&self, query: &str, limit: usize) -> Vec<RemoteHit>;
+    fn search(
+        &self,
+        query: &str,
+        filters: &[crate::search_filter::Filter],
+        limit: usize,
+    ) -> Vec<RemoteHit>;
     fn status(&self) -> HostStatus;
 }
 
@@ -248,12 +264,17 @@ pub struct MultiRootHost {
 }
 
 impl IndexHost for MultiRootHost {
-    fn search(&self, query: &str, limit: usize) -> Vec<RemoteHit> {
+    fn search(
+        &self,
+        query: &str,
+        filters: &[crate::search_filter::Filter],
+        limit: usize,
+    ) -> Vec<RemoteHit> {
         let indexes: Vec<SharedIndex> =
             self.roots.iter().map(|(_, index)| index.clone()).collect();
-        // Filters are applied client-side today; the IPC frame carries no
-        // filter payload yet (that is search-chips phase 5).
-        manager::search_all(&indexes, query, &[], limit)
+        // Index filters (kind:/ext:/size:/modified:) apply service-side in
+        // the scan; tag: stays on the client and is never sent here.
+        manager::search_all(&indexes, query, filters, limit)
             .into_iter()
             .map(|hit| RemoteHit { name: hit.name, path: hit.path, is_dir: hit.is_dir })
             .collect()
@@ -301,8 +322,8 @@ pub fn serve_connection(
                 bail!("client skipped the Hello handshake");
             }
             Ok(Request::Status) => Response::Status(host.status()),
-            Ok(Request::Search { query, limit }) => {
-                Response::Search(host.search(&query, limit.min(10_000) as usize))
+            Ok(Request::Search { query, limit, filters }) => {
+                Response::Search(host.search(&query, &filters, limit.min(10_000) as usize))
             }
             Err(err) => Response::Error { message: format!("{err:#}") },
         };
@@ -331,8 +352,15 @@ impl<R: Read, W: Write> RemoteIndex<R, W> {
         }
     }
 
-    pub fn search(&mut self, query: &str, limit: u32) -> Result<Vec<RemoteHit>> {
-        match self.roundtrip(&Request::Search { query: query.to_string(), limit })? {
+    pub fn search(
+        &mut self,
+        query: &str,
+        filters: &[crate::search_filter::Filter],
+        limit: u32,
+    ) -> Result<Vec<RemoteHit>> {
+        let request =
+            Request::Search { query: query.to_string(), limit, filters: filters.to_vec() };
+        match self.roundtrip(&request)? {
             Response::Search(hits) => Ok(hits),
             Response::Error { message } => bail!("service error: {message}"),
             other => bail!("unexpected search response {other:?}"),
@@ -376,11 +404,16 @@ impl ServiceClient {
         Ok(Self { inner: std::sync::Mutex::new(client) })
     }
 
-    pub fn search(&self, query: &str, limit: u32) -> Result<Vec<RemoteHit>> {
+    pub fn search(
+        &self,
+        query: &str,
+        filters: &[crate::search_filter::Filter],
+        limit: u32,
+    ) -> Result<Vec<RemoteHit>> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .search(query, limit)
+            .search(query, filters, limit)
     }
 
     pub fn status(&self) -> Result<HostStatus> {
@@ -403,7 +436,16 @@ mod tests {
         let requests = [
             Request::Hello { version: 7 },
             Request::Status,
-            Request::Search { query: "Übersicht μ".into(), limit: 500 },
+            // Filters ride as a JSON blob — round-trip a couple of kinds.
+            Request::Search {
+                query: "Übersicht μ".into(),
+                limit: 500,
+                filters: vec![
+                    crate::search_filter::Filter::Kind(crate::listing::FileKind::Image),
+                    crate::search_filter::Filter::Size(crate::search_filter::Bound::Gt(2 << 20)),
+                ],
+            },
+            Request::Search { query: String::new(), limit: 10, filters: vec![] },
         ];
         for request in requests {
             assert_eq!(decode_request(&encode_request(&request)).unwrap(), request);
@@ -430,7 +472,8 @@ mod tests {
     fn decode_rejects_garbage_and_truncation() {
         assert!(decode_request(&[99]).is_err()); // unknown tag
         assert!(decode_request(&[]).is_err()); // empty
-        let mut valid = encode_request(&Request::Search { query: "x".into(), limit: 5 });
+        let mut valid =
+            encode_request(&Request::Search { query: "x".into(), limit: 5, filters: vec![] });
         valid.truncate(valid.len() - 1);
         assert!(decode_request(&valid).is_err());
         // Trailing junk is rejected, not silently ignored.
@@ -485,7 +528,7 @@ mod tests {
         assert_eq!(status.roots.len(), 2);
         assert_eq!(status.roots[0].files, 1);
 
-        let hits = client.search("main", 100).unwrap();
+        let hits = client.search("main", &[], 100).unwrap();
         // Merged ranking: exact "main" (dir, vol-b) before prefix "main.rs".
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].name, "main");
