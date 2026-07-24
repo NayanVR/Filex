@@ -62,3 +62,52 @@ jobs:
             libx11-xcb-dev libwayland-dev libvulkan-dev
       - name: Build the GPUI application
         run: cargo build --locked
+
+  # Build the Windows MSI (app + SCM service) and smoke-test that it
+  # installs, registers the filex-indexd service, and uninstalls cleanly.
+  msi:
+    name: MSI installer (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install WiX Toolset v3
+        run: choco install wixtoolset --no-progress -y
+      - name: Add WiX to PATH
+        shell: pwsh
+        run: |
+          $candle = Get-ChildItem "C:\Program Files (x86)\WiX Toolset*\bin\candle.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $candle) { throw "WiX candle.exe not found after install" }
+          Add-Content $env:GITHUB_PATH $candle.Directory.FullName
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+      - name: Build release binaries (app + service)
+        run: cargo build --release --locked
+      - name: Build the MSI
+        run: cargo wix --no-build -v
+      - name: Smoke test (install, verify service, uninstall)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Get-ChildItem target\wix\*.msi | Select-Object -First 1
+          if (-not $msi) { throw "no MSI was produced" }
+          Write-Host "Installing $($msi.FullName)"
+          $p = Start-Process msiexec -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart /l*v install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60; throw "install failed (exit $($p.ExitCode))" }
+          if (-not (Test-Path "C:\Program Files\Filex\filex-indexd.exe")) { throw "filex-indexd.exe not installed" }
+          sc.exe query filex-indexd | Write-Host
+          if ($LASTEXITCODE -ne 0) { throw "filex-indexd service not registered after install" }
+          Write-Host "Uninstalling"
+          $p = Start-Process msiexec -ArgumentList "/x `"$($msi.FullName)`" /quiet /norestart /l*v uninstall.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content uninstall.log -Tail 60; throw "uninstall failed (exit $($p.ExitCode))" }
+          sc.exe query filex-indexd 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw "filex-indexd service still present after uninstall" }
+          Write-Host "MSI smoke test passed"
+      - name: Upload MSI artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: filex-msi
+          path: target/wix/*.msi
+          if-no-files-found: ignore

@@ -231,7 +231,17 @@ Sequence matters here:
    ServiceInstall/ServiceControl tables — the one-time-admin-consent
    moment that gives standard users the USN fast path forever. CI's
    Windows runner can build and smoke-test the MSI (install, query
-   service, uninstall).
+   service, uninstall). **Authored (`wix/main.wxs`) + CI-validated.** The
+   MSI installs `filex.exe` + `filex-indexd.exe` under `Program Files`,
+   registers `filex-indexd` (auto-start, LocalSystem) via ServiceInstall,
+   and Stop+Removes it on uninstall (ServiceControl). The `msi` CI job
+   (windows-latest) installs WiX 3, builds via `cargo wix`, and
+   smoke-tests install → `sc query filex-indexd` → uninstall.
+   Not built/run locally (WiX + Windows only) — validated in CI.
+   Deliberately **not** started by the installer yet: bootstrap walks a
+   whole volume synchronously and a stop is only observed once serving
+   begins, so start-on-install waits on making bootstrap interruptible
+   (a known follow-up).
 3. **Code signing** (Azure Trusted Signing) to pass SmartScreen, then a
    **winget** manifest. Auto-update (Velopack) later, when there are
    external users.

@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  Filex MSI (docs/roadmap.md Phase 2b step 2). Installs the app
+  (filex.exe) and registers the elevated index service (filex-indexd.exe)
+  as an SCM service, so a single admin-consented install gives standard
+  users the USN fast path. Built by cargo-wix (WiX v3): `cargo wix`.
+
+  cargo-wix supplies the preprocessor variables used below: `Version`
+  (from Cargo.toml) and `CargoTargetBinDir` (the built-binary directory).
+  Targets x64 (the only Windows CI/runner arch today).
+
+  The service is registered with auto-start (starts on next boot) but is
+  deliberately NOT started by the installer: bootstrap walks a whole
+  volume synchronously, which would stall the install and — because a
+  stop is only observed once serving begins — a same-session uninstall.
+  Start-on-install can come once bootstrap is made interruptible.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+      Id="*"
+      Name="Filex"
+      UpgradeCode="6F3A2E10-9C4B-4D8E-B1F2-7A5C9E0D3B84"
+      Manufacturer="Filex Project"
+      Language="1033"
+      Codepage="1252"
+      Version="$(var.Version)">
+
+    <Package
+        Id="*"
+        Keywords="Installer"
+        Description="Filex — fast file explorer and index service"
+        Manufacturer="Filex Project"
+        InstallerVersion="500"
+        Languages="1033"
+        Compressed="yes"
+        InstallScope="perMachine"
+        SummaryCodepage="1252" />
+
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        DowngradeErrorMessage="A newer version of Filex is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Filex">
+
+          <Component Id="FilexApp" Guid="*" Win64="yes">
+            <File
+                Id="FilexExe"
+                Name="filex.exe"
+                Source="$(var.CargoTargetBinDir)\filex.exe"
+                KeyPath="yes" />
+          </Component>
+
+          <Component Id="FilexIndexd" Guid="*" Win64="yes">
+            <File
+                Id="FilexIndexdExe"
+                Name="filex-indexd.exe"
+                Source="$(var.CargoTargetBinDir)\filex-indexd.exe"
+                KeyPath="yes" />
+            <!-- Register the elevated index service. `Name` must match
+                 SERVICE_NAME in src/bin/filex-indexd.rs. The service binary
+                 is this component's keypath file. -->
+            <ServiceInstall
+                Id="FilexIndexdService"
+                Name="filex-indexd"
+                DisplayName="Filex Index Service"
+                Description="Maintains the Filex file index and serves search over a named pipe."
+                Type="ownProcess"
+                Start="auto"
+                ErrorControl="normal"
+                Account="LocalSystem"
+                Arguments="C:\"
+                Vital="yes" />
+            <!-- Stop (if running) on upgrade/uninstall, and remove the
+                 registration on uninstall. Not started by the installer
+                 (see the file header). -->
+            <ServiceControl
+                Id="FilexIndexdControl"
+                Name="filex-indexd"
+                Stop="both"
+                Remove="uninstall"
+                Wait="yes" />
+          </Component>
+
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="Filex" Level="1">
+      <ComponentRef Id="FilexApp" />
+      <ComponentRef Id="FilexIndexd" />
+    </Feature>
+
+  </Product>
+</Wix>
