@@ -363,8 +363,17 @@ the path unless a filter token is present (same stance as `tag:`).
    post-filter is removed. Not cross-compiled locally (a C dep's build
    script blocks the Windows target on macOS); the edits are mechanical
    signature changes over the macOS-checked IPC types.
-6. Chip UI: v1a tokens-as-text (with step 1), then v1b removable chips in
-   `ui::search_input`.
+6. Chip UI (done). v1a (tokens-as-text) shipped with phase 1. v1b: a
+   removable-chip strip under the top bar — one pill per recognized token
+   (`tag:` pills carry the tag color dot), the whole pill removing that
+   token via `search_filter::without_token`. Pure `filter_tokens` /
+   `without_token` are unit-tested; `ui::top_bar` gained `filter_chip` +
+   `filter_chip_strip`. This is the "derived strip" form: tokens remain in
+   the field and mirror as chips below it. True in-field embedding
+   (tokens replaced by pills inside the text box) is a noted future
+   enhancement, not v1.
+
+**Block 8 item 2 (Search filter chips) is complete** across all phases.
 
 ## Confirmed decisions (2026-07-23)
 

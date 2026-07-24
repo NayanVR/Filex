@@ -1264,6 +1264,55 @@ impl Workspace {
         });
     }
 
+    /// Remove one recognized filter token from the query (clicking its
+    /// chip) by rewriting the search input's text.
+    fn remove_filter_token(&mut self, token: &str, cx: &mut Context<Self>) {
+        let rewritten = filex::search_filter::without_token(&self.query, token);
+        self.search_input.update(cx, |input, cx| input.set_text(rewritten, cx));
+    }
+
+    /// The removable filter chips shown under the top bar — one pill per
+    /// recognized `key:value` token in the query (`tag:` pills carry the
+    /// tag's color dot). `None` when the query has no filter tokens.
+    fn render_filter_chips(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.query.is_empty() {
+            return None;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let tokens = filex::search_filter::filter_tokens(&self.query, now);
+        if tokens.is_empty() {
+            return None;
+        }
+        let theme = *cx.theme();
+        let mut strip = ui::top_bar::filter_chip_strip(&theme);
+        for (i, (token, filter)) in tokens.into_iter().enumerate() {
+            // `tag:` pills show the tag name with its color dot; the rest
+            // show the raw token (`kind:image`, `size:>2mb`, …).
+            let (label, dot) = match &filter {
+                Filter::Tag(name) => {
+                    let color = self
+                        .sidebar_tags
+                        .iter()
+                        .find(|t| t.name.eq_ignore_ascii_case(name))
+                        .and_then(|t| t.color);
+                    (name.clone(), Some(ui::details::tag_dot_color(&theme, color)))
+                }
+                _ => (token.clone(), None),
+            };
+            strip = strip.child(
+                ui::top_bar::filter_chip(&theme, ("filter-chip", i), label, dot).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.remove_filter_token(&token, cx);
+                    }),
+                ),
+            );
+        }
+        Some(strip.into_any_element())
+    }
+
     fn clear_search(&mut self, cx: &mut Context<Self>) {
         // The input owns the text; its Changed event clears our mirror
         // and re-runs the (now empty) search.
@@ -3665,6 +3714,7 @@ impl Render for Workspace {
             .text_color(theme.text)
             .child(self.render_top_bar(cx))
             .children(self.render_tab_bar(cx))
+            .children(self.render_filter_chips(cx))
             .child(
                 div()
                     .flex()

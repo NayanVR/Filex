@@ -127,6 +127,28 @@ pub fn parse_query(raw: &str, now: i64) -> Query {
     Query { text: text_words.join(" "), filters }
 }
 
+/// The recognized filter tokens in `raw`, each as `(source word, filter)`,
+/// de-duplicated by filter (first spelling wins) — the data behind the
+/// removable search chips. `now` anchors relative dates, as in
+/// [`parse_query`].
+pub fn filter_tokens(raw: &str, now: i64) -> Vec<(String, Filter)> {
+    let mut out: Vec<(String, Filter)> = Vec::new();
+    for word in raw.split_whitespace() {
+        if let Some(filter) = parse_token(word, now)
+            && !out.iter().any(|(_, f)| f == &filter)
+        {
+            out.push((word.to_string(), filter));
+        }
+    }
+    out
+}
+
+/// `raw` with every whitespace token equal to `token` removed — the effect
+/// of removing one search chip. Collapses the surrounding whitespace.
+pub fn without_token(raw: &str, token: &str) -> String {
+    raw.split_whitespace().filter(|w| *w != token).collect::<Vec<_>>().join(" ")
+}
+
 /// Try to read one word as a `key:value` filter. `None` means "treat it as
 /// filename text" — an unknown key, a missing value, or a value the key
 /// can't parse.
@@ -431,6 +453,27 @@ mod tests {
         let f = Filter::Modified(parse_time_bound("week", now).unwrap());
         assert!(f.matches(&recent));
         assert!(!f.matches(&old));
+    }
+
+    #[test]
+    fn filter_tokens_and_removal_for_chips() {
+        let raw = "report kind:image size:>2mb tag:Work tag:work junk:x";
+        let tokens = filter_tokens(raw, 0);
+        // Recognized tokens only, deduped by filter (first spelling wins);
+        // "report" and "junk:x" are plain text, not chips.
+        assert_eq!(
+            tokens,
+            vec![
+                ("kind:image".to_string(), Filter::Kind(FileKind::Image)),
+                ("size:>2mb".to_string(), Filter::Size(Bound::Gt(2 << 20))),
+                ("tag:Work".to_string(), Filter::Tag("work".into())),
+            ]
+        );
+        // Removing a chip drops that token (all case-exact occurrences).
+        assert_eq!(
+            without_token(raw, "kind:image"),
+            "report size:>2mb tag:Work tag:work junk:x"
+        );
     }
 
     #[test]

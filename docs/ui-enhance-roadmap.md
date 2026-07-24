@@ -271,9 +271,14 @@ is left instant for now (the chevron swaps state).
   (Windows) **done** — the service backfills size/mtime the same way
   (via `start_live_index`), and the IPC search frame now carries the
   filters (JSON blob, protocol v2) so `size:`/`modified:` apply
-  service-side. Only phase 6 remains — the removable **chip UI** (v1b);
-  tokens-as-text already filter, so the whole grammar is usable now on
-  all platforms.
+  service-side. Phase 6 (removable **chip UI**, v1b) **done** — a chip
+  strip under the top bar, one removable pill per recognized token
+  (`tag:` pills carry the color dot). **Search filter chips complete**,
+  which closes out **Block 8 (metadata tier) — and this roadmap** end to
+  end. Future polish noted in the design docs (true in-field chip
+  embedding, `getattrlistbulk`/`statx` backfill batching, multi-word tag
+  quoting, upsert batch-coalescing) and a real Windows build of the
+  phase-5 IPC changes remain.
 
 ## Explicitly out of scope
 

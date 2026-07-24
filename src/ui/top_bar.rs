@@ -91,6 +91,50 @@ pub fn breadcrumb_ellipsis(theme: &Theme) -> Div {
 
 /// The search box frame: a magnifier, then the input the caller adds.
 /// The border lights up while a query is active.
+/// The removable-search-chip strip, shown under the top bar while a query
+/// has recognized `key:value` filters. A wrapping row of pills.
+pub fn filter_chip_strip(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .px_3()
+        .py_1()
+        .bg(theme.panel)
+        .border_b_1()
+        .border_color(theme.border)
+}
+
+/// One removable filter pill: an optional color dot (for `tag:`), the
+/// label, and a ✕. The whole pill is the click target — callers chain
+/// `.on_click` to remove the filter.
+pub fn filter_chip(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    dot: Option<Rgba>,
+) -> Stateful<Div> {
+    let selected = theme.selected;
+    let mut chip = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .bg(theme.hover)
+        .cursor_pointer()
+        .text_xs()
+        .text_color(theme.text)
+        .hover(move |s| s.bg(selected));
+    if let Some(dot) = dot {
+        chip = chip.child(div().flex_none().size(px(7.)).rounded_full().bg(dot));
+    }
+    chip.child(label.into()).child(div().text_color(theme.text_dim).child("✕"))
+}
+
 pub fn search_box(theme: &Theme, active: bool) -> Div {
     div()
         .flex()
