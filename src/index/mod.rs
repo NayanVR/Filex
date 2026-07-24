@@ -320,7 +320,14 @@ impl VolumeIndex {
     /// backfill and the live watchers; a no-op for an unknown id.
     pub fn set_meta(&mut self, id: EntryId, size: u64, mtime: i64) {
         if let Some(entry) = self.entries.get_mut(id.0 as usize) {
-            entry.size = if entry.is_dir() { 0 } else { size };
+            let size = if entry.is_dir() { 0 } else { size };
+            // Skip when nothing changes, so a redundant refresh (a repeat
+            // create/modify event for an unchanged file) is a true no-op —
+            // no generation bump, no needless re-save.
+            if entry.has_meta() && entry.size == size && entry.mtime == mtime {
+                return;
+            }
+            entry.size = size;
             entry.mtime = mtime;
             entry.flags |= FLAG_HAS_META;
             self.generation += 1;

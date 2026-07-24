@@ -339,8 +339,17 @@ the path unless a filter token is present (same stance as `tag:`).
    `size:`/`modified:` alive: they converge over the first seconds of a
    fresh index. `getattrlistbulk`/`statx` batching remain later
    optimizations of this pass.
-3. Live freshness: modify→`Upsert`→re-stat across the three watchers,
-   with debounce coalescing; behavioral suite.
+3. Live freshness (done). modify→`Upsert`→re-stat across all watchers:
+   the writer's `upsert`/`native_upsert` handlers now `populate_meta`
+   (stat + `set_meta`) for freshly-created *and* modified files instead of
+   early-returning; `set_meta` is a no-op when nothing changed. Watchers
+   emit the signal: macOS `ItemModified`/`ItemInodeMetaMod`→Upsert
+   (xattr-only still ignored, so tag writes don't reindex); Linux inotify
+   & fanotify add `CLOSE_WRITE`+`ATTRIB` (low-noise vs per-write MODIFY);
+   Windows USN adds the data-change reasons (`DATA_*`/`BASIC_INFO_CHANGE`)
+   → NativeUpsert. Fixture-tested per platform; macOS live-tested. Batch
+   coalescing of repeated same-path upserts is a noted future
+   optimization (CLOSE_WRITE/sticky-USN keep the event rate low).
 5. Windows: the backfill's USN-forward + on-demand population + IPC filter
    plumbing + protocol bump.
 6. Chip UI: v1a tokens-as-text (with step 1), then v1b removable chips in

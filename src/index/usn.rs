@@ -24,18 +24,31 @@ use super::watcher::FsDelta;
 use super::{MAX_PATH_DEPTH, VolumeIndex};
 
 // Reason flags from winioctl.h (stable ABI).
+pub const USN_REASON_DATA_OVERWRITE: u32 = 0x0000_0001;
+pub const USN_REASON_DATA_EXTEND: u32 = 0x0000_0002;
+pub const USN_REASON_DATA_TRUNCATION: u32 = 0x0000_0004;
 pub const USN_REASON_FILE_CREATE: u32 = 0x0000_0100;
 pub const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
 pub const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
 pub const USN_REASON_RENAME_NEW_NAME: u32 = 0x0000_2000;
+pub const USN_REASON_BASIC_INFO_CHANGE: u32 = 0x0000_8000;
 
-/// The reason mask the journal watcher subscribes to: only name-affecting
-/// changes. (OLD_NAME is requested so sticky-flag records still match, but
-/// mapping acts on the NEW_NAME record.)
+/// Data-change reasons: a file's contents or basic info (size/timestamps)
+/// changed in place — the Windows freshness signal for `size:`/`modified:`.
+pub const USN_REASON_DATA_CHANGE: u32 = USN_REASON_DATA_OVERWRITE
+    | USN_REASON_DATA_EXTEND
+    | USN_REASON_DATA_TRUNCATION
+    | USN_REASON_BASIC_INFO_CHANGE;
+
+/// The reason mask the journal watcher subscribes to: name-affecting
+/// changes plus in-place data/metadata changes (the latter re-stat the
+/// entry for size/mtime freshness). (OLD_NAME is requested so sticky-flag
+/// records still match, but mapping acts on the NEW_NAME record.)
 pub const JOURNAL_REASON_MASK: u32 = USN_REASON_FILE_CREATE
     | USN_REASON_FILE_DELETE
     | USN_REASON_RENAME_OLD_NAME
-    | USN_REASON_RENAME_NEW_NAME;
+    | USN_REASON_RENAME_NEW_NAME
+    | USN_REASON_DATA_CHANGE;
 
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
 
@@ -192,14 +205,17 @@ pub fn build_index_from_mft(
 
 /// Translate one USN journal record into a normalized delta.
 /// Reason flags are sticky, so precedence encodes the *final* state:
-/// DELETE wins over everything; CREATE/RENAME_NEW upsert at the record's
-/// (parent FRN, name); RENAME_OLD alone is ignored (NEW carries the
-/// destination, and cross-volume moves surface as DELETE).
+/// DELETE wins over everything; CREATE/RENAME_NEW/data-change upsert at the
+/// record's (parent FRN, name) — a data-change re-points to the same name,
+/// and the writer re-stats it for size/mtime; RENAME_OLD alone is ignored
+/// (NEW carries the destination, and cross-volume moves surface as DELETE).
 pub fn journal_record_to_delta(record: &UsnRecord) -> Option<FsDelta> {
     if record.reason & USN_REASON_FILE_DELETE != 0 {
         return Some(FsDelta::NativeRemove { key: record.frn });
     }
-    if record.reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME) != 0 {
+    const UPSERT_REASONS: u32 =
+        USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME | USN_REASON_DATA_CHANGE;
+    if record.reason & UPSERT_REASONS != 0 {
         return Some(FsDelta::NativeUpsert {
             key: record.frn,
             parent_key: record.parent_frn,
@@ -386,11 +402,36 @@ mod tests {
     }
 
     #[test]
-    fn journal_rename_old_and_metadata_records_map_to_nothing() {
+    fn journal_data_change_upserts_for_freshness() {
+        // In-place content/size/timestamp changes re-point the entry to its
+        // own name so the writer re-stats it (size:/modified: freshness).
+        for reason in [
+            USN_REASON_DATA_EXTEND,
+            USN_REASON_DATA_TRUNCATION,
+            USN_REASON_DATA_OVERWRITE,
+            USN_REASON_BASIC_INFO_CHANGE,
+            // A close record accumulates the sticky data-change flag.
+            USN_REASON_DATA_EXTEND | 0x8000_0000,
+        ] {
+            assert_eq!(
+                journal_record_to_delta(&record(10, 20, reason, 0, "edited.txt")),
+                Some(FsDelta::NativeUpsert {
+                    key: 10,
+                    parent_key: 20,
+                    name: "edited.txt".into(),
+                    is_dir: false,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn journal_rename_old_and_bare_close_map_to_nothing() {
         assert_eq!(
             journal_record_to_delta(&record(10, 20, USN_REASON_RENAME_OLD_NAME, 0, "old")),
             None
         );
+        // A bare CLOSE with no data/name reason is nothing to do.
         assert_eq!(journal_record_to_delta(&record(10, 20, 0x8000_0000, 0, "closed")), None);
     }
 }

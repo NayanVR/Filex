@@ -210,11 +210,19 @@ fn map_event(
     if flags & fse::kFSEventStreamEventFlagMustScanSubDirs != 0 {
         return Some(FsDelta::Rescan { path });
     }
-    const NAME_CHANGING: fse::FSEventStreamEventFlags = fse::kFSEventStreamEventFlagItemCreated
+    // Name changes and content/metadata changes both matter now: the
+    // former keep the name index correct, the latter refresh size/mtime
+    // for `size:`/`modified:` (an in-place edit sets ItemModified /
+    // ItemInodeMetaMod without any name change). Both resolve through the
+    // filesystem-presence check below — a modify on a live file is an
+    // Upsert (re-stat), on a vanished one a Remove.
+    const CHANGING: fse::FSEventStreamEventFlags = fse::kFSEventStreamEventFlagItemCreated
         | fse::kFSEventStreamEventFlagItemRemoved
-        | fse::kFSEventStreamEventFlagItemRenamed;
-    if flags & NAME_CHANGING == 0 {
-        return None; // content/metadata chatter; names are unaffected
+        | fse::kFSEventStreamEventFlagItemRenamed
+        | fse::kFSEventStreamEventFlagItemModified
+        | fse::kFSEventStreamEventFlagItemInodeMetaMod;
+    if flags & CHANGING == 0 {
+        return None; // unrelated flags (permissions, xattr, …)
     }
     match presence {
         Some(is_dir) => Some(FsDelta::Upsert { path, is_dir }),
@@ -299,13 +307,27 @@ mod tests {
     }
 
     #[test]
-    fn map_event_ignores_content_only_changes() {
+    fn map_event_upserts_content_only_changes_for_freshness() {
+        // A pure content/metadata modify on a live file now yields an
+        // Upsert so the writer re-stats size/mtime (freshness path).
+        for flags in [
+            fse::kFSEventStreamEventFlagItemModified,
+            fse::kFSEventStreamEventFlagItemInodeMetaMod,
+        ] {
+            assert_eq!(
+                map_event(PathBuf::from("/x"), flags, Some(false)),
+                Some(FsDelta::Upsert { path: PathBuf::from("/x"), is_dir: false })
+            );
+        }
+        // A modify whose file has since vanished is still a Remove.
         assert_eq!(
-            map_event(
-                PathBuf::from("/x"),
-                fse::kFSEventStreamEventFlagItemModified,
-                Some(false),
-            ),
+            map_event(PathBuf::from("/x"), fse::kFSEventStreamEventFlagItemModified, None),
+            Some(FsDelta::Remove { path: PathBuf::from("/x") })
+        );
+        // Unrelated flags (e.g. xattr-only) are still ignored — no spurious
+        // reindex when tags write the Finder xattr.
+        assert_eq!(
+            map_event(PathBuf::from("/x"), fse::kFSEventStreamEventFlagItemXattrMod, Some(false)),
             None
         );
     }

@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 use super::watcher::FsDelta;
 
 // Event mask bits from linux/inotify.h (stable kernel ABI).
+pub const IN_ATTRIB: u32 = 0x0000_0004;
+pub const IN_CLOSE_WRITE: u32 = 0x0000_0008;
 pub const IN_MOVED_FROM: u32 = 0x0000_0040;
 pub const IN_MOVED_TO: u32 = 0x0000_0080;
 pub const IN_CREATE: u32 = 0x0000_0100;
@@ -44,11 +46,17 @@ pub const IN_ONLYDIR: u32 = 0x0100_0000;
 pub const IN_EXCL_UNLINK: u32 = 0x0400_0000;
 pub const IN_ISDIR: u32 = 0x4000_0000;
 
-/// The mask we register on every directory: name-changing events only.
+/// The mask we register on every directory: name-changing events, plus
+/// the low-noise freshness signals `IN_CLOSE_WRITE` (a written file was
+/// closed — size/mtime are final, far quieter than per-write `IN_MODIFY`)
+/// and `IN_ATTRIB` (touch/chmod → mtime), so `size:`/`modified:` stay
+/// current after in-place edits.
 pub const WATCH_MASK: u32 = IN_CREATE
     | IN_DELETE
     | IN_MOVED_FROM
     | IN_MOVED_TO
+    | IN_CLOSE_WRITE
+    | IN_ATTRIB
     | IN_DELETE_SELF
     | IN_MOVE_SELF
     | IN_ONLYDIR
@@ -191,7 +199,9 @@ pub fn event_to_delta(root: &Path, dir: Option<&Path>, event: &InotifyEvent) -> 
     let path = dir.join(name);
     let is_dir = event.mask & IN_ISDIR != 0;
 
-    if event.mask & (IN_CREATE | IN_MOVED_TO) != 0 {
+    if event.mask & (IN_CREATE | IN_MOVED_TO | IN_CLOSE_WRITE | IN_ATTRIB) != 0 {
+        // Create/move-in keep the name index correct; close-write/attrib
+        // refresh size/mtime (the writer re-stats on Upsert).
         Some(FsDelta::Upsert { path, is_dir })
     } else if event.mask & (IN_DELETE | IN_MOVED_FROM) != 0 {
         Some(FsDelta::Remove { path })
@@ -222,6 +232,8 @@ pub fn watch_budget(max_user_watches: Option<&str>) -> usize {
 
 // Event mask bits from linux/fanotify.h (stable kernel ABI). The dirent
 // bits share values with inotify's, but keep them distinct for clarity.
+pub const FAN_ATTRIB: u64 = 0x0000_0004;
+pub const FAN_CLOSE_WRITE: u64 = 0x0000_0008;
 pub const FAN_MOVED_FROM: u64 = 0x0000_0040;
 pub const FAN_MOVED_TO: u64 = 0x0000_0080;
 pub const FAN_CREATE: u64 = 0x0000_0100;
@@ -229,10 +241,16 @@ pub const FAN_DELETE: u64 = 0x0000_0200;
 pub const FAN_Q_OVERFLOW: u64 = 0x0000_4000;
 pub const FAN_ONDIR: u64 = 0x4000_0000;
 
-/// The mask we mark the filesystem with: name-changing events only,
-/// including those on directories.
-pub const FANOTIFY_MASK: u64 =
-    FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO | FAN_ONDIR;
+/// The mask we mark the filesystem with: name-changing events (including
+/// on directories) plus the freshness signals `FAN_CLOSE_WRITE` and
+/// `FAN_ATTRIB`, mirroring the inotify [`WATCH_MASK`].
+pub const FANOTIFY_MASK: u64 = FAN_CREATE
+    | FAN_DELETE
+    | FAN_MOVED_FROM
+    | FAN_MOVED_TO
+    | FAN_CLOSE_WRITE
+    | FAN_ATTRIB
+    | FAN_ONDIR;
 
 /// Info-record type carrying (directory file handle, entry name).
 pub const FAN_EVENT_INFO_TYPE_DFID_NAME: u8 = 2;
@@ -337,7 +355,9 @@ pub fn fanotify_event_to_delta(
     let is_dir = event.mask & FAN_ONDIR != 0;
     if event.mask & (FAN_DELETE | FAN_MOVED_FROM) != 0 {
         Some(FsDelta::Remove { path })
-    } else if event.mask & (FAN_CREATE | FAN_MOVED_TO) != 0 {
+    } else if event.mask & (FAN_CREATE | FAN_MOVED_TO | FAN_CLOSE_WRITE | FAN_ATTRIB) != 0 {
+        // Create/move-in keep the name index correct; close-write/attrib
+        // refresh size/mtime (the writer re-stats on Upsert).
         Some(FsDelta::Upsert { path, is_dir })
     } else {
         None
@@ -875,6 +895,22 @@ mod tests {
     }
 
     #[test]
+    fn maps_close_write_and_attrib_as_upserts_for_freshness() {
+        let root = Path::new("/root");
+        let dir = Path::new("/root/sub");
+        // A written-and-closed file → Upsert (writer re-stats size/mtime).
+        assert_eq!(
+            event_to_delta(root, Some(dir), &event(1, IN_CLOSE_WRITE, b"a.txt")),
+            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+        );
+        // touch/chmod → Upsert (mtime).
+        assert_eq!(
+            event_to_delta(root, Some(dir), &event(1, IN_ATTRIB, b"a.txt")),
+            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+        );
+    }
+
+    #[test]
     fn maps_delete_and_moved_from_as_removes() {
         let root = Path::new("/root");
         let dir = Path::new("/root/sub");
@@ -1016,6 +1052,15 @@ mod tests {
         assert_eq!(
             fanotify_event_to_delta(root, Some(dir), &event(FAN_MOVED_FROM, b"x")),
             Some(FsDelta::Remove { path: dir.join("x") })
+        );
+        // Close-write / attrib refresh size/mtime (Upsert → re-stat).
+        assert_eq!(
+            fanotify_event_to_delta(root, Some(dir), &event(FAN_CLOSE_WRITE, b"a.txt")),
+            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+        );
+        assert_eq!(
+            fanotify_event_to_delta(root, Some(dir), &event(FAN_ATTRIB, b"a.txt")),
+            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
         );
         // Merged create+delete: removal wins (final state).
         assert_eq!(

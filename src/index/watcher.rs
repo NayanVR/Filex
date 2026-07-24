@@ -90,16 +90,32 @@ fn native_upsert(
         (Some(id), None) => index.remove(id),
         // Rename/move within the subtree: re-point the entry; children
         // follow via parent links. A type flip means the FRN was recycled
-        // mid-window — rebuild the entry instead.
+        // mid-window — rebuild the entry instead. Either way, refresh
+        // size/mtime (a USN data-change reason also arrives as a
+        // NativeUpsert — the freshness path on Windows).
         (Some(id), Some(parent)) => {
             if index.is_dir(id) == Some(is_dir) {
-                index.rename(id, parent, name)
+                index.rename(id, parent, name)?;
+                if !is_dir {
+                    populate_meta_by_id(index, id);
+                }
+                Ok(())
             } else {
                 index.remove(id)?;
-                index.insert_with_key(parent, name, is_dir, key).map(|_| ())
+                let new_id = index.insert_with_key(parent, name, is_dir, key)?;
+                if !is_dir {
+                    populate_meta_by_id(index, new_id);
+                }
+                Ok(())
             }
         }
-        (None, Some(parent)) => index.insert_with_key(parent, name, is_dir, key).map(|_| ()),
+        (None, Some(parent)) => {
+            let id = index.insert_with_key(parent, name, is_dir, key)?;
+            if !is_dir {
+                populate_meta_by_id(index, id);
+            }
+            Ok(())
+        }
         // Entirely outside the indexed subtree.
         (None, None) => Ok(()),
     }
@@ -123,7 +139,12 @@ fn upsert(index: &mut VolumeIndex, path: &Path, is_dir: bool) -> Result<()> {
 
     if let Some(existing) = index.resolve_child(parent, name) {
         if index.is_dir(existing) == Some(is_dir) && !is_dir {
-            return Ok(()); // file already known; content changes don't affect names
+            // File already known. The name is unchanged, but a modify event
+            // brings us here to refresh size/mtime (the freshness path for
+            // `size:`/`modified:` — an in-place edit changes neither name
+            // nor existence, so this is the only signal).
+            populate_meta(index, existing, path);
+            return Ok(());
         }
         // Directory upsert (contents may have changed wholesale, e.g. a move
         // into the tree) or a file/dir type flip: drop the stale subtree and
@@ -134,8 +155,29 @@ fn upsert(index: &mut VolumeIndex, path: &Path, is_dir: bool) -> Result<()> {
     let id = index.insert(parent, name, is_dir)?;
     if is_dir {
         index_subtree(index, id, path, false)?;
+    } else {
+        // A freshly-created file gets its metadata now rather than waiting
+        // for the background backfill.
+        populate_meta(index, id, path);
     }
     Ok(())
+}
+
+/// Stat `path` and record the entry's size/mtime (best-effort — a
+/// vanished/unreadable file is simply left as-is). Runs on the writer
+/// thread; one syscall per upserted file.
+fn populate_meta(index: &mut VolumeIndex, id: EntryId, path: &Path) {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        index.set_meta(id, meta.len(), super::mtime_secs(&meta));
+    }
+}
+
+/// [`populate_meta`] for a native-key delta, which knows the entry but not
+/// its path — reconstruct the path from the index and stat it.
+fn populate_meta_by_id(index: &mut VolumeIndex, id: EntryId) {
+    if let Some(path) = index.path_of(id) {
+        populate_meta(index, id, &path);
+    }
 }
 
 fn remove(index: &mut VolumeIndex, path: &Path) -> Result<()> {
@@ -368,12 +410,35 @@ mod tests {
     }
 
     #[test]
-    fn upsert_is_idempotent_for_known_files() {
+    fn upsert_refreshes_size_of_a_known_file() {
+        use crate::search_filter::{Bound, Filter};
         let (_dir, mut index) = indexed_tempdir();
         let path = root(&index).join("existing/old.txt");
-        let generation = index.generation();
+        // Seed a small size, then grow the file and deliver a modify as an
+        // Upsert — the freshness path must re-stat it.
+        let id = index.resolve(Path::new("existing/old.txt")).unwrap();
+        index.set_meta(id, 1, 1);
+        assert!(index.search_filtered("", &[Filter::Size(Bound::Ge(500))], 10).is_empty());
+
+        fs::write(&path, vec![0u8; 500]).unwrap();
         apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
 
+        let hits = index.search_filtered("", &[Filter::Size(Bound::Ge(500))], 10);
+        assert_eq!(
+            hits.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            vec!["old.txt"]
+        );
+    }
+
+    #[test]
+    fn upsert_is_idempotent_once_meta_is_populated() {
+        let (_dir, mut index) = indexed_tempdir();
+        let path = root(&index).join("existing/old.txt");
+        // First upsert populates size/mtime (generation moves once).
+        apply(&mut index, &FsDelta::Upsert { path: path.clone(), is_dir: false }).unwrap();
+        let generation = index.generation();
+        // A repeat upsert of the unchanged file is a true no-op.
+        apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
         assert_eq!(index.generation(), generation); // untouched
         assert_eq!(index.search("old.txt", 10).len(), 1);
     }
