@@ -82,6 +82,9 @@ jobs:
           Add-Content $env:GITHUB_PATH $candle.Directory.FullName
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
+        # Don't apply our `-D warnings` to a third-party tool's own build.
+        env:
+          RUSTFLAGS: ""
       - name: Build release binaries (app + service)
         run: cargo build --release --locked
       - name: Build the MSI
