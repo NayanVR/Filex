@@ -93,6 +93,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # We check native exit codes manually (sc.exe is *expected* to
+          # exit non-zero once the service is gone), so don't let non-zero
+          # native exits throw on PowerShell 7.4+.
+          $PSNativeCommandUseErrorActionPreference = $false
           $msi = Get-ChildItem target\wix\*.msi | Select-Object -First 1
           if (-not $msi) { throw "no MSI was produced" }
           Write-Host "Installing $($msi.FullName)"
@@ -107,6 +111,8 @@ jobs:
           sc.exe query filex-indexd 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { throw "filex-indexd service still present after uninstall" }
           Write-Host "MSI smoke test passed"
+          # Don't leak the last (intentionally non-zero) native exit code.
+          exit 0
       - name: Upload MSI artifact
         if: always()
         uses: actions/upload-artifact@v4
