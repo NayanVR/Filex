@@ -931,8 +931,20 @@ pub fn start_live_index(
     root: &Path,
     on_change: impl Fn() + Send + 'static,
 ) -> Result<LiveIndex> {
+    start_live_index_cancellable(root, on_change, None)
+}
+
+/// [`start_live_index`] whose (walk) bootstrap can be cancelled by setting
+/// `cancel` — a service shutdown abandons a long initial index promptly
+/// instead of blocking the stop until the walk finishes. A snapshot-load
+/// or USN-fast-path start has no long walk to cancel.
+pub fn start_live_index_cancellable(
+    root: &Path,
+    on_change: impl Fn() + Send + 'static,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<LiveIndex> {
     let snapshot_path = persist::default_snapshot_path(root);
-    start_live_index_with_snapshot(root, snapshot_path, on_change)
+    start_live_index_inner(root, snapshot_path, on_change, cancel)
 }
 
 /// Bootstrap an index for `root` and attach the platform's live watcher
@@ -957,6 +969,15 @@ pub fn start_live_index_with_snapshot(
     snapshot_path: Option<PathBuf>,
     on_change: impl Fn() + Send + 'static,
 ) -> Result<LiveIndex> {
+    start_live_index_inner(root, snapshot_path, on_change, None)
+}
+
+fn start_live_index_inner(
+    root: &Path,
+    snapshot_path: Option<PathBuf>,
+    on_change: impl Fn() + Send + 'static,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<LiveIndex> {
     // Watchers report canonical paths; watch the same form we index.
     let canonical = root.canonicalize()?;
     let loaded = snapshot_path.as_ref().and_then(|path| {
@@ -971,7 +992,7 @@ pub fn start_live_index_with_snapshot(
             }
         }
     });
-    platform_start(canonical, snapshot_path, loaded, on_change)
+    platform_start(canonical, snapshot_path, loaded, on_change, cancel)
 }
 
 /// Assemble the writer/persistence tail shared by every platform start.
@@ -1044,6 +1065,7 @@ fn platform_start(
     snapshot_path: Option<PathBuf>,
     loaded: Option<persist::Snapshot>,
     on_change: impl Fn() + Send + 'static,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<LiveIndex> {
     let (delta_tx, delta_rx) = std::sync::mpsc::channel();
 
@@ -1077,7 +1099,8 @@ fn platform_start(
         Some(snapshot) => (snapshot.index, !replaying),
         None => {
             use walker::IndexSource as _;
-            (walker::FsWalkSource::default().bootstrap(&canonical)?, false)
+            let source = walker::FsWalkSource::default();
+            (source.bootstrap_cancellable(&canonical, cancel.as_deref())?, false)
         }
     };
 
@@ -1106,6 +1129,7 @@ fn platform_start(
     snapshot_path: Option<PathBuf>,
     loaded: Option<persist::Snapshot>,
     on_change: impl Fn() + Send + 'static,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<LiveIndex> {
     let (delta_tx, delta_rx) = std::sync::mpsc::channel();
     let mut loaded = loaded;
@@ -1208,7 +1232,8 @@ fn platform_start(
         Some(snapshot) => (snapshot.index, true),
         None => {
             use walker::IndexSource as _;
-            (walker::FsWalkSource::default().bootstrap(&canonical)?, false)
+            let source = walker::FsWalkSource::default();
+            (source.bootstrap_cancellable(&canonical, cancel.as_deref())?, false)
         }
     };
     let source = match &fs_watcher {

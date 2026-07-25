@@ -238,10 +238,13 @@ Sequence matters here:
    (windows-latest) installs WiX 3, builds via `cargo wix`, and
    smoke-tests install → `sc query filex-indexd` → uninstall.
    Not built/run locally (WiX + Windows only) — validated in CI.
-   Deliberately **not** started by the installer yet: bootstrap walks a
-   whole volume synchronously and a stop is only observed once serving
-   begins, so start-on-install waits on making bootstrap interruptible
-   (a known follow-up).
+   **Start-on-install is enabled**: the service reports RUNNING before it
+   bootstraps (so the install returns promptly), and its (walk) bootstrap
+   is now cancellable (`start_live_index_cancellable` /
+   `IndexSource::bootstrap_cancellable`, plus a between-roots check in
+   `filex-indexd`), so an uninstall-time stop no longer waits on the whole
+   initial index. USN-fast-path bootstrap is seconds, so its stop latency
+   is already small; the cancellation covers the slower walk fallback.
 3. **Code signing** (Azure Trusted Signing) to pass SmartScreen, then a
    **winget** manifest. Auto-update (Velopack) later, when there are
    external users.

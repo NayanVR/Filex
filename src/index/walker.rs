@@ -13,7 +13,18 @@ use super::{EntryId, ROOT, VolumeIndex};
 /// A source that can produce a fully-populated index for a root directory.
 /// Implementations must yield parent directories before their contents.
 pub trait IndexSource {
-    fn bootstrap(&self, root: &Path) -> Result<VolumeIndex>;
+    fn bootstrap(&self, root: &Path) -> Result<VolumeIndex> {
+        self.bootstrap_cancellable(root, None)
+    }
+
+    /// Like [`bootstrap`](Self::bootstrap), but abandons the walk (with an
+    /// error, so no partial index is used) once `cancel` is set — lets a
+    /// service shut down promptly mid-bootstrap. `None` never cancels.
+    fn bootstrap_cancellable(
+        &self,
+        root: &Path,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<VolumeIndex>;
 }
 
 /// Bootstrap by walking the filesystem with parallel directory reads
@@ -34,12 +45,21 @@ impl Default for FsWalkSource {
 impl IndexSource for FsWalkSource {
     /// Assumes only POSIX/Win32 directory semantics (readdir + file type);
     /// no OS-specific metadata structures are touched.
-    fn bootstrap(&self, root: &Path) -> Result<VolumeIndex> {
+    fn bootstrap_cancellable(
+        &self,
+        root: &Path,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<VolumeIndex> {
         let root = root
             .canonicalize()
             .with_context(|| format!("canonicalizing index root {}", root.display()))?;
         let mut index = VolumeIndex::new(&root);
-        index_subtree(&mut index, ROOT, &root, self.skip_hidden)?;
+        index_subtree(&mut index, ROOT, &root, self.skip_hidden, cancel)?;
+        // A cancelled walk leaves a partial index; discard it rather than
+        // persist an incomplete tree as if it were complete.
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            anyhow::bail!("bootstrap of {} was cancelled", root.display());
+        }
         Ok(index)
     }
 }
@@ -53,6 +73,7 @@ pub fn index_subtree(
     under: EntryId,
     path: &Path,
     skip_hidden: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     // Maps each *directory's* path to its entry, so children can find
     // their parent. jwalk yields a directory before its contents.
@@ -64,6 +85,11 @@ pub fn index_subtree(
         .follow_links(false);
 
     for dirent in walk {
+        // A whole-volume bootstrap can take a while; let a shutdown stop it
+        // promptly (the partial index is discarded by the caller).
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            break;
+        }
         let Ok(dirent) = dirent else {
             continue; // unreadable entry: skip, keep indexing
         };
@@ -120,6 +146,26 @@ mod tests {
             dir.path().canonicalize().unwrap().join("a/b/deep.txt")
         );
         assert!(index.is_dir(index.resolve(Path::new("a/b")).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn bootstrap_cancellable_aborts_when_flagged() {
+        use std::sync::atomic::AtomicBool;
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        fs::write(dir.path().join("a/b/deep.txt"), b"x").unwrap();
+
+        // A pre-set flag aborts the walk with an error (no partial index).
+        let err = FsWalkSource::default()
+            .bootstrap_cancellable(dir.path(), Some(&AtomicBool::new(true)))
+            .unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "{err}");
+
+        // A clear flag indexes normally, same as `bootstrap`.
+        let index = FsWalkSource::default()
+            .bootstrap_cancellable(dir.path(), Some(&AtomicBool::new(false)))
+            .unwrap();
+        assert_eq!(index.len(), 3); // a, a/b, deep.txt
     }
 
     #[test]

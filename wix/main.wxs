@@ -9,11 +9,11 @@
   (from Cargo.toml) and `CargoTargetBinDir` (the built-binary directory).
   Targets x64 (the only Windows CI/runner arch today).
 
-  The service is registered with auto-start (starts on next boot) but is
-  deliberately NOT started by the installer: bootstrap walks a whole
-  volume synchronously, which would stall the install and — because a
-  stop is only observed once serving begins — a same-session uninstall.
-  Start-on-install can come once bootstrap is made interruptible.
+  The service is registered auto-start AND started by the installer:
+  filex-indexd reports RUNNING before it bootstraps (so the install
+  returns promptly), and a stop is now observed between/after bootstrap
+  and during the walk (start_live_index_cancellable), so an
+  uninstall-time stop no longer waits on the whole initial index.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
@@ -74,12 +74,13 @@
                 Account="LocalSystem"
                 Arguments="C:\"
                 Vital="yes" />
-            <!-- Stop (if running) on upgrade/uninstall, and remove the
-                 registration on uninstall. Not started by the installer
-                 (see the file header). -->
+            <!-- Start on install; stop on upgrade/uninstall; remove the
+                 registration on uninstall. The service reports RUNNING
+                 before bootstrapping, so install returns promptly. -->
             <ServiceControl
                 Id="FilexIndexdControl"
                 Name="filex-indexd"
+                Start="install"
                 Stop="both"
                 Remove="uninstall"
                 Wait="yes" />

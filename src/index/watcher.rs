@@ -154,7 +154,7 @@ fn upsert(index: &mut VolumeIndex, path: &Path, is_dir: bool) -> Result<()> {
 
     let id = index.insert(parent, name, is_dir)?;
     if is_dir {
-        index_subtree(index, id, path, false)?;
+        index_subtree(index, id, path, false, None)?;
     } else {
         // A freshly-created file gets its metadata now rather than waiting
         // for the background backfill.
@@ -206,7 +206,7 @@ fn rescan(index: &mut VolumeIndex, path: &Path) -> Result<()> {
             for child in index.children_of(ROOT).collect::<Vec<_>>() {
                 index.remove(child)?;
             }
-            index_subtree(index, ROOT, path, false)
+            index_subtree(index, ROOT, path, false, None)
         }
         _ => upsert(index, path, true), // re-indexes the subtree
     }

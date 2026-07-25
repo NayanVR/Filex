@@ -37,7 +37,7 @@ mod service {
     use windows_service::{Error as ServiceError, define_windows_service, service_dispatcher};
 
     use filex::index::ipc::{IndexHost, MultiRootHost, PIPE_NAME};
-    use filex::index::{manager, start_live_index, windows};
+    use filex::index::{manager, start_live_index_cancellable, windows};
 
     /// The SCM service name; must match the MSI's ServiceInstall entry.
     const SERVICE_NAME: &str = "filex-indexd";
@@ -159,17 +159,28 @@ mod service {
             );
         }
 
+        let stopping = || shutdown.as_ref().is_some_and(|s| s.load(Ordering::Relaxed));
+
         let mut live_indexes = Vec::new();
         let mut host_roots = Vec::new();
         for root in roots {
+            if stopping() {
+                break; // asked to stop before bootstrapping the rest
+            }
             tracing::info!("indexing {}", root.display());
-            match start_live_index(&root, || {}) {
+            match start_live_index_cancellable(&root, || {}, shutdown.clone()) {
                 Ok(live) => {
                     host_roots.push((root, live.index.clone()));
                     live_indexes.push(live);
                 }
                 Err(err) => tracing::warn!("skipping {}: {err:#}", root.display()),
             }
+        }
+        // A stop during bootstrap: don't start serving, just drop what we
+        // have (fully-bootstrapped roots save their snapshots).
+        if stopping() {
+            tracing::info!("stop requested during bootstrap; not serving");
+            return Ok(());
         }
         if host_roots.is_empty() {
             anyhow::bail!("every configured root failed to index");
