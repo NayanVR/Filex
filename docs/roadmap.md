@@ -256,12 +256,19 @@ Sequence matters here:
 Privacy stance is settled — this app sees filenames, and filenames are
 private:
 
-1. Local structured logs first (ships with Phase 2a block 1).
-2. Panic-hook crash logs, user-initiated report sharing.
+1. Local structured logs first (ships with Phase 2a block 1). **Done.**
+2. Panic-hook crash logs + reporting. **Done** — see
+   `docs/design-telemetry.md`. A chained panic hook captures each crash
+   into a scrubbed `CrashReport` (never paths/filenames/tags/queries) in a
+   local queue; on launch the UI uploads them via a custom POST to
+   `FILEX_CRASH_ENDPOINT` (empty by default ⇒ local-only). Consent ended
+   up **on-by-default with a Settings toggle** (opt-out), not the initial
+   opt-in prompt — an owner decision made defensible by the scrubbing +
+   endpoint gating (see the design doc's decision log).
 3. Remote metrics **last, opt-in only, aggregates only** (search
    latency percentiles, index sizes, watcher tier used) — never paths,
    filenames, or query strings. Defer endpoint choice until there are
-   external users.
+   external users. **Still deferred.**
 
 ## Phase 3 — Future (unchanged, still out of scope)
 
