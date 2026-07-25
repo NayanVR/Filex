@@ -1223,7 +1223,7 @@ impl Workspace {
     /// Runs off-thread; a scrubbed report is POSTed and deleted on success,
     /// failures stay queued for next launch (Phase 2c).
     fn spawn_crash_upload(&self, cx: &mut Context<Self>) {
-        if self.settings.read(cx).settings().crash_reports != Some(true) {
+        if !self.settings.read(cx).settings().crash_reports {
             return;
         }
         let (Some(url), Some(dir)) =
@@ -2500,6 +2500,22 @@ impl Workspace {
                     this.settings.update(cx, |store, cx| {
                         store.update(cx, |s| s.thumbnails_enabled = !s.thumbnails_enabled);
                     });
+                })),
+            )
+            .child(
+                ui::settings_pane::toggle_row(
+                    &theme,
+                    "crash-reports",
+                    "Send crash reports",
+                    "Scrubbed crash details only — never file names, paths, or queries",
+                    settings.crash_reports,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.crash_reports = !s.crash_reports);
+                    });
+                    // Turning it on drains anything already queued.
+                    this.spawn_crash_upload(cx);
                 })),
             )
             .child(ui::settings_pane::footnote(&theme, file_note))

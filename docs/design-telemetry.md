@@ -7,25 +7,28 @@ deferred per the roadmap and is out of scope here.
 
 ## Goal & scope
 
-Get crash reports to the developer with **zero per-crash user friction**,
-without betraying the project's privacy stance (`logging.rs`: "filenames
-are private, nothing leaves the machine"). The tension is resolved by:
+Get crash reports to the developer with **zero user friction**, without
+betraying the project's privacy stance (`logging.rs`: "filenames are
+private"). The tension is resolved by:
 
-- **One-time opt-in, then silent** (confirmed 2026-07-25). The user answers
-  one prompt ever; after that every crash is captured *and* uploaded in the
-  background with no further interaction.
+- **On by default, opt-out via a Settings toggle** (revised 2026-07-25 —
+  see history below). No startup prompt; crash reporting is enabled out of
+  the box and a "Send crash reports" toggle in Settings turns it off.
 - **Scrubbing** every report of path-shaped data before it can be queued
   for upload — the privacy backstop that lets crash data leave the machine
-  at all.
+  at all. This is what makes default-on defensible: even enabled, a report
+  can carry no file names, paths, tags, or queries.
+- **Endpoint-gated**: nothing is transmitted at all unless a crash endpoint
+  is configured (empty by default), so out of the box it's local-only.
 
 Non-goals: remote metrics/aggregates, session/usage analytics, any
 always-on data collection. Only crashes, only with consent, only scrubbed.
 
 ## Privacy invariants (non-negotiable)
 
-- **Nothing is uploaded without `crash_reports == Some(true)`.** Unset (not
-  yet asked) and `Some(false)` never transmit. Crashes are still captured
-  *locally* regardless (they never leave the machine without consent).
+- **Nothing is uploaded when `crash_reports` is off, or when no endpoint is
+  configured.** Crashes are still captured *locally* regardless (the queue
+  file); only upload is gated.
 - **Never captured:** the search query string, index contents, tag names,
   recents, or any browsed path. Crash reports carry only: timestamp, app
   version, OS + arch, thread name, panic message, backtrace.
@@ -55,10 +58,10 @@ always-on data collection. Only crashes, only with consent, only scrubbed.
 2. **Scrub** (`telemetry::scrub`): pure, unit-tested; applied to the panic
    message and backtrace at capture time, so the queued file is already
    clean (defence in depth — even a leaked queue file has no paths).
-3. **Consent**: `Settings.crash_reports: Option<bool>`. `None` until asked;
-   a one-time first-run prompt in the UI sets it. The prompt is
-   non-blocking and dismissible (dismiss = ask again next launch, since
-   `None` is preserved until an explicit choice).
+3. **Consent**: `Settings.crash_reports: bool`, **default `true`**. A
+   "Send crash reports" toggle in the Settings pane turns it off. No
+   startup prompt (backward-compatible: existing `settings.json` without
+   the field defaults to on via the struct's `#[serde(default)]`).
 4. **Upload** (UI process only): on launch, if `Some(true)`, a background
    task lists the queue dir and POSTs each report to the endpoint; a `2xx`
    deletes the file (at-least-once; an offline/failed upload just stays
@@ -123,9 +126,13 @@ additions.
 
 ## Confirmed decisions (2026-07-25)
 
-- **Consent: one-time opt-in, then silent.** Not silent-without-consent
-  (would exfiltrate end-user data with no consent) and not local-only
-  (the developer wants reports to actually arrive).
+- **Consent: on by default, opt-out via a Settings toggle.** *Revised from
+  the initial "one-time opt-in prompt" — the owner preferred no startup
+  interruption.* This is a softer posture than the roadmap's "opt-in only",
+  accepted as an owner decision because reports are always scrubbed (no
+  paths/filenames/queries) and upload is endpoint-gated (local-only until
+  an endpoint is set). The scrubbing, not the prompt, is the real
+  protection.
 - **Transport: custom POST to an owner-controlled endpoint**, configurable
   via `FILEX_CRASH_ENDPOINT`, empty-by-default (disabled). Not Sentry (no
   third-party crash cloud / heavy dep).
