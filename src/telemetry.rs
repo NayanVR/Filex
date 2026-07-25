@@ -46,6 +46,56 @@ pub struct CrashReport {
     pub backtrace: String,
 }
 
+/// Install a panic hook that captures every panic into a scrubbed
+/// [`CrashReport`] in the default queue directory, then chains the
+/// previously-installed hook (so the normal message/abort still happens).
+/// `app` names the binary (`"filex"` / `"filex-indexd"`). Call once at
+/// startup, after logging is initialised.
+pub fn install_panic_hook(app: &'static str) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        capture_panic(app, info);
+        previous(info);
+    }));
+}
+
+/// Build and enqueue a scrubbed report for a panic. Best-effort: any
+/// failure (no data dir, write error) is swallowed — a panic handler must
+/// never itself panic or block.
+fn capture_panic(app: &'static str, info: &std::panic::PanicHookInfo) {
+    let report = CrashReport {
+        schema: SCHEMA,
+        app: app.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        unix_millis: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        thread: std::thread::current().name().unwrap_or("unnamed").to_string(),
+        message: scrub(&payload_message(info.payload())),
+        location: info.location().map(|l| scrub(&format!("{}:{}", l.file(), l.line()))),
+        backtrace: scrub(&std::backtrace::Backtrace::force_capture().to_string()),
+    };
+    tracing::error!("panic in {app}: {} (at {:?})", report.message, report.location);
+    if let Some(dir) = default_queue_dir() {
+        let _ = enqueue(&dir, &report, QUEUE_CAP);
+    }
+}
+
+/// The panic message from its payload — `&str` for `panic!("literal")`,
+/// `String` for a formatted panic, else a placeholder.
+fn payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 /// Redact path-shaped data from `text` — the privacy backstop applied to
 /// every report before it can be queued. The user's home directory
 /// becomes `~`; whitespace-delimited tokens that look like absolute paths
@@ -229,6 +279,15 @@ mod tests {
         }
         assert!(names.contains(&format!("crash-{:020}.json", 4)));
         assert!(names.contains(&format!("crash-{:020}.json", 5)));
+    }
+
+    #[test]
+    fn payload_message_reads_str_and_string_panics() {
+        // `panic!("literal")` payloads are `&str`; formatted ones `String`.
+        let s: &str = "boom";
+        assert_eq!(payload_message(&s), "boom");
+        assert_eq!(payload_message(&String::from("formatted 42")), "formatted 42");
+        assert_eq!(payload_message(&5u32), "non-string panic payload");
     }
 
     #[test]

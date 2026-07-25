@@ -3739,6 +3739,7 @@ impl Render for Workspace {
 
 fn main() {
     let _logging_guard = filex::logging::init("filex");
+    filex::telemetry::install_panic_hook("filex");
     Application::new().with_assets(ui::assets::Assets).run(|cx: &mut App| {
         // Register the bundled UI font before anything renders.
         ui::fonts::register(cx);

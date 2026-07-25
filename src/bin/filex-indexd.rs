@@ -49,6 +49,7 @@ mod service {
 
     pub fn main() -> Result<()> {
         let _logging_guard = filex::logging::init("filex-indexd");
+        filex::telemetry::install_panic_hook("filex-indexd");
         // Try to attach to the SCM (blocks until the service stops). If we
         // weren't started by the SCM, serve in the console instead.
         match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
