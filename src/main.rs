@@ -496,6 +496,7 @@ impl Workspace {
         this.load_dir(&cwd, cx);
         this.spawn_tag_prune(cx);
         this.refresh_sidebar_tags(cx);
+        this.spawn_crash_upload(cx);
         // Windows probes for the elevated index service first and only
         // falls back to in-process indexing if it's absent; elsewhere
         // indexing is always in-process.
@@ -1215,6 +1216,35 @@ impl Workspace {
         self.recents.clear();
         self.persist_recents(cx);
         cx.notify();
+    }
+
+    /// Upload any queued crash reports at launch — only with the user's
+    /// consent (`crash_reports == Some(true)`) and a configured endpoint.
+    /// Runs off-thread; a scrubbed report is POSTed and deleted on success,
+    /// failures stay queued for next launch (Phase 2c).
+    fn spawn_crash_upload(&self, cx: &mut Context<Self>) {
+        if self.settings.read(cx).settings().crash_reports != Some(true) {
+            return;
+        }
+        let (Some(url), Some(dir)) =
+            (filex::telemetry::endpoint(), filex::telemetry::default_queue_dir())
+        else {
+            return; // no endpoint configured, or no data dir
+        };
+        cx.background_executor()
+            .spawn(async move {
+                let sent = filex::telemetry::drain(&dir, |report| {
+                    let Ok(body) = serde_json::to_string(report) else { return false };
+                    ureq::post(&url)
+                        .set("Content-Type", "application/json")
+                        .send_string(&body)
+                        .is_ok()
+                });
+                if sent > 0 {
+                    tracing::info!("uploaded {sent} crash report(s)");
+                }
+            })
+            .detach();
     }
 
     /// Drop sidecar tag keys whose file no longer exists — lazy cleanup

@@ -55,6 +55,10 @@ pub struct Settings {
     pub favorites: Vec<PathBuf>,
     /// Ids of sidebar sections the user has collapsed (e.g. "recents").
     pub collapsed_sections: Vec<String>,
+    /// Consent for sending scrubbed crash reports (Phase 2c). `None` =
+    /// not yet asked (a one-time prompt sets it); `Some(false)` = never
+    /// upload (crashes are still captured locally); `Some(true)` = upload.
+    pub crash_reports: Option<bool>,
 }
 
 /// The two browse layouts (block 4).
@@ -94,6 +98,7 @@ impl Default for Settings {
             preview_width: 280.,
             favorites: Vec::new(),
             collapsed_sections: Vec::new(),
+            crash_reports: None,
         }
     }
 }

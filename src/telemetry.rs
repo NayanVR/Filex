@@ -187,6 +187,36 @@ pub fn load(path: &Path) -> Result<CrashReport> {
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// The upload endpoint from the `FILEX_CRASH_ENDPOINT` env var; `None`
+/// when unset or empty, which disables uploading entirely (no endpoint
+/// ships by default — see `docs/design-telemetry.md`).
+pub fn endpoint() -> Option<String> {
+    std::env::var("FILEX_CRASH_ENDPOINT").ok().filter(|url| !url.trim().is_empty())
+}
+
+/// Send every queued report through `send`, deleting each on success; a
+/// failed send stays queued for the next launch (at-least-once). An
+/// unparseable file is dropped. Returns how many were sent. Transport is a
+/// closure (`true` = delivered) so the drain is unit-tested without a
+/// network. Call off the UI thread, only when consent is granted.
+pub fn drain(dir: &Path, mut send: impl FnMut(&CrashReport) -> bool) -> usize {
+    let mut sent = 0;
+    for path in queued(dir) {
+        match load(&path) {
+            Ok(report) => {
+                if send(&report) {
+                    let _ = std::fs::remove_file(&path);
+                    sent += 1;
+                }
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&path); // corrupt: don't retry forever
+            }
+        }
+    }
+    sent
+}
+
 /// Keep the newest `cap` report files, deleting the rest.
 fn prune(dir: &Path, cap: usize) {
     let files = queued(dir); // oldest first
@@ -288,6 +318,26 @@ mod tests {
         assert_eq!(payload_message(&s), "boom");
         assert_eq!(payload_message(&String::from("formatted 42")), "formatted 42");
         assert_eq!(payload_message(&5u32), "non-string panic payload");
+    }
+
+    #[test]
+    fn drain_deletes_sent_keeps_failed_and_drops_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = dir.path().join("crash-reports");
+        enqueue(&q, &sample(), QUEUE_CAP).unwrap();
+        enqueue(&q, &sample(), QUEUE_CAP).unwrap();
+        std::fs::write(q.join("crash-00000000000000000000.json"), "{ corrupt").unwrap();
+        assert_eq!(queued(&q).len(), 3);
+
+        // A transport that fails the first and delivers the rest.
+        let mut seen = 0;
+        let sent = drain(&q, |_| {
+            seen += 1;
+            seen != 1 // first fails, others succeed
+        });
+        assert_eq!(sent, 1); // only the second valid report delivered
+        // Left: the failed-but-valid one (retry next launch); corrupt dropped.
+        assert_eq!(queued(&q).len(), 1);
     }
 
     #[test]

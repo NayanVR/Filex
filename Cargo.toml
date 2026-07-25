@@ -8,7 +8,7 @@ default = ["app"]
 # The GPUI application. The index library builds without it, so indexing
 # logic can be cross-checked/tested for other platforms without pulling in
 # UI toolchains (cargo check --no-default-features --target ...).
-app = ["dep:gpui", "dep:futures", "dep:image"]
+app = ["dep:gpui", "dep:futures", "dep:image", "dep:ureq"]
 
 [[bin]]
 name = "filex"
@@ -26,6 +26,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = { version = "0.3.32", optional = true }
 gpui = { version = "0.2", optional = true }
 image = { version = "0.25", optional = true }
+# Crash-report upload (UI process only; the lib/service stay network-free).
+ureq = { version = "2.10", optional = true }
 jwalk = "0.8.1"
 memchr = "2.8.3"
 # Binary property-list codec for the macOS Finder tag xattr
