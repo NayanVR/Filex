@@ -5,6 +5,7 @@
 
 pub mod drives;
 pub mod frecency;
+pub mod fuzzy;
 pub mod index;
 pub mod listing;
 pub mod logging;

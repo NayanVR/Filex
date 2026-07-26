@@ -274,7 +274,13 @@ impl IndexHost for MultiRootHost {
             self.roots.iter().map(|(_, index)| index.clone()).collect();
         // Index filters (kind:/ext:/size:/modified:) apply service-side in
         // the scan; tag: stays on the client and is never sent here.
-        manager::search_all(&indexes, query, filters, limit)
+        //
+        // Frecency is deliberately empty here: visit history is private
+        // user data (docs/roadmap.md's telemetry stance) and the service
+        // runs as LocalSystem, so it is never shipped across the pipe.
+        // Service-backed search therefore ranks on match quality alone —
+        // a known gap, tracked in docs/design-search-ranking.md.
+        manager::search_all(&indexes, query, filters, limit, &Default::default())
             .into_iter()
             .map(|hit| RemoteHit { name: hit.name, path: hit.path, is_dir: hit.is_dir })
             .collect()

@@ -87,12 +87,96 @@ impl FileEntry {
 }
 
 /// How a hit matched the query, in ranking order (lower is better).
+///
+/// `Fuzzy` is last on purpose: subsequence hits are *filler* below every
+/// literal hit, never a way for a loose match to outrank a real one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MatchKind {
     Exact,
     Prefix,
     WordBoundary,
     Substring,
+    Fuzzy,
+}
+
+/// A hit's ranking key — lower sorts better, field order *is* the
+/// precedence (derived `Ord` is lexicographic).
+///
+/// `penalty` is [`crate::fuzzy`]'s match-quality score, and is always `0`
+/// for the four literal kinds, so their relative order is exactly what it
+/// was before fuzzy matching existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Score {
+    pub kind: MatchKind,
+    pub penalty: u16,
+    /// Folded-name length — the historical tiebreak, kept so hits from
+    /// multiple indexes merge without re-deriving it.
+    pub name_len: u16,
+}
+
+/// Widest `name_len` the packed key can hold (12 bits). Every filesystem
+/// filex targets caps a single name far below this (255 bytes is the
+/// usual limit), so the clamp is unreachable in practice — and it only
+/// ever affects a tiebreak, never whether an entry matches.
+const PACKED_NAME_LEN_MAX: u16 = 0x0FFF;
+
+impl Score {
+    /// A literal (non-fuzzy) hit, which carries no quality penalty.
+    fn literal(kind: MatchKind, name_len: u16) -> Self {
+        Self { kind, penalty: 0, name_len }
+    }
+
+    /// Pack into one `u32` whose natural ordering *is* the ranking
+    /// order: `kind` in the top 4 bits, then `penalty`, then `name_len`.
+    ///
+    /// This exists for a measured reason. Carrying the fields as a
+    /// struct made the top-K heap element 12 bytes instead of 8 and cost
+    /// ~12% on every keystroke — a regression the design doc forbids on
+    /// the literal path. Packed, the heap element is the same 8 bytes it
+    /// was before fuzzy matching existed.
+    fn pack(self) -> u32 {
+        ((self.kind as u32) << 28)
+            | ((self.penalty as u32) << 12)
+            | self.name_len.min(PACKED_NAME_LEN_MAX) as u32
+    }
+
+    fn unpack(bits: u32) -> Self {
+        let kind = match bits >> 28 {
+            0 => MatchKind::Exact,
+            1 => MatchKind::Prefix,
+            2 => MatchKind::WordBoundary,
+            3 => MatchKind::Substring,
+            _ => MatchKind::Fuzzy,
+        };
+        Self {
+            kind,
+            penalty: ((bits >> 12) & 0xFFFF) as u16,
+            name_len: (bits & PACKED_NAME_LEN_MAX as u32) as u16,
+        }
+    }
+}
+
+/// Classify a literal (substring) match of `needle` in the folded
+/// `haystack`, or `None` if there is none. One SIMD find plus a byte
+/// compare — this runs per live entry on every keystroke, so it stays
+/// allocation-free.
+fn literal_kind(
+    finder: &memmem::Finder<'_>,
+    haystack: &[u8],
+    needle: &[u8],
+) -> Option<MatchKind> {
+    let pos = finder.find(haystack)?;
+    Some(if pos == 0 {
+        if haystack.len() == needle.len() {
+            MatchKind::Exact
+        } else {
+            MatchKind::Prefix
+        }
+    } else if !haystack[pos - 1].is_ascii_alphanumeric() {
+        MatchKind::WordBoundary
+    } else {
+        MatchKind::Substring
+    })
 }
 
 /// Compaction trigger: at least this many dead units *and* at least a
@@ -111,7 +195,8 @@ fn compaction_due(dead: usize, total_entries: usize) -> bool {
 /// instead of O(matches) total.
 struct TopK {
     limit: usize,
-    heap: std::collections::BinaryHeap<(MatchKind, u16, u32)>,
+    /// `(packed score, entry index)` — 8 bytes, see [`Score::pack`].
+    heap: std::collections::BinaryHeap<(u32, u32)>,
 }
 
 impl TopK {
@@ -119,7 +204,7 @@ impl TopK {
         Self { limit, heap: std::collections::BinaryHeap::with_capacity(limit + 1) }
     }
 
-    fn push(mut self, item: (MatchKind, u16, u32)) -> Self {
+    fn push(mut self, item: (u32, u32)) -> Self {
         if self.heap.len() < self.limit {
             self.heap.push(item);
         } else if let Some(mut worst) = self.heap.peek_mut()
@@ -142,18 +227,19 @@ impl TopK {
         acc
     }
 
-    fn into_sorted(self) -> Vec<(MatchKind, u16, u32)> {
+    fn into_sorted(self) -> Vec<(u32, u32)> {
         self.heap.into_sorted_vec()
+    }
+
+    fn len(&self) -> usize {
+        self.heap.len()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub id: EntryId,
-    pub kind: MatchKind,
-    /// Folded-name length — the ranking tiebreak, exposed so hits from
-    /// multiple indexes can be merged without re-deriving it.
-    pub name_len: u16,
+    pub score: Score,
 }
 
 #[derive(Debug)]
@@ -558,27 +644,94 @@ impl VolumeIndex {
             .filter(|(_, e)| !e.is_tombstone())
             .filter_map(|(ix, entry)| {
                 let haystack = self.name_lower_bytes(entry.name_lower);
-                let pos = finder.find(haystack)?;
-                let kind = if pos == 0 {
-                    if haystack.len() == needle.len() {
-                        MatchKind::Exact
-                    } else {
-                        MatchKind::Prefix
-                    }
-                } else if !haystack[pos - 1].is_ascii_alphanumeric() {
-                    MatchKind::WordBoundary
-                } else {
-                    MatchKind::Substring
-                };
-                Some((kind, entry.name_lower.len, ix as u32))
+                let kind = literal_kind(&finder, haystack, needle.as_bytes())?;
+                Some((Score::literal(kind, entry.name_lower.len).pack(), ix as u32))
             })
             .fold(|| TopK::new(limit), TopK::push)
             .reduce(|| TopK::new(limit), TopK::merge);
 
+        self.finish(top, &needle, &finder, &[], limit)
+    }
+
+    /// Turn a literal pass's heap into hits, running the gated fuzzy pass
+    /// first if the literal pass came up short. See
+    /// `docs/design-search-ranking.md` decision 2: this is what keeps the
+    /// common keystroke on exactly the pre-fuzzy code path.
+    fn finish(
+        &self,
+        literal: TopK,
+        needle: &str,
+        finder: &memmem::Finder<'_>,
+        filters: &[crate::search_filter::Filter],
+        limit: usize,
+    ) -> Vec<SearchHit> {
+        let top = if literal.len() < limit {
+            literal.merge(self.fuzzy_pass(needle, finder, filters, limit))
+        } else {
+            literal
+        };
         top.into_sorted()
             .into_iter()
-            .map(|(kind, name_len, id)| SearchHit { id: EntryId(id), kind, name_len })
+            .map(|(bits, id)| SearchHit { id: EntryId(id), score: Score::unpack(bits) })
             .collect()
+    }
+
+    /// Subsequence-match entries the literal pass did *not* match, scored
+    /// by [`crate::fuzzy`] and ranked strictly below every literal hit.
+    ///
+    /// Only reached when the literal pass returned fewer than `limit`
+    /// hits — i.e. when the user is looking at a near-empty result list —
+    /// so its cost never lands on a normal keystroke. Entries that
+    /// already matched literally are skipped with the same SIMD find the
+    /// literal pass used, so hits are not duplicated.
+    fn fuzzy_pass(
+        &self,
+        needle: &str,
+        finder: &memmem::Finder<'_>,
+        filters: &[crate::search_filter::Filter],
+        limit: usize,
+    ) -> TopK {
+        self.entries
+            .par_iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, e)| !e.is_tombstone())
+            .filter_map(|(ix, entry)| {
+                if finder.find(self.name_lower_bytes(entry.name_lower)).is_some() {
+                    return None; // already a literal hit
+                }
+                // Fuzzy scoring reads the *original* name: camelCase
+                // humps are one of its word-boundary signals, and the
+                // folded copy has thrown that away.
+                let name = std::str::from_utf8(self.name_bytes(entry.name)).ok()?;
+                let penalty = crate::fuzzy::penalty(name, needle)?;
+                if !filters.is_empty() && !self.passes_filters(entry, name, filters) {
+                    return None;
+                }
+                let score =
+                    Score { kind: MatchKind::Fuzzy, penalty, name_len: entry.name_lower.len };
+                Some((score.pack(), ix as u32))
+            })
+            .fold(|| TopK::new(limit), TopK::push)
+            .reduce(|| TopK::new(limit), TopK::merge)
+    }
+
+    /// Does `entry` satisfy every index-evaluable filter?
+    fn passes_filters(
+        &self,
+        entry: &FileEntry,
+        name: &str,
+        filters: &[crate::search_filter::Filter],
+    ) -> bool {
+        let has_meta = entry.has_meta();
+        let item = crate::search_filter::ItemMeta {
+            name,
+            is_dir: entry.is_dir(),
+            // Size is meaningless for directories; mtime isn't.
+            size: (has_meta && !entry.is_dir()).then_some(entry.size),
+            mtime: has_meta.then_some(entry.mtime),
+        };
+        filters.iter().all(|f| f.matches(&item))
     }
 
     /// Like [`search`](Self::search), but each candidate must also satisfy
@@ -619,32 +772,13 @@ impl VolumeIndex {
                 let kind = match (&finder, &needle) {
                     (Some(finder), Some(needle)) => {
                         let haystack = self.name_lower_bytes(entry.name_lower);
-                        let pos = finder.find(haystack)?;
-                        if pos == 0 {
-                            if haystack.len() == needle.len() {
-                                MatchKind::Exact
-                            } else {
-                                MatchKind::Prefix
-                            }
-                        } else if !haystack[pos - 1].is_ascii_alphanumeric() {
-                            MatchKind::WordBoundary
-                        } else {
-                            MatchKind::Substring
-                        }
+                        literal_kind(finder, haystack, needle.as_bytes())?
                     }
                     _ => MatchKind::Substring,
                 };
                 let name = std::str::from_utf8(self.name_bytes(entry.name)).ok()?;
-                let has_meta = entry.has_meta();
-                let item = crate::search_filter::ItemMeta {
-                    name,
-                    is_dir: entry.is_dir(),
-                    // Size is meaningless for directories; mtime isn't.
-                    size: (has_meta && !entry.is_dir()).then_some(entry.size),
-                    mtime: has_meta.then_some(entry.mtime),
-                };
-                if filters.iter().all(|f| f.matches(&item)) {
-                    Some((kind, entry.name_lower.len, ix as u32))
+                if self.passes_filters(entry, name, filters) {
+                    Some((Score::literal(kind, entry.name_lower.len).pack(), ix as u32))
                 } else {
                     None
                 }
@@ -652,10 +786,15 @@ impl VolumeIndex {
             .fold(|| TopK::new(limit), TopK::push)
             .reduce(|| TopK::new(limit), TopK::merge);
 
-        top.into_sorted()
-            .into_iter()
-            .map(|(kind, name_len, id)| SearchHit { id: EntryId(id), kind, name_len })
-            .collect()
+        match (&needle, &finder) {
+            (Some(needle), Some(finder)) => self.finish(top, needle, finder, filters, limit),
+            // Filter-only: there is no needle to fuzzy-match against.
+            _ => top
+                .into_sorted()
+                .into_iter()
+                .map(|(bits, id)| SearchHit { id: EntryId(id), score: Score::unpack(bits) })
+                .collect(),
+        }
     }
 }
 
@@ -1405,6 +1544,111 @@ mod tests {
 
         let ids: Vec<EntryId> = index.search("main", 10).into_iter().map(|h| h.id).collect();
         assert_eq!(ids, vec![exact, prefix, boundary, substring]);
+    }
+
+    #[test]
+    fn packed_score_round_trips_and_preserves_ranking_order() {
+        let scores = [
+            Score { kind: MatchKind::Exact, penalty: 0, name_len: 4 },
+            Score { kind: MatchKind::Prefix, penalty: 0, name_len: 0 },
+            Score { kind: MatchKind::WordBoundary, penalty: 0, name_len: 9 },
+            Score { kind: MatchKind::Substring, penalty: 0, name_len: 1 },
+            Score { kind: MatchKind::Fuzzy, penalty: 3, name_len: 2 },
+            Score { kind: MatchKind::Fuzzy, penalty: u16::MAX, name_len: 0 },
+        ];
+        for score in scores {
+            assert_eq!(Score::unpack(score.pack()), score, "round trip");
+        }
+        // The packed ordering must match the struct ordering exactly —
+        // that equivalence is what lets the heap sort on the u32.
+        for a in scores {
+            for b in scores {
+                assert_eq!(
+                    a.pack().cmp(&b.pack()),
+                    a.cmp(&b),
+                    "packed order disagrees for {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_score_clamps_an_absurd_name_length() {
+        let score = Score { kind: MatchKind::Exact, penalty: 0, name_len: u16::MAX };
+        // Clamped, not wrapped — a long name must not alias into the
+        // penalty field and score as a better match.
+        let unpacked = Score::unpack(score.pack());
+        assert_eq!(unpacked.name_len, PACKED_NAME_LEN_MAX);
+        assert_eq!(unpacked.kind, MatchKind::Exact);
+        assert_eq!(unpacked.penalty, 0);
+    }
+
+    #[test]
+    fn search_falls_back_to_fuzzy_when_nothing_matches_literally() {
+        let mut index = VolumeIndex::new("/vol");
+        let acronym = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        index.insert(ROOT, "unrelated.txt", false).unwrap();
+
+        let hits = index.search("dsr", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, acronym);
+        assert_eq!(hits[0].score.kind, MatchKind::Fuzzy);
+    }
+
+    #[test]
+    fn fuzzy_hits_rank_below_every_literal_hit() {
+        let mut index = VolumeIndex::new("/vol");
+        let fuzzy = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        let literal = index.insert(ROOT, "zzz_dsr_zzz.txt", false).unwrap();
+
+        let ids: Vec<EntryId> = index.search("dsr", 10).into_iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![literal, fuzzy]);
+    }
+
+    #[test]
+    fn fuzzy_pass_does_not_run_when_literal_hits_fill_the_limit() {
+        // The gate from docs/design-search-ranking.md decision 2: with
+        // enough literal hits the second pass never runs, so a fuzzy-only
+        // candidate cannot appear.
+        let mut index = VolumeIndex::new("/vol");
+        for i in 0..5 {
+            index.insert(ROOT, &format!("dsr_{i}.txt"), false).unwrap();
+        }
+        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+
+        let hits = index.search("dsr", 3);
+        assert_eq!(hits.len(), 3);
+        assert!(
+            hits.iter().all(|h| h.score.kind != MatchKind::Fuzzy),
+            "literal hits filled the limit, so no fuzzy pass"
+        );
+    }
+
+    #[test]
+    fn fuzzy_hits_are_not_duplicated_by_the_second_pass() {
+        // A literal match is also a subsequence match; the fuzzy pass
+        // must skip entries the literal pass already claimed.
+        let mut index = VolumeIndex::new("/vol");
+        index.insert(ROOT, "dsr.txt", false).unwrap();
+        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+
+        let hits = index.search("dsr", 10);
+        let ids: std::collections::HashSet<EntryId> = hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids.len(), hits.len(), "no entry appears twice");
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn fuzzy_fallback_respects_filters() {
+        let mut index = VolumeIndex::new("/vol");
+        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        let dir = index.insert(ROOT, "Design System Review", true).unwrap();
+
+        let filters =
+            vec![crate::search_filter::Filter::Kind(crate::listing::FileKind::Directory)];
+        let hits = index.search_filtered("dsr", &filters, 10);
+        assert_eq!(hits.len(), 1, "the .pdf must be filtered out of the fuzzy pass");
+        assert_eq!(hits[0].id, dir);
     }
 
     #[test]

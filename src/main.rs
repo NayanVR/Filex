@@ -382,6 +382,11 @@ struct Workspace {
     history_forward: Vec<PathBuf>,
     /// Recently-opened folders/files (local-only usage log).
     recents: Recents,
+    /// Cached path → frecency score, derived from `recents` and handed to
+    /// background search tasks for stage-B re-ranking. Rebuilt whenever
+    /// `recents` changes rather than per keystroke — the scores decay on
+    /// a 30-day half-life, so within a session it never goes stale.
+    frecency: std::sync::Arc<std::collections::HashMap<PathBuf, f32>>,
     /// Sidecar tag index: the enumeration source for the sidebar TAGS
     /// section and the `tag:` filter, and (on every platform) the store
     /// whose path keys are migrated by our own file ops. Shared into
@@ -487,6 +492,7 @@ impl Workspace {
             active_tab: 0,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            frecency: std::sync::Arc::new(recents.score_table(filex::frecency::now_secs())),
             recents,
             tags: std::sync::Arc::new(PlatformTags::load(
                 filex::tags::default_tags_file()
@@ -1196,7 +1202,14 @@ impl Workspace {
     /// Note `path` as recently opened and persist the log off-thread.
     fn record_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.recents.record(path);
+        self.refresh_frecency();
         self.persist_recents(cx);
+    }
+
+    /// Rebuild the cached frecency table after `recents` changed.
+    fn refresh_frecency(&mut self) {
+        self.frecency =
+            std::sync::Arc::new(self.recents.score_table(filex::frecency::now_secs()));
     }
 
     fn persist_recents(&self, cx: &Context<Self>) {
@@ -1215,6 +1228,7 @@ impl Workspace {
 
     fn clear_recents(&mut self, cx: &mut Context<Self>) {
         self.recents.clear();
+        self.refresh_frecency();
         self.persist_recents(cx);
         cx.notify();
     }
@@ -2217,12 +2231,19 @@ impl Workspace {
             return; // still building; root readiness re-runs the query
         }
         let store = self.tags.clone();
+        let frecency = self.frecency.clone();
 
         cx.spawn(async move |this, cx| {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
-                    let rows = manager::search_all(&indexes, &text, &index_filters, SEARCH_RESULT_LIMIT)
+                    let rows = manager::search_all(
+                        &indexes,
+                        &text,
+                        &index_filters,
+                        SEARCH_RESULT_LIMIT,
+                        &frecency,
+                    )
                         .into_iter()
                         .map(|hit| SearchRow {
                             name: hit.name.into(),

@@ -270,12 +270,38 @@ private:
    filenames, or query strings. Defer endpoint choice until there are
    external users. **Still deferred.**
 
+## Phase 2e — Search ranking ("Tier 0", 2026-07-26)
+
+Design doc: **docs/design-search-ranking.md**. Came out of asking whether
+to add local vector embeddings for an "AI feel"; embeddings were deferred
+(filenames are poor embedding input, the index would grow ~15×, and query
+inference lands on the keystroke path) in favour of the ranking work that
+delivers most of the same perceived intelligence for none of the cost.
+
+1. **Frecency store** (`src/frecency.rs` + reworked `src/recents.rs`) —
+   exponentially-decayed visit weights, 30-day half-life, parent-directory
+   credit, legacy `recents.json` migration. **Done.**
+2. **Fuzzy matching** (`src/fuzzy.rs`) — subsequence/acronym matching
+   (`dsr` → `Design System Review.pdf`), run as a *gated second pass* so
+   the common keystroke stays on the untouched literal path. **Done.**
+3. **Stage-B re-rank** (`index::manager::search_all`) — overfetch, resolve
+   paths for candidates only, apply the frecency boost within match tier.
+   **Done.**
+4. **Natural-language phrases → filter chips** (`photos from last summer`
+   → `kind:image modified:…`), riding on the existing `search_filter`
+   grammar. **Not started.**
+
+Gap: service-backed search (Windows + `filex-indexd`) ranks without
+frecency, since visit history is private and never crosses the pipe.
+
 ## Phase 3 — Future (unchanged, still out of scope)
 
 Semantic search / embeddings, content extraction (OCR, PDF), local ML
 inference, shell integration. Do not start these; flag drift per
 CLAUDE.md. Phase 2 quietly serves this phase anyway (settings surface,
-service split, perf telemetry).
+service split, perf telemetry). If embeddings are revisited, the cheap
+shape and the recall bar they must clear are written down at the end of
+docs/design-search-ranking.md.
 
 ## Phase 2d — UI overhaul (planned 2026-07-21)
 
