@@ -382,6 +382,11 @@ struct Workspace {
     history_forward: Vec<PathBuf>,
     /// Recently-opened folders/files (local-only usage log).
     recents: Recents,
+    /// Cached path → frecency score, derived from `recents` and handed to
+    /// background search tasks for stage-B re-ranking. Rebuilt whenever
+    /// `recents` changes rather than per keystroke — the scores decay on
+    /// a 30-day half-life, so within a session it never goes stale.
+    frecency: std::sync::Arc<std::collections::HashMap<PathBuf, f32>>,
     /// Sidecar tag index: the enumeration source for the sidebar TAGS
     /// section and the `tag:` filter, and (on every platform) the store
     /// whose path keys are migrated by our own file ops. Shared into
@@ -439,6 +444,9 @@ impl Workspace {
                     this.apply_theme(cx);
                 }
             });
+        let recents = filex::recents::default_recents_file()
+            .map(|file| Recents::load(&file))
+            .unwrap_or_default();
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
@@ -484,9 +492,8 @@ impl Workspace {
             active_tab: 0,
             history_back: Vec::new(),
             history_forward: Vec::new(),
-            recents: filex::recents::default_recents_file()
-                .map(|file| Recents::load(&file))
-                .unwrap_or_default(),
+            frecency: std::sync::Arc::new(recents.score_table(filex::frecency::now_secs())),
+            recents,
             tags: std::sync::Arc::new(PlatformTags::load(
                 filex::tags::default_tags_file()
                     .unwrap_or_else(|| std::env::temp_dir().join("filex").join("tags.json")),
@@ -1195,7 +1202,14 @@ impl Workspace {
     /// Note `path` as recently opened and persist the log off-thread.
     fn record_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.recents.record(path);
+        self.refresh_frecency();
         self.persist_recents(cx);
+    }
+
+    /// Rebuild the cached frecency table after `recents` changed.
+    fn refresh_frecency(&mut self) {
+        self.frecency =
+            std::sync::Arc::new(self.recents.score_table(filex::frecency::now_secs()));
     }
 
     fn persist_recents(&self, cx: &Context<Self>) {
@@ -1214,6 +1228,7 @@ impl Workspace {
 
     fn clear_recents(&mut self, cx: &mut Context<Self>) {
         self.recents.clear();
+        self.refresh_frecency();
         self.persist_recents(cx);
         cx.notify();
     }
@@ -1301,6 +1316,13 @@ impl Workspace {
         self.search_input.update(cx, |input, cx| input.set_text(rewritten, cx));
     }
 
+    /// Remove an inferred natural-language phrase (clicking its chip) by
+    /// stripping the words that produced it.
+    fn remove_phrase(&mut self, source: &str, cx: &mut Context<Self>) {
+        let rewritten = filex::phrases::without_phrase(&self.query, source);
+        self.search_input.update(cx, |input, cx| input.set_text(rewritten, cx));
+    }
+
     /// The removable filter chips shown under the top bar — one pill per
     /// recognized `key:value` token in the query (`tag:` pills carry the
     /// tag's color dot). `None` when the query has no filter tokens.
@@ -1313,7 +1335,12 @@ impl Workspace {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let tokens = filex::search_filter::filter_tokens(&self.query, now);
-        if tokens.is_empty() {
+        // Phrases are read from whatever the `key:value` parse left as
+        // plain text, exactly as update_search does — so the chips always
+        // show precisely the filters the search is applying.
+        let residual = filex::search_filter::parse_query(&self.query, now).text;
+        let phrases = filex::phrases::expand(&residual, now).phrases;
+        if tokens.is_empty() && phrases.is_empty() {
             return None;
         }
         let theme = *cx.theme();
@@ -1339,6 +1366,21 @@ impl Workspace {
                     }),
                 ),
             );
+        }
+        // Inferred phrase chips, after the explicit ones. Each is labelled
+        // with what it became (`kind:image`) or, for sizes and dates, the
+        // words the user typed — and clicking removes those words.
+        for (i, phrase) in phrases.into_iter().enumerate() {
+            for (j, filter) in phrase.filters.iter().enumerate() {
+                let label = filex::phrases::label_for(filter, &phrase.source);
+                let source = phrase.source.clone();
+                strip = strip.child(
+                    ui::top_bar::filter_chip(&theme, ("phrase-chip", i * 8 + j), label, None)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.remove_phrase(&source, cx);
+                        })),
+                );
+            }
         }
         Some(strip.into_any_element())
     }
@@ -2109,7 +2151,13 @@ impl Workspace {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let parsed = filex::search_filter::parse_query(&self.query, now);
-        if parsed.is_empty() {
+        // Natural-language phrases in whatever text the `key:value` parse
+        // left over ("photos from last week"). Pure and rule-based; the
+        // recognized phrases are shown as removable chips, never applied
+        // invisibly.
+        let expansion = filex::phrases::expand(&parsed.text, now);
+        let text = expansion.text.clone();
+        if text.is_empty() && parsed.filters.is_empty() && expansion.is_empty() {
             self.results.clear();
             // Leave the browse selection intact; only the search's own
             // selection goes away with the results.
@@ -2121,13 +2169,13 @@ impl Workspace {
         // are evaluated inside the index scan.
         let mut tags_required = Vec::new();
         let mut index_filters = Vec::new();
-        for filter in parsed.filters {
+        for filter in parsed.filters.into_iter().chain(expansion.filters()) {
             match filter {
                 Filter::Tag(name) => tags_required.push(name),
-                other => index_filters.push(other),
+                other if !index_filters.contains(&other) => index_filters.push(other),
+                _ => {}
             }
         }
-        let text = parsed.text;
 
         // Tag-only query (no text, no index filters): list the tagged files
         // straight from the sidecar (works the same in service mode — tags
@@ -2216,12 +2264,19 @@ impl Workspace {
             return; // still building; root readiness re-runs the query
         }
         let store = self.tags.clone();
+        let frecency = self.frecency.clone();
 
         cx.spawn(async move |this, cx| {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
-                    let rows = manager::search_all(&indexes, &text, &index_filters, SEARCH_RESULT_LIMIT)
+                    let rows = manager::search_all(
+                        &indexes,
+                        &text,
+                        &index_filters,
+                        SEARCH_RESULT_LIMIT,
+                        &frecency,
+                    )
                         .into_iter()
                         .map(|hit| SearchRow {
                             name: hit.name.into(),
@@ -2750,9 +2805,9 @@ impl Workspace {
             let (header, collapsed) = self.section_header(&theme, "recents", "RECENTS", cx);
             content = content.child(header);
             if !collapsed {
-                content = content.children(self.recents.entries().iter().enumerate().map(
+                content = content.children(self.recents.recent_paths().enumerate().map(
                     |(ix, path)| {
-                        let path = path.clone();
+                        let path = path.to_path_buf();
                         let label = path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())

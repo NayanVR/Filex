@@ -50,9 +50,32 @@ fn bench_search(c: &mut Criterion) {
     group.bench_function("common_stem_report", |b| {
         b.iter(|| black_box(index.search(black_box("report"), 500)))
     });
-    // Rare needle: full scan, almost no hits.
+    // Rare needle: full scan, almost no hits. NOTE: with no literal hits
+    // this also triggers the fuzzy fallback (see below), so it is the
+    // *combined* worst case, not the literal path alone.
     group.bench_function("rare_needle", |b| {
         b.iter(|| black_box(index.search(black_box("zzz_no_such_file"), 500)))
+    });
+    // The gate from docs/design-search-ranking.md decision 2: enough
+    // literal hits to fill the limit means the fuzzy pass never runs.
+    // This is the no-regression number — it must match the pre-fuzzy
+    // literal path, since it executes exactly that code.
+    group.bench_function("gate_closed_literal_only", |b| {
+        b.iter(|| black_box(index.search(black_box("report"), 50)))
+    });
+    // Gate open, and the fallback has real work to do: "rpt" is a
+    // subsequence of most names here, so nearly every entry gets scored.
+    // The realistic worst case for the second pass.
+    group.bench_function("gate_open_fuzzy_fallback", |b| {
+        b.iter(|| black_box(index.search(black_box("rpt"), 500)))
+    });
+    // Overfetch is a heap-depth change, not a scan-work change: these
+    // two should differ only marginally.
+    group.bench_function("overfetch_limit_50", |b| {
+        b.iter(|| black_box(index.search(black_box("report"), 50)))
+    });
+    group.bench_function("overfetch_limit_200", |b| {
+        b.iter(|| black_box(index.search(black_box("report"), 200)))
     });
     // Path materialization for a page of results, as the UI does per query.
     group.bench_function("search_plus_paths", |b| {
@@ -65,5 +88,33 @@ fn bench_search(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_search);
+/// Stage B: path materialization + frecency boost over the overfetched
+/// candidate set. The point of this benchmark is to show it is *not* on
+/// the critical path — microseconds against a scan measured in
+/// milliseconds (docs/design-search-ranking.md decision 1).
+fn bench_frecency_rerank(c: &mut Criterion) {
+    use filex::index::manager;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
+
+    let index = synthetic_index();
+    // A realistic visit history: recents::CAP entries, some of which are
+    // hits for the query below.
+    let table: HashMap<PathBuf, f32> = (0..filex::recents::CAP)
+        .map(|i| (PathBuf::from(format!("/bench/project-{i:04}/report_{i:04}_000.pdf")), 4.0))
+        .collect();
+    let indexes = vec![Arc::new(RwLock::new(index)) as _];
+
+    let mut group = c.benchmark_group("frecency_rerank");
+    group.bench_function("search_all_no_frecency", |b| {
+        b.iter(|| black_box(manager::search_all(&indexes, black_box("report"), &[], 50, &HashMap::new())))
+    });
+    group.bench_function("search_all_with_frecency", |b| {
+        b.iter(|| black_box(manager::search_all(&indexes, black_box("report"), &[], 50, &table)))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_search, bench_frecency_rerank);
 criterion_main!(benches);
