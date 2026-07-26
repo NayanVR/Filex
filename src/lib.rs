@@ -4,6 +4,7 @@
 //! integration tests; the GPUI app lives in `main.rs`.
 
 pub mod drives;
+pub mod frecency;
 pub mod index;
 pub mod listing;
 pub mod logging;

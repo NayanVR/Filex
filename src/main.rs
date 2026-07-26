@@ -439,6 +439,9 @@ impl Workspace {
                     this.apply_theme(cx);
                 }
             });
+        let recents = filex::recents::default_recents_file()
+            .map(|file| Recents::load(&file))
+            .unwrap_or_default();
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
@@ -484,9 +487,7 @@ impl Workspace {
             active_tab: 0,
             history_back: Vec::new(),
             history_forward: Vec::new(),
-            recents: filex::recents::default_recents_file()
-                .map(|file| Recents::load(&file))
-                .unwrap_or_default(),
+            recents,
             tags: std::sync::Arc::new(PlatformTags::load(
                 filex::tags::default_tags_file()
                     .unwrap_or_else(|| std::env::temp_dir().join("filex").join("tags.json")),
@@ -2750,9 +2751,9 @@ impl Workspace {
             let (header, collapsed) = self.section_header(&theme, "recents", "RECENTS", cx);
             content = content.child(header);
             if !collapsed {
-                content = content.children(self.recents.entries().iter().enumerate().map(
+                content = content.children(self.recents.recent_paths().enumerate().map(
                     |(ix, path)| {
-                        let path = path.clone();
+                        let path = path.to_path_buf();
                         let label = path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
