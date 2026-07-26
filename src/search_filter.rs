@@ -314,9 +314,12 @@ fn parse_relative_age(value: &str, now: i64) -> Option<Bound<i64>> {
 }
 
 /// Unix seconds at the UTC midnight starting `t`'s day.
-fn start_of_day(t: i64) -> i64 {
+pub(crate) fn start_of_day(t: i64) -> i64 {
     t.div_euclid(DAY) * DAY
 }
+
+/// Seconds in a day, for callers building their own bounds.
+pub(crate) const SECS_PER_DAY: i64 = DAY;
 
 /// Parse `YYYY-MM-DD` into unix seconds at UTC midnight, or `None`.
 fn parse_iso_date(text: &str) -> Option<i64> {
@@ -333,13 +336,30 @@ fn parse_iso_date(text: &str) -> Option<i64> {
 /// Days since the unix epoch for a proleptic-Gregorian Y-M-D (Howard
 /// Hinnant's `days_from_civil`). Valid for the whole range we care about;
 /// no external date crate needed.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400; // [0, 399]
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     era * 146_097 + doe - 719_468
+}
+
+/// The proleptic-Gregorian Y-M-D for a count of days since the unix epoch
+/// — Hinnant's `civil_from_days`, the exact inverse of
+/// [`days_from_civil`]. Needed by [`crate::phrases`] to answer "which
+/// calendar month is it right now?" without an external date crate.
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], March-based
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 #[cfg(test)]

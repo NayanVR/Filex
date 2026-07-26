@@ -1316,6 +1316,13 @@ impl Workspace {
         self.search_input.update(cx, |input, cx| input.set_text(rewritten, cx));
     }
 
+    /// Remove an inferred natural-language phrase (clicking its chip) by
+    /// stripping the words that produced it.
+    fn remove_phrase(&mut self, source: &str, cx: &mut Context<Self>) {
+        let rewritten = filex::phrases::without_phrase(&self.query, source);
+        self.search_input.update(cx, |input, cx| input.set_text(rewritten, cx));
+    }
+
     /// The removable filter chips shown under the top bar — one pill per
     /// recognized `key:value` token in the query (`tag:` pills carry the
     /// tag's color dot). `None` when the query has no filter tokens.
@@ -1328,7 +1335,12 @@ impl Workspace {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let tokens = filex::search_filter::filter_tokens(&self.query, now);
-        if tokens.is_empty() {
+        // Phrases are read from whatever the `key:value` parse left as
+        // plain text, exactly as update_search does — so the chips always
+        // show precisely the filters the search is applying.
+        let residual = filex::search_filter::parse_query(&self.query, now).text;
+        let phrases = filex::phrases::expand(&residual, now).phrases;
+        if tokens.is_empty() && phrases.is_empty() {
             return None;
         }
         let theme = *cx.theme();
@@ -1354,6 +1366,21 @@ impl Workspace {
                     }),
                 ),
             );
+        }
+        // Inferred phrase chips, after the explicit ones. Each is labelled
+        // with what it became (`kind:image`) or, for sizes and dates, the
+        // words the user typed — and clicking removes those words.
+        for (i, phrase) in phrases.into_iter().enumerate() {
+            for (j, filter) in phrase.filters.iter().enumerate() {
+                let label = filex::phrases::label_for(filter, &phrase.source);
+                let source = phrase.source.clone();
+                strip = strip.child(
+                    ui::top_bar::filter_chip(&theme, ("phrase-chip", i * 8 + j), label, None)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.remove_phrase(&source, cx);
+                        })),
+                );
+            }
         }
         Some(strip.into_any_element())
     }
@@ -2124,7 +2151,13 @@ impl Workspace {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let parsed = filex::search_filter::parse_query(&self.query, now);
-        if parsed.is_empty() {
+        // Natural-language phrases in whatever text the `key:value` parse
+        // left over ("photos from last week"). Pure and rule-based; the
+        // recognized phrases are shown as removable chips, never applied
+        // invisibly.
+        let expansion = filex::phrases::expand(&parsed.text, now);
+        let text = expansion.text.clone();
+        if text.is_empty() && parsed.filters.is_empty() && expansion.is_empty() {
             self.results.clear();
             // Leave the browse selection intact; only the search's own
             // selection goes away with the results.
@@ -2136,13 +2169,13 @@ impl Workspace {
         // are evaluated inside the index scan.
         let mut tags_required = Vec::new();
         let mut index_filters = Vec::new();
-        for filter in parsed.filters {
+        for filter in parsed.filters.into_iter().chain(expansion.filters()) {
             match filter {
                 Filter::Tag(name) => tags_required.push(name),
-                other => index_filters.push(other),
+                other if !index_filters.contains(&other) => index_filters.push(other),
+                _ => {}
             }
         }
-        let text = parsed.text;
 
         // Tag-only query (no text, no index filters): list the tagged files
         // straight from the sidecar (works the same in service mode — tags

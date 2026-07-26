@@ -232,36 +232,54 @@ surfaces first" work without needing per-file history everywhere.
 
 ## Item 3: natural-language phrases → existing filters
 
-A pure function `search_filter::expand_phrases(&str) -> (String, Vec<Filter>)`
-runs **before** `parse_query` and rewrites recognized phrases into the
-existing grammar. Strictly rule-based, no model:
+`src/phrases.rs` — its own module rather than more weight in
+`search_filter.rs`, which stays focused on the `key:value` grammar. It
+runs **after** `parse_query`, over whatever text the `key:value` parse
+left behind, and returns an `Expansion { text, phrases }`. Strictly
+rule-based, no model:
 
 | phrase | expansion |
 | --- | --- |
-| `photos`, `pictures`, `images` | `kind:image` |
-| `screenshots` | `kind:image` + text `screenshot` |
-| `videos`, `music`, `docs`, `pdfs` | `kind:*` / `ext:pdf` |
-| `today`, `yesterday`, `this week`, `last week`, `last month` | `modified:…` |
-| `last summer`, `in June`, `in 2025` | `modified:<range>` |
-| `big`, `huge`, `tiny` | `size:>100mb` / `size:<1mb` |
-| `from <phrase>`, `my`, `all` | dropped as filler |
+| `photos`, `pictures`, `images`, `screenshots` | `kind:image` |
+| `videos`, `music`, `docs`, `folders`, `code`, `archives` | `kind:*` |
+| `pdfs` | `ext:pdf` |
+| `today`, `yesterday`, `this/last week`, `this/last month`, `this/last year`, `recently` | `modified:…` |
+| `in June`, `from 2025` | `modified:<calendar range>` |
+| `big`, `large`, `huge`, `small`, `tiny`, `empty` | `size:>100mb` / `size:<1mb` / `size:0` |
+| `from`, `my`, `the`, `of`, `a`, `some`… | dropped as filler, when adjacent to a match |
 
-Rules:
+Three rules keep it from feeling like magic that hides files:
 
-- **Every expansion becomes a visible chip.** The user sees
-  `kind:image` + `modified:2025-06-01..2025-08-31` appear, and can remove
-  either. Nothing is invisible or unexplainable — this is the whole
-  reason it reads as smart rather than as magic that mysteriously hides
-  files.
-- **Only fires when the phrase is the whole token run**, and never when
-  the same word is also plausible filename text with results: a file
-  literally named `photos` must still be findable. Tie broken by keeping
-  the residual text in the query as well.
-- Anything unrecognized is left as literal text, exactly like today's
-  unknown-`key:` fallback.
+- **Every expansion becomes a visible, removable chip.** `Phrase::source`
+  is the exact text to strip to undo it (`phrases::without_phrase`), and
+  a test asserts the round trip: strip every source and the query stops
+  expanding. Chips are labelled with what the words *became*
+  (`kind:image`) for kinds and extensions, and with the words themselves
+  for sizes and dates, where a raw `Bound` has no compact readable form.
+- **A single word that is the whole query never expands.** Typing
+  `photos` searches for files named "photos" — far more likely what a
+  file explorer's user meant. `photos from last week` expands, because
+  nobody names a file that. This replaced the doc's original "keep the
+  residual text too" idea, which was actively worse: it would have
+  searched for images *named* "photos".
+- **Explicit `key:value` tokens are never rewritten.** `kind:video`
+  always wins.
 
-Sequenced **after** blocks 1–2 land, as its own commit; it is independent
-of the ranking work and rides entirely on existing machinery.
+Two things deliberately left out, both discovered while building:
+
+- **Seasons** (`last summer`). Hemisphere- and culture-dependent — June
+  is summer in Berlin and monsoon in Mumbai — so a fixed mapping would be
+  quietly wrong for half its users. Month names and years cover the same
+  need without guessing. `last summer` stays plain text, asserted by test.
+- **Bare month names and years.** `june plan` and `budget 2025` must stay
+  findable; silently turning those into mtime filters would hide the very
+  file being looked for. A preposition is required: `in june`, `from 2025`.
+
+`week`/`month`/`year` are rolling windows, matching the existing
+`modified:week` keyword rather than giving the same word a second
+meaning. Named months and years are true calendar ranges, which needed
+`civil_from_days` — the inverse of the `days_from_civil` the grammar
+already had, added beside it.
 
 ## Perf budget & benchmarks (gate the merge)
 
@@ -313,16 +331,20 @@ Per CLAUDE.md, all of this is pure logic with no GPUI, so plain `#[test]`:
 ## Commit sequence
 
 1. `frecency`: recents schema change + decay scoring + migration (no
-   search changes yet — store and logic, fully tested). **Implemented.**
+   search changes yet — store and logic, fully tested). **Committed.**
 2. `fuzzy`: matcher + scoring, gated second pass, wired into `search` /
-   `search_filtered`, benches. **Implemented.**
+   `search_filtered`, benches. **Committed** (with 3).
 3. `rerank`: stage B in `search_all` (+ the IPC path in `index/ipc.rs`),
-   overfetch, frecency boost applied. **Implemented.**
-4. `expand_phrases`: NL → filters, chips wired in the UI. **Not started.**
+   overfetch, frecency boost applied. **Committed** (with 2).
+4. `phrases`: NL → filters, chips wired in the UI. **Implemented.**
 
-Status 2026-07-26: blocks 1–3 are implemented on the working tree with 47
-new tests (229 lib tests green, clippy clean, Windows target checks).
-Uncommitted pending the benchmark sign-off below.
+Blocks 2 and 3 landed as one commit: the intermediate state (the index
+returning `Score`, the manager not yet consuming frecency) never existed
+and would have had to be synthesized purely to make a checkpoint.
+
+Status 2026-07-26: all four blocks implemented on branch
+`search-ranking-tier0`, 258 tests green, clippy clean, Windows target
+checks.
 
 ### Benchmark results
 

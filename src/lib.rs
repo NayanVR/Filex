@@ -10,6 +10,7 @@ pub mod index;
 pub mod listing;
 pub mod logging;
 pub mod ops;
+pub mod phrases;
 pub mod recents;
 pub mod search_filter;
 pub mod telemetry;

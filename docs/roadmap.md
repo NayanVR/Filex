@@ -287,9 +287,11 @@ delivers most of the same perceived intelligence for none of the cost.
 3. **Stage-B re-rank** (`index::manager::search_all`) — overfetch, resolve
    paths for candidates only, apply the frecency boost within match tier.
    **Done.**
-4. **Natural-language phrases → filter chips** (`photos from last summer`
-   → `kind:image modified:…`), riding on the existing `search_filter`
-   grammar. **Not started.**
+4. **Natural-language phrases → filter chips** (`src/phrases.rs`) —
+   `photos from last week` → `kind:image` + `modified:…`, riding on the
+   existing `search_filter` grammar, each expansion shown as a removable
+   chip. **Done.** Seasons and bare month/year words are deliberately not
+   recognized (see the design doc).
 
 Gap: service-backed search (Windows + `filex-indexd`) ranks without
 frecency, since visit history is private and never crosses the pipe.
