@@ -16,8 +16,15 @@ pub const CARD_SIZES: [f32; 4] = [88., 112., 140., 176.];
 
 /// Padding inside a card, on every side.
 const CARD_PAD: f32 = 8.;
-/// Height reserved under the icon for the wrapped name + detail lines.
-const LABEL_HEIGHT: f32 = 42.;
+/// Height reserved under the icon for the (up to 2-line) name plus the
+/// detail line — see [`card_name`]. Fixed so every card is the same
+/// height and a long name can't push into the row below.
+const LABEL_HEIGHT: f32 = 66.;
+/// Fixed height of the name block: exactly two `text_xs` line-boxes. gpui
+/// defaults line height to φ·font-size (≈1.618 × 12px ≈ 19px), so two
+/// lines need ~38px — a shorter box clips descenders (y, g, p) on the
+/// second line.
+const NAME_HEIGHT: f32 = 38.;
 /// Gap between cards (and the row's own inset).
 pub const CARD_GAP: f32 = 8.;
 
@@ -82,6 +89,9 @@ pub fn card(
         .items_center()
         .gap_1()
         .w(px(cell_width(size)))
+        // Fixed height (matching the row) + clip: a long name can never
+        // grow the card and spill into the cards below it.
+        .h(px(row_height(size)))
         .p(px(CARD_PAD))
         .rounded_lg()
         .cursor_pointer()
@@ -93,6 +103,25 @@ pub fn card(
 /// The square that holds a card's icon or thumbnail, centered.
 pub fn card_icon_area(size: f32) -> Div {
     div().flex().items_center().justify_center().w(px(size)).h(px(size)).flex_none()
+}
+
+/// A card's name block: centered, wrapping to at most two lines with a
+/// trailing ellipsis. gpui only truncates against a *definite* width, so
+/// the explicit `w(size)` here (not a flex-derived width) is what makes
+/// the ellipsis reliable; the line wrapper force-breaks over-long words,
+/// so no single line can spill past the card edge. Fixed height keeps the
+/// detail line aligned across cards. Pair it with a tooltip for the full
+/// name.
+pub fn card_name(theme: &Theme, size: f32) -> Div {
+    div()
+        .w(px(size))
+        .flex_none()
+        .h(px(NAME_HEIGHT))
+        .text_center()
+        .text_xs()
+        .text_color(theme.text)
+        .line_clamp(2)
+        .text_ellipsis()
 }
 
 #[cfg(test)]

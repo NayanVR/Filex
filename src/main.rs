@@ -2362,7 +2362,17 @@ impl Workspace {
         let preview_open = settings.preview_open;
         let (can_back, can_forward) = (!self.history_back.is_empty(), !self.history_forward.is_empty());
         let dim = |enabled: bool| if enabled { theme.text_dim } else { theme.border };
-        ui::top_bar::top_bar(&theme)
+        // Three-column layout: the left (nav + breadcrumbs) and right
+        // (view controls) groups each take an equal flexible share, so
+        // the fixed-width search box in the middle stays optically
+        // centred regardless of how long the breadcrumb trail is.
+        let left = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .overflow_hidden()
             .child(
                 ui::top_bar::toolbar_button(&theme, "back", "icons/chevron-left.svg", dim(can_back))
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_back(cx))),
@@ -2382,11 +2392,20 @@ impl Workspace {
                         this.go_up(cx);
                     })),
             )
-            .child(self.render_breadcrumbs(cx))
-            .child(
-                ui::top_bar::search_box(&theme, !self.query.is_empty())
-                    .child(self.search_input.clone()),
-            )
+            .child(self.render_breadcrumbs(cx));
+
+        let center = div().flex_1().min_w_0().flex().justify_center().child(
+            ui::top_bar::search_box(&theme, !self.query.is_empty())
+                .child(self.search_input.clone()),
+        );
+
+        let right = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_1()
             // Grid-only zoom stepper.
             .children(is_grid.then(|| {
                 ui::top_bar::toolbar_button(&theme, "zoom-out", "icons/minus.svg", theme.text_dim)
@@ -2426,18 +2445,31 @@ impl Workspace {
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.toggle_settings(cx);
                 })),
-            )
+            );
+
+        ui::top_bar::top_bar(&theme).child(left).child(center).child(right)
     }
 
-    fn render_settings_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Settings live in a centred modal over the browse view (rather
+    /// than replacing it): a dimmed backdrop closes on an outside click,
+    /// Escape closes it too (see the ClearInput handler). `None` while
+    /// closed.
+    fn render_settings_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.settings_open {
+            return None;
+        }
         let theme = *cx.theme();
         let settings = self.settings.read(cx).settings().clone();
         let file_note: SharedString = match filex::settings::default_settings_file() {
             Some(path) => format!("saved to {}", path.display()).into(),
             None => "no config directory found — settings won't persist".into(),
         };
-        ui::settings_pane::settings_pane()
-            .child(ui::settings_pane::pane_title(&theme, "Settings"))
+        let close = ui::top_bar::toolbar_button(&theme, "settings-close", "icons/x.svg", theme.text_dim)
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
+            .into_any_element();
+        let card = ui::settings_pane::settings_card(&theme, "settings-panel")
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(ui::settings_pane::card_header(&theme, "Settings", close))
             .child(ui::settings_pane::choice_row(
                 &theme,
                 "Appearance",
@@ -2518,8 +2550,13 @@ impl Workspace {
                     this.spawn_crash_upload(cx);
                 })),
             )
-            .child(ui::settings_pane::footnote(&theme, file_note))
-            .into_any_element()
+            .child(ui::settings_pane::footnote(&theme, file_note));
+        Some(
+            ui::modal::backdrop("settings-backdrop")
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// The three-way light/dark/system segmented control for the
@@ -2599,9 +2636,11 @@ impl Workspace {
                 .into_any_element(),
         };
         let menu_path = slot.path.clone();
+        let tip = slot.path.display().to_string();
         ui::sidebar::sidebar_row(&theme, ("root", ix))
+            .tooltip(ui::tooltip::text_tooltip(tip, theme))
             .child(marker)
-            .child(div().flex_1().overflow_hidden().child(slot.label.clone()))
+            .child(ui::sidebar::sidebar_label(slot.label.clone()))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2669,7 +2708,7 @@ impl Workspace {
                 |(ix, (icon, label, path))| {
                     ui::sidebar::sidebar_row(&theme, ("place", ix))
                         .child(ui::icon::ui_icon(icon, theme.text_dim).size(px(16.)))
-                        .child(label)
+                        .child(ui::sidebar::sidebar_label(label))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.navigate(path.clone(), cx);
                         }))
@@ -2688,9 +2727,11 @@ impl Workspace {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.display().to_string());
                     let (nav, menu) = (path.clone(), path.clone());
+                    let tip = path.display().to_string();
                     ui::sidebar::sidebar_row(&theme, ("favorite", ix))
+                        .tooltip(ui::tooltip::text_tooltip(tip, theme))
                         .child(ui::icon::ui_icon("icons/star.svg", theme.accent).size(px(14.)))
-                        .child(div().flex_1().overflow_hidden().child(label))
+                        .child(ui::sidebar::sidebar_label(label))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.navigate(nav.clone(), cx);
                         }))
@@ -2716,9 +2757,11 @@ impl Workspace {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.display().to_string());
+                        let tip = path.display().to_string();
                         ui::sidebar::sidebar_row(&theme, ("recent", ix))
+                            .tooltip(ui::tooltip::text_tooltip(tip, theme))
                             .child(ui::icon::ui_icon("icons/clock.svg", theme.text_dim).size(px(14.)))
-                            .child(div().flex_1().overflow_hidden().child(label))
+                            .child(ui::sidebar::sidebar_label(label))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.open_recent(path.clone(), cx);
                             }))
@@ -2747,8 +2790,9 @@ impl Workspace {
                         let name = tag.name.clone();
                         let dot = ui::details::tag_dot_color(&theme, tag.color);
                         ui::sidebar::sidebar_row(&theme, ("tag", ix))
+                            .tooltip(ui::tooltip::text_tooltip(name.clone(), theme))
                             .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
-                            .child(div().flex_1().overflow_hidden().child(SharedString::from(name.clone())))
+                            .child(ui::sidebar::sidebar_label(SharedString::from(name.clone())))
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.search_tag(name.clone(), window, cx);
                             }))
@@ -2984,18 +3028,13 @@ impl Workspace {
         } else {
             format_size(entry.size).into()
         };
+        let name_tip: SharedString = name.clone().into();
         let icon = self.render_icon_cell(&name, &path, is_dir, size, cx);
         ui::grid::card(theme, ("card", ix), size, is_selected)
+            .tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
             .child(ui::grid::card_icon_area(size).child(icon))
-            .child(
-                div()
-                    .w(px(size))
-                    .text_center()
-                    .text_xs()
-                    .overflow_hidden()
-                    .child(name),
-            )
-            .child(div().text_xs().text_color(theme.text_dim).child(detail))
+            .child(ui::grid::card_name(theme, size).child(name))
+            .child(div().flex_none().text_xs().text_color(theme.text_dim).child(detail))
             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                 if event.click_count() >= 2 {
                     this.activate(ix, cx);
@@ -3028,12 +3067,14 @@ impl Workspace {
                         let modified = entry.modified;
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
+                        let name_tip: SharedString = name.clone().into();
                         let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
                         let rename_input = this
                             .renaming
                             .as_ref()
                             .filter(|rename| rename.ix == ix)
                             .map(|rename| rename.input.clone());
+                        let is_renaming = rename_input.is_some();
                         let name_cell = match rename_input {
                             Some(input) => div()
                                 .flex_1()
@@ -3044,10 +3085,19 @@ impl Workspace {
                                 .text_sm()
                                 .child(input)
                                 .into_any_element(),
-                            None => div().flex_1().text_sm().child(name).into_any_element(),
+                            None => div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().w_full().text_sm().truncate().child(name))
+                                .into_any_element(),
                         };
                         Some(
                             ui::list_row::list_row(&theme, ix, is_selected)
+                                // Full name on hover (helps when it's truncated);
+                                // suppressed mid-rename so it doesn't cover the field.
+                                .when(!is_renaming, |row| {
+                                    row.tooltip(ui::tooltip::text_tooltip(name_tip, theme))
+                                })
                                 .child(icon)
                                 .child(name_cell)
                                 .child(ui::list_row::detail_cell(
@@ -3098,15 +3148,23 @@ impl Workspace {
                         let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
                         Some(
                             ui::list_row::list_row(&theme, ix, is_selected)
+                                // Full path on hover — the row truncates it below.
+                                .tooltip(ui::tooltip::text_tooltip(path_label.clone(), theme))
                                 .child(icon)
-                                .child(div().text_sm().child(name))
+                                .child(div().flex_none().text_sm().whitespace_nowrap().child(name))
+                                // flex_1 + min_w_0 lets the cell shrink; the inner
+                                // w_full gives the text a *definite* width, which
+                                // gpui needs to actually paint the … ellipsis
+                                // (a bare flex child never truncates).
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .text_xs()
-                                        .text_color(theme.text_dim)
-                                        .overflow_hidden()
-                                        .child(path_label),
+                                    div().flex_1().min_w_0().child(
+                                        div()
+                                            .w_full()
+                                            .text_xs()
+                                            .text_color(theme.text_dim)
+                                            .truncate()
+                                            .child(path_label),
+                                    ),
                                 )
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                                     if event.click_count() >= 2 {
@@ -3522,12 +3580,13 @@ impl Workspace {
     }
 
     /// The right-hand details/preview panel for the lead item. `None`
-    /// when the panel is closed or the settings pane is showing. Uses
-    /// `&mut self` because the preview image may schedule a thumbnail
-    /// decode, exactly like a list row.
+    /// when the panel is closed. (Settings now float in a modal over the
+    /// browse view rather than replacing it, so the panel stays put
+    /// underneath.) Uses `&mut self` because the preview image may
+    /// schedule a thumbnail decode, exactly like a list row.
     fn render_details_panel(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let settings = self.settings.read(cx).settings();
-        if !settings.preview_open || self.settings_open {
+        if !settings.preview_open {
             return None;
         }
         let width = settings.preview_width;
@@ -3769,8 +3828,6 @@ impl Render for Workspace {
                     .child(self.render_sidebar(cx))
                     .child(if searching {
                         self.render_search_pane(cx)
-                    } else if self.settings_open {
-                        self.render_settings_pane(cx)
                     } else {
                         self.render_browse_pane(window, cx)
                     })
@@ -3779,6 +3836,7 @@ impl Render for Workspace {
             .children(self.render_jobs(cx))
             .child(self.render_status_bar(&theme))
             .children(self.render_context_menu(cx))
+            .children(self.render_settings_modal(cx))
             .children(self.render_conflict_modal(cx))
     }
 }

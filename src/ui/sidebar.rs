@@ -15,6 +15,17 @@ use super::theme::Theme;
 /// Sidebar width. One place so panels/overlays can align to it later.
 pub const SIDEBAR_WIDTH: f32 = 200.;
 
+/// Fixed height of a standard sidebar row. Every row is this tall so the
+/// panel scrolls cleanly instead of compressing rows into each other.
+pub const ROW_HEIGHT: f32 = 30.;
+
+/// Definite width for a row's truncating label: the panel width minus the
+/// row's horizontal margins (`mx_2`) and padding (`px_2`), a leading icon
+/// (~14px), and the gap after it. gpui only paints the … ellipsis against
+/// a *definite* width, and — unlike `uniform_list` rows — a nested sidebar
+/// row never gets one from a `w_full`-in-flex child, so it's pinned here.
+const LABEL_WIDTH: f32 = SIDEBAR_WIDTH - 16. - 16. - 14. - 8.;
+
 /// The sidebar panel itself: fixed-width column with panel background
 /// and a right border. Children are headers and rows, top-down.
 pub fn sidebar_panel(theme: &Theme) -> Div {
@@ -43,6 +54,7 @@ pub fn collapsible_header(
     div()
         .id(id)
         .flex()
+        .flex_shrink_0()
         .items_center()
         .gap_1()
         .mx_2()
@@ -65,6 +77,7 @@ pub fn drive_row(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
+        .flex_shrink_0()
         .flex_col()
         .gap_1()
         .mx_2()
@@ -89,17 +102,32 @@ pub fn capacity_bar(theme: &Theme, fraction: f32) -> Div {
         .child(div().h_full().rounded_full().bg(fill).w(relative(f)))
 }
 
+/// A single-line, ellipsis-truncated label for a [`sidebar_row`]. Uses an
+/// explicit [`LABEL_WIDTH`] (not `flex_1`) because gpui only paints the …
+/// against a definite width, and a nested sidebar row doesn't hand one
+/// down through flex the way a `uniform_list` row does. Pair it with a
+/// tooltip on the row for the full text.
+pub fn sidebar_label(label: impl Into<SharedString>) -> Div {
+    div().flex_none().w(px(LABEL_WIDTH)).truncate().child(label.into())
+}
+
 /// The common sidebar row: inset, rounded, hover-highlighted.
+///
+/// Fixed height + `flex_shrink_0`: without these, a full sidebar's rows
+/// would be squeezed thinner than their text (overlapping) to fit the
+/// column instead of letting the panel scroll. Now every row keeps
+/// [`ROW_HEIGHT`] and the overflow scrolls.
 pub fn sidebar_row(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
     let hover = theme.hover;
     div()
         .id(id)
         .flex()
+        .flex_shrink_0()
         .items_center()
         .gap_2()
         .mx_2()
         .px_2()
-        .py_1()
+        .h(px(ROW_HEIGHT))
         .rounded_md()
         .cursor_pointer()
         .text_sm()

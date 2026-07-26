@@ -11,14 +11,34 @@ use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, 
 
 use super::theme::Theme;
 
-/// The pane container filling the main content area.
-pub fn settings_pane() -> Div {
-    div().flex().flex_col().flex_1().min_h_0().p_4().gap_1()
+/// The settings card: a centred modal panel floating over the browse
+/// view. Fixed width, sized to its content. Callers chain `.on_click`
+/// (to stop the backdrop's click-through) and the rows.
+pub fn settings_card(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w(px(480.))
+        .p_4()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.panel)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_1()
 }
 
-/// The pane's heading.
-pub fn pane_title(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().pb_2().text_sm().text_color(theme.text).child(text.into())
+/// The card's header: a heading on the left and a close ✕ on the right.
+/// The caller supplies the close button as the trailing control.
+pub fn card_header(theme: &Theme, text: impl Into<SharedString>, close: AnyElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .pb_2()
+        .child(div().text_sm().text_color(theme.text).child(text.into()))
+        .child(close)
 }
 
 /// The label + explanation stack shared by every settings row.
