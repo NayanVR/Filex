@@ -23,4 +23,5 @@ pub mod sidebar;
 pub mod status_bar;
 pub mod tabs;
 pub mod theme;
+pub mod tooltip;
 pub mod top_bar;

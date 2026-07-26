@@ -22,10 +22,17 @@ actions!(
     [
         Backspace,
         Delete,
+        DeleteToPreviousWord,
+        DeleteToNextWord,
+        DeleteToBeginningOfLine,
         Left,
         Right,
+        WordLeft,
+        WordRight,
         SelectLeft,
         SelectRight,
+        SelectWordLeft,
+        SelectWordRight,
         SelectAll,
         Home,
         End,
@@ -60,6 +67,10 @@ pub struct SearchInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Horizontal scroll so the caret stays visible in a fixed-width box
+    /// once the text is longer than it. Persisted between frames so the
+    /// view doesn't jump; recomputed each prepaint from the caret.
+    scroll_offset: Pixels,
 }
 
 impl EventEmitter<SearchInputEvent> for SearchInput {}
@@ -76,6 +87,7 @@ impl SearchInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            scroll_offset: px(0.),
         }
     }
 
@@ -135,6 +147,72 @@ impl SearchInput {
             self.select_to(self.next_boundary(self.cursor_offset()), cx)
         }
         self.replace_text_in_range(None, "", window, cx)
+    }
+
+    /// Alt/Ctrl-Backspace: delete the whitespace-delimited word before
+    /// the cursor (or the current selection, if any).
+    fn delete_to_previous_word(
+        &mut self,
+        _: &DeleteToPreviousWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.content.is_empty() {
+            cx.emit(SearchInputEvent::BackspaceWhenEmpty);
+            return;
+        }
+        if self.selected_range.is_empty() {
+            self.select_to(self.previous_word_boundary(self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    /// Alt/Fn-Delete: delete the word after the cursor.
+    fn delete_to_next_word(
+        &mut self,
+        _: &DeleteToNextWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.next_word_boundary(self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    /// Cmd-Backspace: delete from the cursor back to the start of the
+    /// line. While empty it bubbles, so the workspace's Finder-style
+    /// "delete selected file" binding on the same key still fires.
+    fn delete_to_beginning_of_line(
+        &mut self,
+        _: &DeleteToBeginningOfLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
+        if self.selected_range.is_empty() {
+            self.select_to(0, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word_boundary(self.cursor_offset()), cx);
     }
 
     fn clear(&mut self, _: &ClearInput, _: &mut Window, cx: &mut Context<Self>) {
@@ -289,7 +367,9 @@ impl SearchInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        // Undo the horizontal scroll so the click maps to the character
+        // actually under the cursor.
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll_offset)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -353,6 +433,65 @@ impl SearchInput {
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
     }
+
+    /// Byte offset one word to the left of `offset` in the content.
+    fn previous_word_boundary(&self, offset: usize) -> usize {
+        prev_word_boundary(&self.content, offset)
+    }
+
+    /// Byte offset one word to the right of `offset` in the content.
+    fn next_word_boundary(&self, offset: usize) -> usize {
+        next_word_boundary(&self.content, offset)
+    }
+}
+
+/// Byte offset one word to the left of `offset`: skip any whitespace
+/// immediately before the cursor, then the run of non-whitespace before
+/// that. Whitespace-delimited to stay predictable on the short queries
+/// this input sees. `offset` must fall on a char boundary.
+fn prev_word_boundary(text: &str, offset: usize) -> usize {
+    let mut idx = offset;
+    let mut chars = text[..offset].char_indices().rev().peekable();
+    while let Some(&(i, c)) = chars.peek() {
+        if c.is_whitespace() {
+            idx = i;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    while let Some(&(i, c)) = chars.peek() {
+        if c.is_whitespace() {
+            break;
+        }
+        idx = i;
+        chars.next();
+    }
+    idx
+}
+
+/// Byte offset one word to the right of `offset`: skip leading
+/// whitespace, then the following run of non-whitespace. `offset` must
+/// fall on a char boundary.
+fn next_word_boundary(text: &str, offset: usize) -> usize {
+    let mut idx = offset;
+    let mut chars = text[offset..].char_indices().peekable();
+    while let Some(&(i, c)) = chars.peek() {
+        if c.is_whitespace() {
+            idx = offset + i + c.len_utf8();
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    while let Some(&(i, c)) = chars.peek() {
+        if c.is_whitespace() {
+            break;
+        }
+        idx = offset + i + c.len_utf8();
+        chars.next();
+    }
+    idx
 }
 
 impl EntityInputHandler for SearchInput {
@@ -490,6 +629,8 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    /// How far the text is scrolled left (px) to keep the caret in view.
+    scroll_offset: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -539,6 +680,7 @@ impl Element for TextElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let prev_scroll = input.scroll_offset;
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
@@ -577,11 +719,29 @@ impl Element for TextElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let text_len = display_text.len();
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
 
-        let cursor_pos = line.x_for_index(cursor);
+        // Keep the caret inside the fixed-width box: scroll the text left
+        // just enough that the caret stays visible, without leaving a gap
+        // past the end of the text. A small margin keeps the caret off the
+        // hard edge so it never looks clipped.
+        let caret = line.x_for_index(cursor);
+        let line_width = line.x_for_index(text_len);
+        let margin = px(2.);
+        let mut scroll = prev_scroll;
+        if caret < scroll + margin {
+            scroll = (caret - margin).max(px(0.));
+        }
+        if caret > scroll + bounds.size.width - margin {
+            scroll = caret - bounds.size.width + margin;
+        }
+        let max_scroll = (line_width - bounds.size.width).max(px(0.));
+        scroll = scroll.clamp(px(0.), max_scroll);
+
+        let cursor_pos = caret - scroll;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
@@ -598,11 +758,11 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.left() + line.x_for_index(selected_range.start) - scroll,
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.left() + line.x_for_index(selected_range.end) - scroll,
                             bounds.bottom(),
                         ),
                     ),
@@ -611,7 +771,7 @@ impl Element for TextElement {
                 None,
             )
         };
-        PrepaintState { line: Some(line), cursor, selection }
+        PrepaintState { line: Some(line), cursor, selection, scroll_offset: scroll }
     }
 
     fn paint(
@@ -630,22 +790,28 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
+        let scroll = prepaint.scroll_offset;
         let line = prepaint.line.take().expect("prepaint always shapes a line");
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .ok();
+        // Everything the input paints is clipped to its box, so scrolled
+        // text (and the caret/selection) can't bleed over the toolbar.
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
+            let origin = point(bounds.left() - scroll, bounds.top());
+            line.paint(origin, window.line_height(), window, cx).ok();
 
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
 
-        self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line);
-            input.last_bounds = Some(bounds);
+            self.input.update(cx, |input, _cx| {
+                input.last_layout = Some(line);
+                input.last_bounds = Some(bounds);
+                input.scroll_offset = scroll;
+            });
         });
     }
 }
@@ -659,11 +825,18 @@ impl Render for SearchInput {
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_to_previous_word))
+            .on_action(cx.listener(Self::delete_to_next_word))
+            .on_action(cx.listener(Self::delete_to_beginning_of_line))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -699,6 +872,36 @@ pub fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("shift-right", SelectRight, CTX),
         gpui::KeyBinding::new("home", Home, CTX),
         gpui::KeyBinding::new("end", End, CTX),
+        // Word- and line-granular editing. macOS uses Option for word
+        // and Cmd for line; elsewhere Ctrl covers word moves.
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("alt-backspace", DeleteToPreviousWord, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("alt-delete", DeleteToNextWord, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("cmd-backspace", DeleteToBeginningOfLine, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("alt-left", WordLeft, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("alt-right", WordRight, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("alt-shift-left", SelectWordLeft, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("alt-shift-right", SelectWordRight, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("cmd-left", Home, CTX),
+        #[cfg(target_os = "macos")]
+        gpui::KeyBinding::new("cmd-right", End, CTX),
+        #[cfg(not(target_os = "macos"))]
+        gpui::KeyBinding::new("ctrl-backspace", DeleteToPreviousWord, CTX),
+        #[cfg(not(target_os = "macos"))]
+        gpui::KeyBinding::new("ctrl-left", WordLeft, CTX),
+        #[cfg(not(target_os = "macos"))]
+        gpui::KeyBinding::new("ctrl-right", WordRight, CTX),
+        #[cfg(not(target_os = "macos"))]
+        gpui::KeyBinding::new("ctrl-shift-left", SelectWordLeft, CTX),
+        #[cfg(not(target_os = "macos"))]
+        gpui::KeyBinding::new("ctrl-shift-right", SelectWordRight, CTX),
         #[cfg(target_os = "macos")]
         gpui::KeyBinding::new("cmd-a", SelectAll, CTX),
         #[cfg(target_os = "macos")]
@@ -718,4 +921,59 @@ pub fn bind_keys(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         gpui::KeyBinding::new("ctrl-x", Cut, CTX),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_word_boundary, prev_word_boundary};
+
+    #[test]
+    fn prev_word_deletes_trailing_word_then_leading() {
+        // "foo bar|" -> "foo |" -> "|"
+        assert_eq!(prev_word_boundary("foo bar", 7), 4);
+        assert_eq!(prev_word_boundary("foo ", 4), 0);
+    }
+
+    #[test]
+    fn prev_word_skips_run_of_whitespace() {
+        // Multiple spaces before the word collapse in one hop.
+        assert_eq!(prev_word_boundary("foo   bar", 9), 6);
+        assert_eq!(prev_word_boundary("foo   ", 6), 0);
+    }
+
+    #[test]
+    fn prev_word_at_start_is_a_noop() {
+        assert_eq!(prev_word_boundary("foo", 0), 0);
+        assert_eq!(prev_word_boundary("", 0), 0);
+    }
+
+    #[test]
+    fn prev_word_from_mid_word() {
+        // Cursor inside "bar" (after 'b') deletes back to the space.
+        assert_eq!(prev_word_boundary("foo bar", 5), 4);
+    }
+
+    #[test]
+    fn next_word_skips_whitespace_then_word() {
+        assert_eq!(next_word_boundary("foo bar", 0), 3);
+        assert_eq!(next_word_boundary("foo bar", 3), 7);
+        assert_eq!(next_word_boundary("foo   bar", 3), 9);
+    }
+
+    #[test]
+    fn next_word_at_end_is_a_noop() {
+        assert_eq!(next_word_boundary("foo", 3), 3);
+        assert_eq!(next_word_boundary("", 0), 0);
+    }
+
+    #[test]
+    fn word_boundaries_respect_multibyte_chars() {
+        // "café x" — 'é' is two bytes, so "café" spans bytes 0..5.
+        let s = "café x";
+        assert_eq!(next_word_boundary(s, 0), 5);
+        assert_eq!(prev_word_boundary(s, 5), 0);
+        // From the end, delete just the word "x" (byte 6), leaving the
+        // space intact — same rule as the ASCII cases above.
+        assert_eq!(prev_word_boundary(s, s.len()), 6);
+    }
 }

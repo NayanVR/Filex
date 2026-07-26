@@ -9,7 +9,7 @@ use super::theme::Theme;
 /// Bar height. The macOS titlebar is transparent and the traffic
 /// lights are inset into this bar, so their position (set at window
 /// creation) is derived from it.
-pub const TOP_BAR_HEIGHT: f32 = 40.;
+pub const TOP_BAR_HEIGHT: f32 = 48.;
 
 /// The bar container; children flow left-to-right.
 pub fn top_bar(theme: &Theme) -> Div {
@@ -140,13 +140,21 @@ pub fn search_box(theme: &Theme, active: bool) -> Div {
         .flex()
         .items_center()
         .gap_2()
-        .w(px(260.))
-        .px_2()
-        .py_1()
+        // Fills its (centered) column but never gets absurdly wide, and
+        // stays usable when the window is narrow.
+        .w_full()
+        .min_w(px(160.))
+        .max_w(px(420.))
+        .px_3()
+        .py(px(6.))
         .rounded_md()
         .border_1()
         .border_color(if active { theme.accent } else { theme.border })
+        .bg(theme.bg)
         .text_sm()
         .text_color(theme.text)
+        // Belt-and-suspenders: the input scrolls its own text, but this
+        // guarantees a long query can never paint past the box edge.
+        .overflow_hidden()
         .child(icon::ui_icon("icons/search.svg", theme.text_dim).size(px(15.)))
 }
