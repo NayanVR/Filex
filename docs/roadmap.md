@@ -296,6 +296,19 @@ delivers most of the same perceived intelligence for none of the cost.
 Gap: service-backed search (Windows + `filex-indexd`) ranks without
 frecency, since visit history is private and never crosses the pipe.
 
+## Phase 2f — Magic mode (NL command search, 2026-07-28)
+
+Design doc: **docs/design-magic-mode.md**. Partial reversal of the
+2026-07-21 "no AI affordances in the search bar" decision (see that
+doc's "Relationship to prior decisions" section for exactly what is and
+isn't reopened). Adds a second search-bar mode, auto-selected (no
+manual toggle) by a cheap n-gram intent classifier: filename-shaped
+queries behave exactly as today, command-shaped queries ("delete
+screenshots older than 30 days") surface a reviewable, undoable
+multi-step plan built from the existing `search_filter`/`phrases.rs`
+grammar and `ops::FileOp`/`Journal`. No embeddings, no model on the
+keystroke path. Not started.
+
 ## Phase 3 — Future (unchanged, still out of scope)
 
 Semantic search / embeddings, content extraction (OCR, PDF), local ML
@@ -303,7 +316,11 @@ inference, shell integration. Do not start these; flag drift per
 CLAUDE.md. Phase 2 quietly serves this phase anyway (settings surface,
 service split, perf telemetry). If embeddings are revisited, the cheap
 shape and the recall bar they must clear are written down at the end of
-docs/design-search-ranking.md.
+docs/design-search-ranking.md. (Magic mode's classifier/grammar, Phase
+2f above, is not part of this gate — it's the same cost class as the
+already-shipped frecency/fuzzy/phrases work; only Magic mode's deferred
+LLM fallback would cross into this territory, and it has its own gate
+in design-magic-mode.md §4.)
 
 ## Phase 2d — UI overhaul (planned 2026-07-21)
 
