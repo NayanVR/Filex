@@ -282,8 +282,11 @@ is left instant for now (the chevron swaps state).
 
 ## Explicitly out of scope
 
-- **"Ask AI" / semantic search** — Phase 3 (user-confirmed
-  2026-07-21). The search bar gets no AI affordances now.
+- **Semantic/content search** (embeddings, OCR, PDF text) — still
+  Phase 3, unchanged. Partially reversed 2026-07-28: the search bar
+  does now get a deterministic NL-command affordance ("Magic mode" —
+  intent classification + rule-based plan extraction, no embeddings or
+  model on the keystroke path). See `docs/design-magic-mode.md`.
 - **Cloud drives (Google Drive, Dropbox), sharing avatars, comments,
   AirDrop** — collaboration/cloud services, not a local-first
   explorer. Off the table unless the product vision changes.
