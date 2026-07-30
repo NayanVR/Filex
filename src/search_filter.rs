@@ -218,7 +218,9 @@ fn parse_size_bound(value: &str) -> Option<Bound<u64>> {
 
 /// Parse a size like `2mb`, `1.5gb`, `500kb`, or a bare `1024` into bytes.
 /// Base-1024; the unit is optional (bytes). `None` on anything malformed.
-fn parse_bytes(text: &str) -> Option<u64> {
+/// Shared with [`crate::phrases`], whose comparative phrases (`bigger than
+/// 10mb`) take the same operand spelling as `size:>10mb`.
+pub(crate) fn parse_bytes(text: &str) -> Option<u64> {
     let text = text.trim();
     if text.is_empty() {
         return None;

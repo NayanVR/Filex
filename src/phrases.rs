@@ -26,7 +26,8 @@
 
 use crate::listing::FileKind;
 use crate::search_filter::{
-    Bound, Filter, SECS_PER_DAY as DAY, civil_from_days, days_from_civil, start_of_day,
+    Bound, Filter, SECS_PER_DAY as DAY, civil_from_days, days_from_civil, parse_bytes,
+    start_of_day,
 };
 
 /// One recognized phrase and what it means.
@@ -115,7 +116,14 @@ fn kind_word(kind: FileKind) -> &'static str {
 /// Words that carry no meaning on their own but glue phrases together.
 /// Dropped only when adjacent to something that matched, so a file named
 /// `my` or `all` is still findable.
-const FILLER: &[&str] = &["from", "my", "the", "of", "on", "at", "a", "an", "some", "any"];
+///
+/// The tail of the list is the verbs that introduce a date — "photos
+/// *modified* last week". They are only ever dropped next to a phrase
+/// that did match, so a search for `modified config` keeps both words.
+const FILLER: &[&str] = &[
+    "from", "my", "the", "of", "on", "at", "a", "an", "some", "any", "modified", "created",
+    "changed",
+];
 
 const MONTHS: [&str; 12] = [
     "january",
@@ -139,8 +147,29 @@ const MONTHS: [&str; 12] = [
 /// Words are matched greedily longest-first at each position, so
 /// `last month` wins over a bare `month`.
 pub fn expand(raw: &str, now: i64) -> Expansion {
+    expand_inner(raw, now, true)
+}
+
+/// [`expand`], minus rule 2 — a lone word is read as a *description*
+/// ("screenshots" ⇒ `kind:image`), not as a filename.
+///
+/// Rule 2 exists because a bare `photos` typed into a search box is far
+/// more likely to be a file's name than a description of a set. That
+/// reasoning is specific to the search bar: once a verb has established
+/// the intent, as in `delete screenshots`, the object of that verb is
+/// unambiguously a description, and applying rule 2 there makes
+/// `delete screenshots` mean "delete files *named* screenshots" — a
+/// quietly much narrower plan than the one the user asked for.
+///
+/// Only [`crate::magic`] should need this; ordinary search wants
+/// [`expand`].
+pub fn expand_as_description(raw: &str, now: i64) -> Expansion {
+    expand_inner(raw, now, false)
+}
+
+fn expand_inner(raw: &str, now: i64, lone_word_is_filename: bool) -> Expansion {
     let words: Vec<&str> = raw.split_whitespace().collect();
-    let single_word_query = words.len() == 1;
+    let single_word_query = lone_word_is_filename && words.len() == 1;
 
     let mut text: Vec<&str> = Vec::new();
     let mut phrases: Vec<Phrase> = Vec::new();
@@ -183,8 +212,17 @@ pub fn expand(raw: &str, now: i64) -> Expansion {
                 }
             }
             None => {
-                text.push(words[i]);
-                i += 1;
+                // A comparative whose operand didn't parse ("older than
+                // yesterday"). Its operand must not then be read as a
+                // phrase in its own right: here "yesterday" is the thing
+                // being compared *against*, so expanding it to "modified
+                // during yesterday" would mean the near-opposite of what
+                // was typed. The whole failed attempt stays literal text.
+                let failed_comparative = is_comparative_lead(words[i])
+                    && words.get(i + 1).is_some_and(|w| w.eq_ignore_ascii_case("than"));
+                let span = if failed_comparative { 3.min(words.len() - i) } else { 1 };
+                text.extend_from_slice(&words[i..i + span]);
+                i += span;
             }
         }
     }
@@ -203,10 +241,26 @@ fn is_filler(word: &str) -> bool {
     FILLER.contains(&word.to_ascii_lowercase().as_str())
 }
 
+/// Words that open a comparative phrase — see [`comparative`]. Kept in
+/// sync with the match arms there; a lead listed here but not handled
+/// there just means a failed comparative stays text, which is the safe
+/// direction.
+const COMPARATIVE_LEADS: &[&str] = &["older", "newer", "bigger", "larger", "smaller"];
+
+fn is_comparative_lead(word: &str) -> bool {
+    COMPARATIVE_LEADS.contains(&word.to_ascii_lowercase().as_str())
+}
+
+/// The most words one phrase can span. Four is what the longest
+/// supported form needs (`older than 30 days`); the cost is a fixed
+/// handful of table probes per word of a short query string, nowhere
+/// near the index scan.
+const MAX_PHRASE_WORDS: usize = 4;
+
 /// Try to match a phrase at the start of `words`, longest first.
 /// Returns how many words it consumed and what they mean.
 fn match_at(words: &[&str], now: i64) -> Option<(usize, Vec<Filter>)> {
-    for len in (1..=3.min(words.len())).rev() {
+    for len in (1..=MAX_PHRASE_WORDS.min(words.len())).rev() {
         let phrase = words[..len].join(" ").to_ascii_lowercase();
         if let Some(filters) = lookup(&phrase, now) {
             return Some((len, filters));
@@ -255,7 +309,60 @@ fn lookup(phrase: &str, now: i64) -> Option<Vec<Filter>> {
         _ => {}
     }
 
+    if let Some(filters) = comparative(phrase, now) {
+        return Some(filters);
+    }
+
     time_phrase(phrase, now).map(|bound| vec![Filter::Modified(bound)])
+}
+
+/// Comparative phrases carrying an operand: `older than 30 days`,
+/// `bigger than 10mb`. These can't live in the fixed table above because
+/// the operand is open-ended, so they are parsed instead of looked up.
+///
+/// The literal `than` is required. `older 30 days` is not something a
+/// person types, and matching the comparative loosely would start
+/// claiming words out of filenames.
+fn comparative(phrase: &str, now: i64) -> Option<Vec<Filter>> {
+    let (word, operand) = phrase.split_once(" than ")?;
+    let filter = match word {
+        // Older = modified *before* the threshold, so the comparator
+        // flips relative to the word — same inversion `modified:>30d`
+        // makes in the `key:value` grammar.
+        "older" => Filter::Modified(Bound::Lt(now.saturating_sub(duration_secs(operand)?))),
+        "newer" => Filter::Modified(Bound::Gt(now.saturating_sub(duration_secs(operand)?))),
+        "bigger" | "larger" => Filter::Size(Bound::Gt(parse_bytes(operand)?)),
+        "smaller" => Filter::Size(Bound::Lt(parse_bytes(operand)?)),
+        _ => return None,
+    };
+    Some(vec![filter])
+}
+
+/// A spoken duration — `30 days`, `2 weeks`, `1 year` — or the compact
+/// `30d` the `modified:` grammar already accepts, in seconds.
+///
+/// Months and years are the same rounded 30/365 days the rest of the
+/// phrase table uses; nobody typing "older than 6 months" means a
+/// calendar-exact boundary.
+fn duration_secs(text: &str) -> Option<i64> {
+    let (number, unit) = match text.split_once(' ') {
+        Some(split) => split,
+        None => text.split_at(text.find(|c: char| c.is_ascii_alphabetic())?),
+    };
+    let count: i64 = number.trim().parse().ok()?;
+    if count < 0 {
+        return None;
+    }
+    let unit = unit.trim();
+    let secs = match unit.strip_suffix('s').unwrap_or(unit) {
+        "hour" | "h" => 3_600,
+        "day" | "d" => DAY,
+        "week" | "w" => 7 * DAY,
+        "month" => 30 * DAY,
+        "year" => 365 * DAY,
+        _ => return None,
+    };
+    count.checked_mul(secs)
 }
 
 /// Date phrases → an mtime bound.
@@ -497,6 +604,88 @@ mod tests {
     }
 
     #[test]
+    fn comparative_age_phrases_bound_mtime() {
+        // "older" means modified *before* the threshold.
+        assert_eq!(modified("screenshots older than 30 days"), Bound::Lt(NOW - 30 * DAY));
+        assert_eq!(modified("photos newer than 2 weeks"), Bound::Gt(NOW - 14 * DAY));
+        assert_eq!(modified("videos older than 1 year"), Bound::Lt(NOW - 365 * DAY));
+        assert_eq!(modified("logs older than 6 hours"), Bound::Lt(NOW - 6 * 3_600));
+    }
+
+    #[test]
+    fn comparative_size_phrases_bound_size() {
+        assert_eq!(
+            filters("videos bigger than 100mb"),
+            vec![Filter::Kind(FileKind::Video), Filter::Size(Bound::Gt(100 * (1 << 20)))]
+        );
+        assert_eq!(
+            filters("photos smaller than 500kb"),
+            vec![Filter::Kind(FileKind::Image), Filter::Size(Bound::Lt(500 * (1 << 10)))]
+        );
+        // "larger" is the same comparator as "bigger".
+        assert_eq!(filters("larger than 1gb"), vec![Filter::Size(Bound::Gt(1 << 30))]);
+    }
+
+    #[test]
+    fn comparative_operands_accept_both_spellings() {
+        // Spoken and compact forms of the same duration agree.
+        assert_eq!(duration_secs("30 days"), duration_secs("30d"));
+        assert_eq!(duration_secs("2 weeks"), duration_secs("2w"));
+        // Singular and plural units agree too.
+        assert_eq!(duration_secs("1 day"), Some(DAY));
+        // ...and so do spaced and unspaced sizes.
+        assert_eq!(
+            filters("bigger than 10 mb"),
+            filters("bigger than 10mb"),
+        );
+    }
+
+    #[test]
+    fn a_comparative_without_than_stays_filename_text() {
+        // The literal "than" is what separates a comparative from words
+        // that merely start with "older"/"bigger".
+        for query in ["older 30 days", "bigger report", "older files"] {
+            assert!(expand_at(query).is_empty(), "{query:?} should not expand");
+        }
+    }
+
+    #[test]
+    fn comparatives_with_nonsense_operands_do_not_expand() {
+        for query in [
+            "older than yesterday", // not a duration
+            "bigger than lots",     // not a size
+            "older than -5 days",   // negative
+            "older than 5 fortnights",
+        ] {
+            assert!(expand_at(query).is_empty(), "{query:?} should not expand");
+            assert_eq!(expand_at(query).text, query);
+        }
+    }
+
+    #[test]
+    fn a_comparative_is_undone_by_removing_its_words() {
+        // The four-word phrase has to round-trip through the chip UI's
+        // remove path like every shorter one.
+        let expansion = expand_at("screenshots older than 30 days");
+        assert_eq!(sources("screenshots older than 30 days"), [
+            "screenshots",
+            "older than 30 days"
+        ]);
+        let mut query = "screenshots older than 30 days".to_string();
+        for phrase in expansion.phrases {
+            query = without_phrase(&query, &phrase.source);
+        }
+        assert_eq!(query, "");
+    }
+
+    #[test]
+    fn a_huge_comparative_operand_does_not_overflow() {
+        // i64 seconds overflows long before the year count does.
+        assert_eq!(duration_secs("9223372036854775807 years"), None);
+        assert!(expand_at("older than 9223372036854775807 years").is_empty());
+    }
+
+    #[test]
     fn unrecognized_text_is_left_completely_alone() {
         let expansion = expand_at("quarterly earnings deck");
         assert!(expansion.is_empty());
@@ -530,6 +719,21 @@ mod tests {
     #[test]
     fn filler_is_dropped_after_a_match_as_well_as_before() {
         assert_eq!(expand_at("photos from meeting").text, "meeting");
+    }
+
+    #[test]
+    fn date_verbs_are_filler_only_next_to_a_date() {
+        // "photos modified last week" is one phrase's worth of meaning
+        // plus a connective; the connective must not survive as filename
+        // text, or the search asks for files *named* "modified".
+        let expansion = expand_at("pdfs modified this week");
+        assert_eq!(expansion.text, "");
+        assert_eq!(expansion.filters(), vec![
+            Filter::Ext("pdf".into()),
+            Filter::Modified(Bound::Ge(NOW - 7 * DAY)),
+        ]);
+        // With nothing matching around it, it stays a searchable word.
+        assert_eq!(expand_at("modified config").text, "modified config");
     }
 
     #[test]

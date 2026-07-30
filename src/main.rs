@@ -106,6 +106,32 @@ const SEARCH_RESULT_LIMIT: usize = 500;
 
 /// A short label for a set of files: the single name quoted, or a count.
 /// `None` for an empty set (callers use it to bail early).
+/// "item" / "items" — Magic card headings and job labels count files.
+fn plural_items(n: usize) -> &'static str {
+    if n == 1 { "item" } else { "items" }
+}
+
+/// One Magic-plan op as a review row: what it acts on, and where that
+/// ends up. The target is `None` for a delete — there is no destination,
+/// and inventing "→ Trash" would imply a path the op does not have.
+fn describe_op(op: &FileOp) -> (SharedString, Option<SharedString>) {
+    let name = |path: &Path| -> SharedString {
+        path.file_name().unwrap_or_default().to_string_lossy().into_owned().into()
+    };
+    match op {
+        FileOp::Delete { path } => (name(path), None),
+        FileOp::Move { from, to } | FileOp::Copy { from, to } => {
+            // The parent, not the full destination: every row in a plan
+            // shares it, and the file name is already in the left column.
+            let dest = to.parent().unwrap_or(to.as_path());
+            (name(from), Some(format!("→ {}", dest.display()).into()))
+        }
+        FileOp::Rename { path, new_name } => {
+            (name(path), Some(format!("→ {new_name}").into()))
+        }
+    }
+}
+
 fn describe_items(items: &[(PathBuf, String)]) -> Option<String> {
     match items {
         [] => None,
@@ -244,6 +270,44 @@ struct Job {
     progress: std::sync::Arc<ops::OpProgress>,
 }
 
+/// A parsed Magic command and the plan it resolved to, for the review
+/// card (`docs/design-magic-mode.md` §3).
+///
+/// Held separately from `results` even though the two are computed from
+/// the same search: `results` is what the user is *looking at*, while
+/// `ops`/`checked` are what would actually run. Keeping them apart is
+/// what lets a row be unchecked without disturbing the result list.
+struct MagicState {
+    command: filex::magic::Command,
+    /// The resolved plan, or why there isn't one. `None` until the
+    /// search backing it has landed — distinguishing "still looking"
+    /// from "nothing matched" matters, because a root that is still
+    /// indexing would otherwise sit there claiming the command matched
+    /// no files.
+    ///
+    /// An error still shows a card: saying "no folder called Archive" is
+    /// far more useful than silently showing nothing after the user
+    /// typed a real command.
+    outcome: Option<Result<filex::magic::Plan, filex::magic::PlanError>>,
+    /// One flag per op in the plan, parallel to `Plan::ops`. Everything
+    /// starts checked; the review step is about *removing* what you
+    /// didn't mean, not opting in one file at a time.
+    checked: Vec<bool>,
+}
+
+impl MagicState {
+    /// The ops the user has left checked.
+    fn selected_ops(&self) -> Vec<FileOp> {
+        let Some(Ok(plan)) = &self.outcome else { return Vec::new() };
+        plan.ops
+            .iter()
+            .zip(&self.checked)
+            .filter(|(_, checked)| **checked)
+            .map(|(op, _)| op.clone())
+            .collect()
+    }
+}
+
 /// A rename-in-place in progress: which browse row is being edited and
 /// the input that owns the edited text (the SearchInput element reused
 /// as a transient editor, per docs/roadmap.md).
@@ -329,6 +393,12 @@ struct Workspace {
     _search_input_subscription: gpui::Subscription,
     results: Vec<SearchRow>,
     search_generation: u64,
+    /// The Magic card's state when the query parses as a command.
+    magic: Option<MagicState>,
+    /// The user's well-known folders, for resolving "… to Documents".
+    /// Read once at startup — `from_os` does environment lookups and has
+    /// no business running per keystroke.
+    user_dirs: filex::magic::UserDirs,
     /// Multi-selection over the browse list (directory entries). Belongs
     /// to the active tab (block 6); survives a search and is restored
     /// when the query clears.
@@ -470,6 +540,8 @@ impl Workspace {
             _search_input_subscription: subscription,
             results: Vec::new(),
             search_generation: 0,
+            magic: None,
+            user_dirs: filex::magic::UserDirs::from_os(),
             selection: Selection::default(),
             search_selection: Selection::default(),
             settings_open: false,
@@ -1385,6 +1457,185 @@ impl Workspace {
         Some(strip.into_any_element())
     }
 
+    /// The Magic card: what the command was understood to mean, the ops
+    /// it resolved to, and the confirm control. `None` when the query
+    /// isn't a command.
+    ///
+    /// A card is shown for a *failed* plan too. The user typed a real
+    /// command; "no folder called Archive" is an answer, silence is not.
+    fn render_magic_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let state = self.magic.as_ref()?;
+        let theme = *cx.theme();
+        let verb = state.command.verb;
+        let destructive = verb == filex::magic::Verb::Delete;
+
+        let mut card = ui::magic_card::card(&theme);
+        let echo = format!("matching “{}”", state.command.selection.source);
+        match &state.outcome {
+            // The search behind this plan hasn't landed yet.
+            None => {
+                card = card
+                    .child(ui::magic_card::heading(&theme, verb.label()))
+                    .child(ui::magic_card::subtitle(&theme, echo))
+                    .child(ui::magic_card::subtitle(
+                        &theme,
+                        if self.any_root_ready() {
+                            "finding matches…"
+                        } else {
+                            "still indexing — matches will appear when ready…"
+                        },
+                    ));
+            }
+            Some(Ok(plan)) => {
+                let count = state.checked.iter().filter(|c| **c).count();
+                card = card
+                    .child(ui::magic_card::heading(
+                        &theme,
+                        format!("{} {} {}", verb.label(), count, plural_items(count)),
+                    ))
+                    .child(ui::magic_card::subtitle(&theme, echo));
+                if plan.skipped > 0 {
+                    card = card.child(ui::magic_card::subtitle(
+                        &theme,
+                        format!(
+                            "{} already {} — nothing to do for {}",
+                            plan.skipped,
+                            if verb == filex::magic::Verb::Rename { "named that" } else { "there" },
+                            if plan.skipped == 1 { "it" } else { "them" },
+                        ),
+                    ));
+                }
+
+                let mut list = ui::magic_card::op_list("magic-ops");
+                for (ix, op) in plan.ops.iter().enumerate() {
+                    let (source, target) = describe_op(op);
+                    list = list.child(
+                        ui::magic_card::op_row(
+                            &theme,
+                            ("magic-op", ix),
+                            state.checked.get(ix).copied().unwrap_or(false),
+                            source,
+                            target,
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.toggle_magic_op(ix, cx);
+                        })),
+                    );
+                }
+                card = card.child(list).child(
+                    ui::magic_card::actions()
+                        .child(
+                            ui::magic_card::secondary_button(&theme, "magic-cancel", "Cancel")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.clear_search(cx);
+                                })),
+                        )
+                        .child(
+                            ui::magic_card::confirm_button(
+                                &theme,
+                                "magic-confirm",
+                                verb.label(),
+                                count > 0,
+                                destructive,
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                this.confirm_magic(cx);
+                            })),
+                        ),
+                );
+            }
+            Some(Err(err)) => {
+                card = card
+                    .child(ui::magic_card::heading(&theme, verb.label()))
+                    .child(ui::magic_card::subtitle(&theme, echo))
+                    .child(ui::magic_card::refusal(&theme, format!("{err}")));
+            }
+        }
+        Some(ui::magic_card::finish(card))
+    }
+
+    /// Run the checked ops as one undo batch — the same background
+    /// executor, `apply_with_progress` and `Journal::record` path that
+    /// paste and drag-and-drop already use, so a Magic plan undoes with
+    /// the same Ctrl+Z as anything else (`docs/design-magic-mode.md` §3).
+    ///
+    /// Conflicts are resolved the way a multi-item paste resolves them —
+    /// an occupied destination retargets to the next free "name 2"
+    /// variant rather than prompting per file. A plan is reviewed as a
+    /// whole; stopping midway to ask about file 40 of 200 would be a
+    /// worse experience than the batch being uniformly predictable.
+    fn confirm_magic(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.magic.as_ref() else { return };
+        let ops = state.selected_ops();
+        if ops.is_empty() {
+            return;
+        }
+        let verb = state.command.verb;
+        let progress = std::sync::Arc::new(ops::OpProgress::default());
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+        self.jobs.push(Job {
+            id: job_id,
+            label: format!("{} {} {}", verb.label().to_lowercase(), ops.len(), plural_items(ops.len()))
+                .into(),
+            progress: progress.clone(),
+        });
+        self.spawn_job_ticker(job_id, cx);
+        // The card's work is done; clearing the query also drops the card
+        // and returns the user to where they were.
+        self.clear_search(cx);
+        cx.notify();
+
+        let tags = self.tags.clone();
+        cx.spawn(async move |this, cx| {
+            let applied = cx
+                .background_executor()
+                .spawn({
+                    let progress = progress.clone();
+                    async move {
+                        let mut applied = Vec::new();
+                        for mut op in ops {
+                            if let Some(dest) = op.destination()
+                                && std::fs::symlink_metadata(&dest).is_ok()
+                            {
+                                match ops::next_free_name(&dest) {
+                                    Ok(free) => op = op.with_destination(free),
+                                    Err(_) => continue,
+                                }
+                            }
+                            match ops::apply_with_progress(&op, &progress) {
+                                Ok(mut done) => {
+                                    migrate_tags(&tags, &mut done);
+                                    applied.push(done);
+                                }
+                                Err(err) => {
+                                    tracing::warn!("magic op failed: {err:#}");
+                                }
+                            }
+                        }
+                        applied
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.jobs.retain(|job| job.id != job_id);
+                if !applied.is_empty() {
+                    this.notice = Some(
+                        format!("{} {} {}", verb.label().to_lowercase(), applied.len(), plural_items(applied.len()))
+                            .into(),
+                    );
+                    this.journal.record(applied);
+                }
+                let cwd = this.cwd.clone();
+                this.load_dir(&cwd, cx);
+                this.refresh_sidebar_tags(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn clear_search(&mut self, cx: &mut Context<Self>) {
         // The input owns the text; its Changed event clears our mirror
         // and re-runs the (now empty) search.
@@ -2150,26 +2401,55 @@ impl Workspace {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let parsed = filex::search_filter::parse_query(&self.query, now);
-        // Natural-language phrases in whatever text the `key:value` parse
-        // left over ("photos from last week"). Pure and rule-based; the
-        // recognized phrases are shown as removable chips, never applied
-        // invisibly.
-        let expansion = filex::phrases::expand(&parsed.text, now);
-        let text = expansion.text.clone();
-        if text.is_empty() && parsed.filters.is_empty() && expansion.is_empty() {
-            self.results.clear();
-            // Leave the browse selection intact; only the search's own
-            // selection goes away with the results.
-            self.search_selection.clear();
-            return;
-        }
+        // A command-shaped query searches for what it *targets*, not for
+        // its own words: "delete screenshots older than 30 days" as a
+        // literal search matches nothing, while the files the plan would
+        // act on are exactly what the user needs to see under the card.
+        let command = filex::magic::parse(&self.query, now);
+        self.magic = command.as_ref().map(|command| MagicState {
+            command: command.clone(),
+            outcome: None,
+            checked: Vec::new(),
+        });
+
+        let (text, all_filters, limit) = match &command {
+            Some(command) => (
+                command.selection.text.clone(),
+                command.selection.filters.clone(),
+                // Deliberately *not* SEARCH_RESULT_LIMIT. A plan is built
+                // from these rows, so a truncated search would silently
+                // become a partial delete — and `magic::build`'s
+                // too-many-to-review guard would never fire, because it
+                // would only ever see the truncated count. Fetching one
+                // past the cap is what lets that guard work.
+                filex::magic::MAX_PLAN_OPS + 1,
+            ),
+            None => {
+                let parsed = filex::search_filter::parse_query(&self.query, now);
+                // Natural-language phrases in whatever text the `key:value`
+                // parse left over ("photos from last week"). Pure and
+                // rule-based; the recognized phrases are shown as removable
+                // chips, never applied invisibly.
+                let expansion = filex::phrases::expand(&parsed.text, now);
+                let text = expansion.text.clone();
+                if text.is_empty() && parsed.filters.is_empty() && expansion.is_empty() {
+                    self.results.clear();
+                    // Leave the browse selection intact; only the search's
+                    // own selection goes away with the results.
+                    self.search_selection.clear();
+                    return;
+                }
+                let filters =
+                    parsed.filters.into_iter().chain(expansion.filters()).collect::<Vec<_>>();
+                (text, filters, SEARCH_RESULT_LIMIT)
+            }
+        };
 
         // Tags live in the sidecar (intersected after the scan); the rest
         // are evaluated inside the index scan.
         let mut tags_required = Vec::new();
         let mut index_filters = Vec::new();
-        for filter in parsed.filters.into_iter().chain(expansion.filters()) {
+        for filter in all_filters {
             match filter {
                 Filter::Tag(name) => tags_required.push(name),
                 other if !index_filters.contains(&other) => index_filters.push(other),
@@ -2187,15 +2467,13 @@ impl Workspace {
                 let rows = cx
                     .background_executor()
                     .spawn(async move {
-                        rows_from_tagged_paths(
-                            store.paths_with_all_tags(&required),
-                            SEARCH_RESULT_LIMIT,
-                        )
+                        rows_from_tagged_paths(store.paths_with_all_tags(&required), limit)
                     })
                     .await;
                 this.update(cx, |this, cx| {
                     if this.search_generation == generation {
                         this.results = rows;
+                        this.rebuild_magic_plan();
                         this.select_first_result();
                         this.refresh_preview(cx);
                         cx.notify();
@@ -2221,7 +2499,7 @@ impl Workspace {
                 let result = cx
                     .background_executor()
                     .spawn(async move {
-                        client.search(&text, &index_filters, SEARCH_RESULT_LIMIT as u32).map(|hits| {
+                        client.search(&text, &index_filters, limit as u32).map(|hits| {
                             let rows = hits
                                 .into_iter()
                                 .map(|hit| SearchRow {
@@ -2242,6 +2520,7 @@ impl Workspace {
                     match result {
                         Ok(rows) => {
                             this.results = rows;
+                            this.rebuild_magic_plan();
                             this.select_first_result();
                             this.refresh_preview(cx);
                             cx.notify();
@@ -2274,7 +2553,7 @@ impl Workspace {
                         &indexes,
                         &text,
                         &index_filters,
-                        SEARCH_RESULT_LIMIT,
+                        limit,
                         &frecency,
                     )
                         .into_iter()
@@ -2291,6 +2570,7 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 if this.search_generation == generation {
                     this.results = rows;
+                    this.rebuild_magic_plan();
                     this.select_first_result();
                     this.refresh_preview(cx);
                     cx.notify();
@@ -2299,6 +2579,35 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Resolve the pending Magic command against the rows the search just
+    /// returned. No-op unless the query parsed as a command.
+    ///
+    /// Plans are built from `results`, which is why a Magic query raises
+    /// the search limit to `MAX_PLAN_OPS + 1` — see `update_search`. The
+    /// one-past-the-cap fetch is what lets `build` distinguish "1000
+    /// files, reviewable" from "more than we will act on blind".
+    fn rebuild_magic_plan(&mut self) {
+        let Some(state) = self.magic.as_mut() else { return };
+        let matches: Vec<PathBuf> = self.results.iter().map(|row| row.target.clone()).collect();
+        let ctx = filex::magic::PlanContext { cwd: &self.cwd, dirs: &self.user_dirs };
+        let outcome = filex::magic::build(&state.command, &matches, &ctx);
+        state.checked = match &outcome {
+            Ok(plan) => vec![true; plan.ops.len()],
+            Err(_) => Vec::new(),
+        };
+        state.outcome = Some(outcome);
+    }
+
+    /// Toggle one op's checkbox in the Magic card.
+    fn toggle_magic_op(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(state) = self.magic.as_mut()
+            && let Some(checked) = state.checked.get_mut(ix)
+        {
+            *checked = !*checked;
+            cx.notify();
+        }
     }
 
     /// New results select the first hit (Spotlight-style), so Enter
@@ -3875,6 +4184,7 @@ impl Render for Workspace {
             .child(self.render_top_bar(cx))
             .children(self.render_tab_bar(cx))
             .children(self.render_filter_chips(cx))
+            .children(self.render_magic_card(cx))
             .child(
                 div()
                     .flex()
@@ -4022,4 +4332,94 @@ fn main() {
         )
         .expect("failed to open the main window");
     });
+}
+
+#[cfg(test)]
+mod magic_ui_tests {
+    use super::*;
+    use filex::magic::{Plan, Verb};
+
+    fn state(outcome: Result<Plan, filex::magic::PlanError>, checked: Vec<bool>) -> MagicState {
+        MagicState {
+            command: filex::magic::parse("delete screenshots older than 30 days", 1_785_067_200)
+                .expect("fixture should parse"),
+            outcome: Some(outcome),
+            checked,
+        }
+    }
+
+    fn plan(ops: Vec<FileOp>) -> Plan {
+        Plan { verb: Verb::Delete, skipped: 0, ops }
+    }
+
+    fn delete(path: &str) -> FileOp {
+        FileOp::Delete { path: PathBuf::from(path) }
+    }
+
+    #[test]
+    fn only_checked_ops_are_executed() {
+        // The whole point of the review step: unchecking a row must keep
+        // that file out of the batch that runs.
+        let state = state(
+            Ok(plan(vec![delete("/a.png"), delete("/b.png"), delete("/c.png")])),
+            vec![true, false, true],
+        );
+        assert_eq!(state.selected_ops(), vec![delete("/a.png"), delete("/c.png")]);
+    }
+
+    #[test]
+    fn nothing_runs_from_an_unresolved_or_failed_plan() {
+        // A plan that never resolved, or resolved to an error, must not
+        // produce ops even if `checked` is somehow non-empty.
+        let mut unresolved = state(Ok(plan(vec![delete("/a.png")])), vec![true]);
+        unresolved.outcome = None;
+        assert!(unresolved.selected_ops().is_empty());
+
+        let failed = state(Err(filex::magic::PlanError::NoMatches), vec![true]);
+        assert!(failed.selected_ops().is_empty());
+    }
+
+    #[test]
+    fn all_unchecked_yields_no_ops() {
+        let state = state(Ok(plan(vec![delete("/a.png")])), vec![false]);
+        assert!(state.selected_ops().is_empty());
+    }
+
+    #[test]
+    fn a_checked_flag_without_a_matching_op_cannot_invent_one() {
+        // `checked` is parallel to `ops`; zip must not run past the ops.
+        let state = state(Ok(plan(vec![delete("/a.png")])), vec![true, true, true]);
+        assert_eq!(state.selected_ops(), vec![delete("/a.png")]);
+    }
+
+    #[test]
+    fn delete_rows_show_no_destination() {
+        // "→ Trash" would imply a path the op does not carry.
+        let (source, target) = describe_op(&delete("/photos/shot.png"));
+        assert_eq!(source, SharedString::from("shot.png"));
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn transfer_rows_show_the_destination_folder_not_the_file() {
+        let op = FileOp::Move { from: "/a/shot.png".into(), to: "/b/Archive/shot.png".into() };
+        let (source, target) = describe_op(&op);
+        assert_eq!(source, SharedString::from("shot.png"));
+        assert_eq!(target.unwrap().to_string(), format!("→ {}", Path::new("/b/Archive").display()));
+    }
+
+    #[test]
+    fn rename_rows_show_the_new_name() {
+        let op = FileOp::Rename { path: "/a/img01.png".into(), new_name: "shot-1.png".into() };
+        let (source, target) = describe_op(&op);
+        assert_eq!(source, SharedString::from("img01.png"));
+        assert_eq!(target.unwrap().to_string(), "→ shot-1.png");
+    }
+
+    #[test]
+    fn item_counts_read_naturally() {
+        assert_eq!(plural_items(1), "item");
+        assert_eq!(plural_items(0), "items");
+        assert_eq!(plural_items(2), "items");
+    }
 }

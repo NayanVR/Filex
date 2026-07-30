@@ -14,6 +14,7 @@ pub mod grid;
 pub mod icon;
 pub mod job;
 pub mod list_row;
+pub mod magic_card;
 pub mod menu;
 pub mod modal;
 pub mod pane;

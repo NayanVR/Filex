@@ -9,6 +9,7 @@ pub mod fuzzy;
 pub mod index;
 pub mod listing;
 pub mod logging;
+pub mod magic;
 pub mod ops;
 pub mod phrases;
 pub mod recents;
