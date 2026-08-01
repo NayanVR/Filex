@@ -123,8 +123,7 @@ mod service {
         spawn_update_check(update_cancel.clone());
 
         // SCM passes the service name as argv[0]; the rest are root paths.
-        let roots =
-            resolve_roots(arguments.into_iter().skip(1).map(PathBuf::from).collect());
+        let roots = resolve_roots(arguments.into_iter().skip(1).map(PathBuf::from).collect());
         let result = run_indexes(roots, Some(shutdown));
         if let Err(err) = &result {
             tracing::error!("index service stopped with error: {err:#}");
@@ -153,10 +152,16 @@ mod service {
                 Ok(settings) => settings.roots,
                 Err(err) => {
                     tracing::warn!("unusable settings file ({err:#}); using legacy roots.list");
-                    legacy.as_deref().map(manager::load_roots).unwrap_or_default()
+                    legacy
+                        .as_deref()
+                        .map(manager::load_roots)
+                        .unwrap_or_default()
                 }
             },
-            None => legacy.as_deref().map(manager::load_roots).unwrap_or_default(),
+            None => legacy
+                .as_deref()
+                .map(manager::load_roots)
+                .unwrap_or_default(),
         }
     }
 
@@ -222,12 +227,14 @@ mod service {
     /// (block 5) fills it** — an empty URL disables the self-updater, so the
     /// service still indexes normally; it just never self-updates.
     #[cfg(feature = "updater")]
-    const MANIFEST_URL: &str = "";
+    const MANIFEST_URL: &str =
+        "https://github.com/NayanVR/filex/releases/latest/download/filex-windows.json";
 
     /// Hex Ed25519 public key that update payloads must verify against,
     /// from the CI-held keypair (block 0). Empty disables the self-updater.
     #[cfg(feature = "updater")]
-    const UPDATE_PUBLIC_KEY: &str = "";
+    const UPDATE_PUBLIC_KEY: &str =
+        "bfe47bb637e1f4cd98f68c236cfce1db17527c6432904e5195869a6e2903e42f";
 
     /// Run the on-launch update check off the serving thread.
     #[cfg(feature = "updater")]
