@@ -1,8 +1,11 @@
-//! The tab strip under the top bar (block 6).
+//! The topmost bar: the tab strip on the left and the window/view icon
+//! group on the right.
 //!
 //! Presentation only: the workspace owns the tab list and supplies each
 //! title + active flag, and wires the click / middle-click / close /
-//! new-tab handlers. Shown only when more than one tab is open.
+//! new-tab handlers. Always shown — a single tab still gets a chip so the
+//! icon group has a stable home and the bar reads the same at one tab or
+//! many.
 
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
@@ -10,19 +13,35 @@ use super::icon;
 use super::theme::Theme;
 
 /// Height of the tab strip.
-pub const TAB_BAR_HEIGHT: f32 = 34.;
+pub const TAB_BAR_HEIGHT: f32 = 38.;
 
-/// The strip container; children are [`tab`]s then the [`new_tab_button`].
+/// The bar container. Children are the left tab group (tabs +
+/// [`new_tab_button`]) and the right icon group, separated by a
+/// flex spacer.
+///
+/// This is now the topmost bar, so on macOS it — not the nav bar below —
+/// carries the inset traffic lights (the system titlebar is transparent);
+/// it pads left to clear them.
 pub fn tab_bar(theme: &Theme) -> Div {
-    div()
+    let bar = div()
         .flex()
         .items_center()
-        .gap(px(2.))
+        .gap_1()
         .h(px(TAB_BAR_HEIGHT))
         .px_2()
         .border_b_1()
         .border_color(theme.border)
-        .bg(theme.panel)
+        .bg(theme.panel);
+    // Clear the inset traffic lights: three buttons from x=12 spanning ~52px.
+    #[cfg(target_os = "macos")]
+    let bar = bar.pl(px(76.));
+    bar
+}
+
+/// The left group that scrolls/clips its tabs without pushing the icon
+/// group off the bar's right edge.
+pub fn tab_group() -> Div {
+    div().flex().flex_1().min_w_0().items_center().gap(px(2.)).overflow_hidden()
 }
 
 /// One tab: the active one gets the window background (reads as "raised

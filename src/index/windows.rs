@@ -964,13 +964,14 @@ mod tests {
         #[test]
         fn index_service_pipe_roundtrip() {
             use crate::index::ipc::{IndexHost, MultiRootHost, RemoteIndex};
+            use crate::index::watcher::SharedIndex;
             use crate::index::{ROOT, VolumeIndex};
-            use std::sync::{Arc, RwLock};
+            use std::sync::Arc;
 
             let mut index = VolumeIndex::new(r"C:\vol");
             index.insert(ROOT, "pipe-hit.txt", false).unwrap();
             let host: Arc<dyn IndexHost> = Arc::new(MultiRootHost {
-                roots: vec![(PathBuf::from(r"C:\vol"), Arc::new(RwLock::new(index)))],
+                roots: vec![(PathBuf::from(r"C:\vol"), SharedIndex::new(index))],
             });
 
             let pipe_name = format!(r"\\.\pipe\filex-test-{}", std::process::id());

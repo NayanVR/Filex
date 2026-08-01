@@ -1,19 +1,21 @@
-//! The top bar: navigation button, current path, and the search box
-//! frame (the input entity itself lives in the workspace).
+//! The navigation bar (second row): the back/forward/refresh controls,
+//! the current path breadcrumbs, and the search box frame (the input
+//! entity itself lives in the workspace).
+//!
+//! The traffic lights and the tab strip live one row *above* this now
+//! (see [`super::tabs`]), so this bar no longer insets for them.
 
 use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
 
 use super::icon;
 use super::theme::Theme;
 
-/// Bar height. The macOS titlebar is transparent and the traffic
-/// lights are inset into this bar, so their position (set at window
-/// creation) is derived from it.
-pub const TOP_BAR_HEIGHT: f32 = 48.;
+/// Bar height.
+pub const TOP_BAR_HEIGHT: f32 = 44.;
 
 /// The bar container; children flow left-to-right.
 pub fn top_bar(theme: &Theme) -> Div {
-    let bar = div()
+    div()
         .flex()
         .items_center()
         .gap_2()
@@ -21,12 +23,7 @@ pub fn top_bar(theme: &Theme) -> Div {
         .px_3()
         .border_b_1()
         .border_color(theme.border)
-        .bg(theme.panel);
-    // Clear the inset traffic lights (unified-titlebar look): the
-    // three buttons start at x=12 and span ~52px.
-    #[cfg(target_os = "macos")]
-    let bar = bar.pl(px(76.));
-    bar
+        .bg(theme.panel)
 }
 
 /// A small icon button (`icon` is an asset path like
@@ -89,25 +86,34 @@ pub fn breadcrumb_ellipsis(theme: &Theme) -> Div {
     div().text_xs().text_color(theme.text_dim).child("…")
 }
 
-/// The search box frame: a magnifier, then the input the caller adds.
-/// The border lights up while a query is active.
-/// The removable-search-chip strip, shown under the top bar while a query
-/// has recognized `key:value` filters. A wrapping row of pills.
+/// The removable-search-chip strip, shown under the nav bar while a query
+/// has recognized `key:value` filters. A wrapping row of pills, led by a
+/// small "Filters" label so the strip reads as a distinct affordance
+/// rather than a stray row of buttons.
 pub fn filter_chip_strip(theme: &Theme) -> Div {
     div()
         .flex()
         .flex_wrap()
         .items_center()
-        .gap_1()
+        .gap_1p5()
         .px_3()
-        .py_1()
+        .py(px(5.))
         .bg(theme.panel)
         .border_b_1()
         .border_color(theme.border)
+        .child(
+            div()
+                .flex_none()
+                .mr_1()
+                .text_xs()
+                .text_color(theme.text_dim)
+                .child("Filters"),
+        )
 }
 
 /// One removable filter pill: an optional color dot (for `tag:`), the
-/// label, and a ✕. The whole pill is the click target — callers chain
+/// label, and a trailing ✕ that reads as a close affordance (it lights up
+/// on hover). The whole pill is the click target — callers chain
 /// `.on_click` to remove the filter.
 pub fn filter_chip(
     theme: &Theme,
@@ -115,24 +121,43 @@ pub fn filter_chip(
     label: impl Into<SharedString>,
     dot: Option<Rgba>,
 ) -> Stateful<Div> {
-    let selected = theme.selected;
+    let (accent, hover, text) = (theme.accent, theme.hover, theme.text);
     let mut chip = div()
         .id(id)
+        .group("filter-chip")
         .flex()
         .items_center()
-        .gap_1()
-        .px_2()
-        .py_1()
+        .gap_1p5()
+        .h(px(22.))
+        .pl_2()
+        .pr_1p5()
         .rounded_full()
-        .bg(theme.hover)
+        // A tinted fill plus a hairline border reads as a discrete token,
+        // not a flat highlight; the border warms to the accent on hover so
+        // the whole pill signals "click to remove".
+        .bg(theme.accent_selection)
+        .border_1()
+        .border_color(theme.border)
         .cursor_pointer()
         .text_xs()
-        .text_color(theme.text)
-        .hover(move |s| s.bg(selected));
+        .text_color(text)
+        .hover(move |s| s.border_color(accent));
     if let Some(dot) = dot {
         chip = chip.child(div().flex_none().size(px(7.)).rounded_full().bg(dot));
     }
-    chip.child(label.into()).child(div().text_color(theme.text_dim).child("✕"))
+    chip.child(label.into()).child(
+        // A rounded hit-slug for the ✕ so it reads as its own close
+        // control; it fills in on hover of the surrounding chip group.
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(15.))
+            .rounded_full()
+            .group_hover("filter-chip", move |s| s.bg(hover))
+            .child(icon::ui_icon("icons/x.svg", theme.text_dim).size(px(11.))),
+    )
 }
 
 /// The magic-mode toggle that lives at the trailing edge of the search
