@@ -7,12 +7,35 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result, bail};
 
 use super::watcher::SharedIndex;
 use super::{Score, SearchHit};
 use crate::search_filter::Filter;
+
+/// A rayon pool dedicated to search scans, isolated from the global pool
+/// the writer's directory walks (`jwalk`) use.
+///
+/// Optimization B removed the reader/writer *lock* convoy, but reads and
+/// the writer's walks still shared rayon's global pool — so a big
+/// filesystem burst (a `jwalk` over a large moved-in tree) could saturate
+/// every worker and starve keystroke searches of threads, spiking search
+/// latency to ~1 s during the burst even with no lock involved. A separate
+/// pool guarantees a search always has threads of its own to run on; the
+/// two pools may briefly oversubscribe the cores during a burst, but the
+/// OS time-slices them, so search progresses instead of waiting behind the
+/// walk's tasks.
+fn search_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("filex-search-{i}"))
+            .build()
+            .expect("build search thread pool")
+    })
+}
 
 /// Default location of the root list: `<data_local_dir>/filex/roots.list`,
 /// one absolute path per line (UTF-8; blank lines ignored).
@@ -149,29 +172,100 @@ pub fn search_all(
     limit: usize,
     frecency: &HashMap<PathBuf, f32>,
 ) -> Vec<MergedHit> {
+    search_all_scoped(
+        indexes,
+        query,
+        filters,
+        limit,
+        frecency,
+        &crate::index::NEVER_CANCEL,
+        None,
+    )
+}
+
+/// [`search_all`], abortable mid-scan and optionally scoped to a
+/// directory ("Current Dir").
+///
+/// A newer keystroke sets `cancel`, and both the arena scan and the path
+/// materialization below wind down — the latter matters because
+/// materializing paths for an overfetched (`limit * OVERFETCH`) candidate
+/// set walks a parent chain per hit under the read lock, which must not
+/// keep running once the query it belongs to is stale.
+///
+/// `scope_dir`, when set, limits results to that directory's subtree.
+/// Resolution happens *here*, under each index's read lock, rather than on
+/// the UI thread: an index whose root does not contain `scope_dir` is
+/// skipped, and within the containing index the directory resolves to the
+/// [`ScanCtl::scope`] entry. A `scope_dir` that no index has caught up to
+/// yet simply yields nothing — the folder is not searchable until indexed.
+pub fn search_all_scoped(
+    indexes: &[SharedIndex],
+    query: &str,
+    filters: &[Filter],
+    limit: usize,
+    frecency: &HashMap<PathBuf, f32>,
+    cancel: &std::sync::atomic::AtomicBool,
+    scope_dir: Option<&std::path::Path>,
+) -> Vec<MergedHit> {
+    use crate::index::ScanCtl;
+    use std::sync::atomic::Ordering;
+
     let fetch = limit.saturating_mul(OVERFETCH);
     let mut merged: Vec<MergedHit> = Vec::new();
     for shared in indexes {
-        let index = shared
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        merged.extend(index.search_filtered(query, filters, fetch).into_iter().filter_map(
-            |SearchHit { id, score }| {
-                let path = index.path_of(id)?;
-                let boost = if frecency.is_empty() {
-                    0
-                } else {
-                    boost_for(frecency.get(path.as_path()).copied().unwrap_or(0.0))
-                };
-                Some(MergedHit {
-                    name: index.name_of(id)?.to_string(),
-                    is_dir: index.is_dir(id)?,
-                    score,
-                    rank: rank_of(score, boost),
-                    path,
-                })
+        if cancel.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        // Lock-free snapshot (optimization B): readers never block the
+        // writer and vice versa. `load_full` (owned `Arc`) rather than the
+        // load guard, so the snapshot can cross into the search pool below.
+        let index = shared.load_full();
+        // Resolve the "Current Dir" scope against *this* index. A dir the
+        // index doesn't contain (different root, or not yet indexed) means
+        // this index contributes nothing to a scoped search.
+        let scope = match scope_dir {
+            None => None,
+            Some(dir) => match dir.strip_prefix(index.root_path()) {
+                // The root itself: scope is the whole index (ROOT).
+                Ok(rel) if rel.as_os_str().is_empty() => Some(crate::index::ROOT),
+                Ok(rel) => match index.resolve(rel) {
+                    Some(id) => Some(id),
+                    None => continue, // not indexed here
+                },
+                Err(_) => continue, // dir is under a different root
             },
-        ));
+        };
+        let ctl = ScanCtl { cancel, scope };
+        // Run the parallel scan on the dedicated search pool, so a
+        // concurrent filesystem walk on the global pool cannot starve it.
+        let hits = search_pool().install(|| index.search_filtered_cancellable(query, filters, fetch, &ctl));
+        merged.extend(
+            hits.into_iter().filter_map(
+                |SearchHit { id, score }| {
+                    if cancel.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    let path = index.path_of(id)?;
+                    let boost = if frecency.is_empty() {
+                        0
+                    } else {
+                        boost_for(frecency.get(path.as_path()).copied().unwrap_or(0.0))
+                    };
+                    Some(MergedHit {
+                        name: index.name_of(id)?.to_string(),
+                        is_dir: index.is_dir(id)?,
+                        score,
+                        rank: rank_of(score, boost),
+                        path,
+                    })
+                },
+            ),
+        );
+    }
+    // A cancelled scan produces a partial, unranked set the caller will
+    // discard by generation check — don't bother sorting it.
+    if cancel.load(Ordering::Relaxed) {
+        return Vec::new();
     }
     // Tier first, so a boost never lifts a hit out of its match kind.
     merged.sort_by(|a, b| {
@@ -187,10 +281,9 @@ pub fn search_all(
 mod tests {
     use super::*;
     use crate::index::{ROOT, VolumeIndex};
-    use std::sync::{Arc, RwLock};
 
     fn shared(index: VolumeIndex) -> SharedIndex {
-        Arc::new(RwLock::new(index))
+        SharedIndex::new(index)
     }
 
     #[test]
@@ -368,5 +461,47 @@ mod tests {
         let hot = frecency(&[("/vol/report_39.txt", 10.0)]);
         let hits = search_all(&indexes, "report", &[], 2, &hot);
         assert_eq!(hits.len(), 2);
+    }
+
+    /// Regression for the fuzzy-gate bug, at the layer where it lived: a
+    /// *composition* of two individually-correct decisions. Decision 1
+    /// overfetches by `OVERFETCH` for stage-B re-ranking; decision 2 runs
+    /// the fuzzy pass only when the literal pass came up short. But
+    /// `search_all` passes its overfetched width down as `limit`, and
+    /// `finish` reused that same number as the gate — so decision 1
+    /// silently widened decision 2's gate fourfold, putting a second full
+    /// scan of the arena (~20-24 ms at 1.2M entries, against ~4-7 ms for
+    /// the literal pass) onto essentially every keystroke.
+    ///
+    /// Note what this test can and cannot see. The purely wasteful window
+    /// — `limit <= literal hits < limit * OVERFETCH` — is **invisible to
+    /// any assertion on output**, because fuzzy hits rank below every
+    /// literal hit and get truncated away before they are returned. That
+    /// is precisely why the bug survived a full suite: it cost only
+    /// latency. What is observable, and what this pins, is the adjacent
+    /// window `FUZZY_GATE <= literal hits < limit`, where the old gate
+    /// showed fuzzy filler and the new one does not.
+    #[test]
+    fn a_useful_literal_result_list_gets_no_fuzzy_filler() {
+        use crate::index::{FUZZY_GATE, MatchKind};
+
+        let mut a = VolumeIndex::new("/vol");
+        for i in 0..FUZZY_GATE + 10 {
+            a.insert(ROOT, &format!("dsr_{i}.txt"), false).unwrap();
+        }
+        a.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        let indexes = [shared(a)];
+
+        // Room to spare, so nothing is truncated: if the fuzzy pass ran,
+        // its hit would be in the output.
+        let hits = search_all(&indexes, "dsr", &[], 500, &none());
+
+        assert_eq!(hits.len(), FUZZY_GATE + 10, "the literal hits, and only those");
+        assert!(
+            hits.iter().all(|h| h.score.kind != MatchKind::Fuzzy),
+            "{} literal hits is already a useful result list; the second \
+             scan is latency the user did not need to pay",
+            FUZZY_GATE + 10
+        );
     }
 }

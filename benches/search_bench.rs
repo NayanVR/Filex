@@ -88,6 +88,67 @@ fn bench_search(c: &mut Criterion) {
     group.finish();
 }
 
+/// The shape the UI actually asks for, which the cases above do **not**
+/// cover and which is how the fuzzy-gate regression stayed hidden.
+///
+/// Every case above calls `VolumeIndex::search` directly, with a `limit`
+/// the app never passes. The real keystroke goes through
+/// `manager::search_all`, which multiplies the display limit by
+/// `OVERFETCH` before handing it down — so the number reaching the fuzzy
+/// gate is 2000 for the UI's 500, and 4004 for a Magic command's 1001.
+/// A bench that never composes those two layers cannot see a bug that
+/// only exists in their composition.
+///
+/// The pair to watch is `selective_query_*`: a query specific enough to
+/// be worth typing has far fewer literal hits than the overfetched width,
+/// which is exactly the case that used to pay for a second full scan.
+fn bench_app_keystroke_path(c: &mut Criterion) {
+    use filex::index::manager;
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
+
+    let indexes: Vec<filex::index::watcher::SharedIndex> =
+        vec![Arc::new(RwLock::new(synthetic_index()))];
+    let none = HashMap::new();
+
+    let mut group = c.benchmark_group("app_keystroke_200k");
+    // Broad prefix: far more literal hits than any gate, shut either way.
+    group.bench_function("broad_prefix_re", |b| {
+        b.iter(|| black_box(manager::search_all(&indexes, black_box("re"), &[], 500, &none)))
+    });
+    // THE case the fix moves. `invoice_010` has ~100 literal hits in this
+    // corpus: comfortably above FUZZY_GATE, so the result list is useful
+    // and the gate stays shut — but well under the overfetched 2000, so
+    // the old gate opened and paid for a second full scan. Queries in
+    // this window are the overwhelming majority of what anyone types.
+    group.bench_function("useful_result_list_500", |b| {
+        b.iter(|| {
+            black_box(manager::search_all(&indexes, black_box("invoice_010"), &[], 500, &none))
+        })
+    });
+    // Same query on the Magic command path, where the limit is
+    // MAX_PLAN_OPS + 1 and the overfetch is therefore wider still.
+    group.bench_function("useful_result_list_magic_1001", |b| {
+        b.iter(|| {
+            black_box(manager::search_all(&indexes, black_box("invoice_010"), &[], 1001, &none))
+        })
+    });
+    // Below the gate (~10 literal hits): the fuzzy pass runs here under
+    // either gate, on purpose. This is the recall the design is buying,
+    // and the number that says what it costs.
+    group.bench_function("sparse_result_fuzzy_runs", |b| {
+        b.iter(|| {
+            black_box(manager::search_all(&indexes, black_box("invoice_0100_0"), &[], 500, &none))
+        })
+    });
+    // Nothing matches literally at all — the case decision 2 was written
+    // for, and still exactly as fast as it was.
+    group.bench_function("empty_result_fuzzy_runs", |b| {
+        b.iter(|| black_box(manager::search_all(&indexes, black_box("zqxjw"), &[], 500, &none)))
+    });
+    group.finish();
+}
+
 /// Stage B: path materialization + frecency boost over the overfetched
 /// candidate set. The point of this benchmark is to show it is *not* on
 /// the critical path — microseconds against a scan measured in
@@ -116,5 +177,5 @@ fn bench_frecency_rerank(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_search, bench_frecency_rerank);
+criterion_group!(benches, bench_search, bench_frecency_rerank, bench_app_keystroke_path);
 criterion_main!(benches);

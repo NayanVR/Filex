@@ -17,6 +17,10 @@ required-features = ["app"]
 
 [dependencies]
 anyhow = "1.0.103"
+# Lock-free snapshot reads for the search index: readers load an immutable
+# `Arc<VolumeIndex>` without ever taking a lock, so a background writer can
+# never stall a search (docs/indexing-architecture.md §3, optimization B).
+arc-swap = "1.7"
 dirs = "6.0.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -51,6 +55,10 @@ harness = false
 
 [[bench]]
 name = "bootstrap_bench"
+harness = false
+
+[[bench]]
+name = "magic_bench"
 harness = false
 
 [dev-dependencies]
