@@ -7,12 +7,35 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result, bail};
 
 use super::watcher::SharedIndex;
 use super::{Score, SearchHit};
 use crate::search_filter::Filter;
+
+/// A rayon pool dedicated to search scans, isolated from the global pool
+/// the writer's directory walks (`jwalk`) use.
+///
+/// Optimization B removed the reader/writer *lock* convoy, but reads and
+/// the writer's walks still shared rayon's global pool — so a big
+/// filesystem burst (a `jwalk` over a large moved-in tree) could saturate
+/// every worker and starve keystroke searches of threads, spiking search
+/// latency to ~1 s during the burst even with no lock involved. A separate
+/// pool guarantees a search always has threads of its own to run on; the
+/// two pools may briefly oversubscribe the cores during a burst, but the
+/// OS time-slices them, so search progresses instead of waiting behind the
+/// walk's tasks.
+fn search_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("filex-search-{i}"))
+            .build()
+            .expect("build search thread pool")
+    })
+}
 
 /// Default location of the root list: `<data_local_dir>/filex/roots.list`,
 /// one absolute path per line (UTF-8; blank lines ignored).
@@ -193,11 +216,10 @@ pub fn search_all_scoped(
         if cancel.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        // Lock-free snapshot load (optimization B): readers never block the
-        // writer and vice versa. There is no lock-acquisition wait left to
-        // measure — the old "search waited on the index write lock" warning
-        // is gone with the lock it described.
-        let index = shared.load();
+        // Lock-free snapshot (optimization B): readers never block the
+        // writer and vice versa. `load_full` (owned `Arc`) rather than the
+        // load guard, so the snapshot can cross into the search pool below.
+        let index = shared.load_full();
         // Resolve the "Current Dir" scope against *this* index. A dir the
         // index doesn't contain (different root, or not yet indexed) means
         // this index contributes nothing to a scoped search.
@@ -214,8 +236,11 @@ pub fn search_all_scoped(
             },
         };
         let ctl = ScanCtl { cancel, scope };
+        // Run the parallel scan on the dedicated search pool, so a
+        // concurrent filesystem walk on the global pool cannot starve it.
+        let hits = search_pool().install(|| index.search_filtered_cancellable(query, filters, fetch, &ctl));
         merged.extend(
-            index.search_filtered_cancellable(query, filters, fetch, &ctl).into_iter().filter_map(
+            hits.into_iter().filter_map(
                 |SearchHit { id, score }| {
                     if cancel.load(Ordering::Relaxed) {
                         return None;

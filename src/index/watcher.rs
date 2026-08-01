@@ -55,6 +55,13 @@ impl SharedIndex {
         self.0.snapshot.load()
     }
 
+    /// Like [`load`](Self::load) but returns an owned `Arc` — which, unlike
+    /// the load guard, is `Send`, so it can cross into a worker pool (the
+    /// dedicated search rayon pool). One atomic refcount bump.
+    pub fn load_full(&self) -> Arc<VolumeIndex> {
+        self.0.snapshot.load_full()
+    }
+
     /// Exclusive in-place write access to the head. Does **not** publish —
     /// call [`publish`](Self::publish) when readers should see the change.
     /// The head is kept uniquely owned (publish clones into a *separate*

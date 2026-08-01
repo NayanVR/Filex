@@ -289,6 +289,14 @@ UI thread (GPUI) ──query──▶ search pool ──top-K results──▶ c
 - GPUI integration: queries are spawned with `cx.background_executor()`; results
   come back through `cx.spawn` and set state + `cx.notify()`. **The UI thread
   never takes an index lock.**
+- **Search runs on a dedicated rayon pool** (`manager::search_pool`, added
+  2026-08-01), separate from the global pool the writer's `jwalk` uses. B
+  removed the reader/writer *lock* convoy, but reads and walks still shared
+  rayon's global pool, so a big filesystem burst could saturate every worker
+  and starve keystroke searches of threads (~1 s search latency during a burst
+  even with no lock involved). The scan takes an owned snapshot via
+  `SharedIndex::load_full` (the load guard is `!Send`) and runs it inside
+  `search_pool().install(..)`, so a concurrent walk can never take its threads.
 
   > **Optimization A — filesystem syscalls off the write lock (built 2026-07-31).**
   > While still on `RwLock` (the ArcSwap step below is not done yet), the writer
