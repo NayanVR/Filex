@@ -8,7 +8,13 @@ default = ["app"]
 # The GPUI application. The index library builds without it, so indexing
 # logic can be cross-checked/tested for other platforms without pulling in
 # UI toolchains (cargo check --no-default-features --target ...).
-app = ["dep:gpui", "dep:futures", "dep:image", "dep:ureq"]
+app = ["dep:gpui", "dep:futures", "dep:image", "dep:ureq", "updater"]
+# Update downloader: HTTPS GET for the manifest + artifact. Opt-in so the
+# default library build stays network-free; enabled by the UI and, on
+# Windows, by the index service (which must reach the network to self-
+# update — a deliberate exception to the network-free service rule, gated
+# by the verify-before-install check). See docs/design-distribution.md §3.
+updater = ["dep:ureq"]
 
 [[bin]]
 name = "filex"
@@ -22,6 +28,17 @@ anyhow = "1.0.103"
 # never stall a search (docs/indexing-architecture.md §3, optimization B).
 arc-swap = "1.7"
 dirs = "6.0.0"
+# Update payload authentication: detached Ed25519 signature over the
+# downloaded artifact bytes, verified before any install step runs. The
+# lib only ever *verifies* (public key is embedded); signing happens in CI
+# with the private key. See docs/design-distribution.md §4.
+ed25519-dalek = "2"
+sha2 = "0.10"
+# OS randomness for one-time release keypair generation (the `filex-sign`
+# helper). Verification never needs it.
+getrandom = "0.2"
+# Semver comparison for the update manifest's version field.
+semver = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
