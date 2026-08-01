@@ -104,11 +104,10 @@ fn bench_search(c: &mut Criterion) {
 /// which is exactly the case that used to pay for a second full scan.
 fn bench_app_keystroke_path(c: &mut Criterion) {
     use filex::index::manager;
+    use filex::index::watcher::SharedIndex;
     use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
 
-    let indexes: Vec<filex::index::watcher::SharedIndex> =
-        vec![Arc::new(RwLock::new(synthetic_index()))];
+    let indexes: Vec<SharedIndex> = vec![SharedIndex::new(synthetic_index())];
     let none = HashMap::new();
 
     let mut group = c.benchmark_group("app_keystroke_200k");
@@ -155,9 +154,9 @@ fn bench_app_keystroke_path(c: &mut Criterion) {
 /// milliseconds (docs/design-search-ranking.md decision 1).
 fn bench_frecency_rerank(c: &mut Criterion) {
     use filex::index::manager;
+    use filex::index::watcher::SharedIndex;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::{Arc, RwLock};
 
     let index = synthetic_index();
     // A realistic visit history: recents::CAP entries, some of which are
@@ -165,7 +164,7 @@ fn bench_frecency_rerank(c: &mut Criterion) {
     let table: HashMap<PathBuf, f32> = (0..filex::recents::CAP)
         .map(|i| (PathBuf::from(format!("/bench/project-{i:04}/report_{i:04}_000.pdf")), 4.0))
         .collect();
-    let indexes = vec![Arc::new(RwLock::new(index)) as _];
+    let indexes = vec![SharedIndex::new(index)];
 
     let mut group = c.benchmark_group("frecency_rerank");
     group.bench_function("search_all_no_frecency", |b| {

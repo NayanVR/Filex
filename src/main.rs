@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt as _;
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, FocusHandle, Focusable as _, KeyBinding,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString,
-    TitlebarOptions, UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, size, uniform_list,
+    App, Application, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
+    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy,
+    SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowAppearance, WindowBounds,
+    WindowOptions, actions, div, prelude::*, px, size, uniform_list,
 };
 
 use filex::index::watcher::SharedIndex;
@@ -36,6 +36,7 @@ actions!(
         GoUp,
         GoBack,
         GoForward,
+        Refresh,
         ToggleSettings,
         TogglePreview,
         NewTab,
@@ -47,6 +48,45 @@ actions!(
         Undo
     ]
 );
+
+/// The payload of an in-app file drag: the paths being moved. It is both
+/// the value handed to a drop target (matched by type in `on_drop`) and,
+/// via its [`Render`] impl, the little pill that follows the cursor while
+/// dragging. `position` is the cursor offset gpui hands the drag
+/// constructor; the pill offsets itself by it so it sits under the mouse.
+#[derive(Clone)]
+struct DragItems {
+    paths: Vec<PathBuf>,
+    label: SharedString,
+    theme: Theme,
+    position: Point<Pixels>,
+}
+
+impl DragItems {
+    fn at(mut self, position: Point<Pixels>) -> Self {
+        self.position = position;
+        self
+    }
+}
+
+impl gpui::Render for DragItems {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div().pl(self.position.x + px(12.)).pt(self.position.y + px(8.)).child(
+            div()
+                .flex()
+                .items_center()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(theme.accent)
+                .text_color(theme.on_accent)
+                .text_xs()
+                .shadow_md()
+                .child(self.label.clone()),
+        )
+    }
+}
 
 /// Metadata for the details panel, fetched lazily off-thread per
 /// selection (created time + image dimensions cost a stat / header read
@@ -195,6 +235,15 @@ fn describe_op(op: &FileOp) -> PlanRow {
             tooltip: format!("{} → {new_name}", path.display()).into(),
         },
     }
+}
+
+/// Whether dragging `src` into directory `dest` is a meaningful move.
+/// Rejects the two degenerate cases: `src` already lives directly in
+/// `dest` (the move would be a no-op), and `dest` is `src` itself or a
+/// folder nested inside it (which would try to move a directory into its
+/// own subtree). Path-only — it does not touch the filesystem.
+fn is_valid_drop(dest: &Path, src: &Path) -> bool {
+    src.parent() != Some(dest) && !dest.starts_with(src)
 }
 
 fn describe_items(items: &[(PathBuf, String)]) -> Option<String> {
@@ -2233,16 +2282,118 @@ impl Workspace {
         if mode == ClipMode::Cut {
             self.clipboard = None;
         }
-        self.spawn_paste_batch(sources, mode, cx);
+        let dest = self.cwd.clone();
+        self.spawn_transfer_batch(sources, mode, dest, cx);
     }
 
-    /// Paste many clipboard items into the current directory as one undo
-    /// batch. Runs sequentially off-thread; an occupied destination
-    /// auto-resolves to the next free "name 2" variant (no per-item
-    /// prompt), and same-directory items are skipped. One job tracks the
-    /// run; byte progress reflects the item currently copying.
-    fn spawn_paste_batch(&mut self, sources: Vec<PathBuf>, mode: ClipMode, cx: &mut Context<Self>) {
-        let dest_dir = self.cwd.clone();
+    /// Paths carried by a drag that starts on row/card `ix`: the whole
+    /// current selection when the dragged item is part of it (so a
+    /// multi-select drags as a group), otherwise just that one item.
+    fn drag_source_paths(&self, ix: usize) -> Vec<PathBuf> {
+        if self.active_selection().contains(ix) && self.active_selection().iter().count() > 1 {
+            self.active_selection().iter().filter_map(|i| self.path_at(i).map(|(p, _)| p)).collect()
+        } else {
+            self.path_at(ix).map(|(p, _)| vec![p]).into_iter().flatten().collect()
+        }
+    }
+
+    /// Build the drag payload for a browse row/card, or `None` when the
+    /// index has no path. `theme` rides along so the drag pill can paint
+    /// itself without a context.
+    fn drag_items(&self, ix: usize, theme: Theme) -> Option<DragItems> {
+        let paths = self.drag_source_paths(ix);
+        if paths.is_empty() {
+            return None;
+        }
+        let label: SharedString = match paths.as_slice() {
+            [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned().into(),
+            many => format!("{} items", many.len()).into(),
+        };
+        Some(DragItems { paths, label, theme, position: Point::default() })
+    }
+
+    /// Handle a drop of in-app items or OS files onto `dest_dir`. Internal
+    /// drags move; OS-file drops (`ExternalPaths`) copy. Sources whose
+    /// parent is already `dest_dir`, and any attempt to drop a directory
+    /// into itself or a descendant, are filtered out first.
+    fn drop_onto(
+        &mut self,
+        dest_dir: PathBuf,
+        sources: Vec<PathBuf>,
+        mode: ClipMode,
+        cx: &mut Context<Self>,
+    ) {
+        if !dest_dir.is_dir() {
+            return;
+        }
+        let sources: Vec<PathBuf> =
+            sources.into_iter().filter(|src| is_valid_drop(&dest_dir, src)).collect();
+        if sources.is_empty() {
+            return;
+        }
+        self.spawn_transfer_batch(sources, mode, dest_dir, cx);
+    }
+
+    /// Decorate a folder row/card so it accepts drops: an in-app drag of
+    /// items ([`DragItems`], moved) or OS files ([`ExternalPaths`],
+    /// copied). Highlights while a compatible drag hovers, and refuses a
+    /// drag made entirely of items already living in `dest`.
+    fn folder_drop_target(
+        &self,
+        row: gpui::Stateful<gpui::Div>,
+        dest: PathBuf,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let highlight = theme.accent_selection;
+        let can_dest = dest.clone();
+        row.drag_over::<DragItems>(move |s, _dragged, _window, _cx| s.bg(highlight))
+            .drag_over::<ExternalPaths>(move |s, _dragged, _window, _cx| s.bg(highlight))
+            .can_drop(move |dragged, _window, _cx| {
+                // OS-file drops are always welcome; an in-app drag is
+                // rejected only when every item is already in `dest` or is
+                // `dest` (or an ancestor of it).
+                match dragged.downcast_ref::<DragItems>() {
+                    Some(items) => items.paths.iter().any(|src| is_valid_drop(&can_dest, src)),
+                    None => true,
+                }
+            })
+            .on_drop(cx.listener({
+                let dest = dest.clone();
+                move |this, items: &DragItems, _window, cx| {
+                    this.drop_onto(dest.clone(), items.paths.clone(), ClipMode::Cut, cx);
+                }
+            }))
+            .on_drop(cx.listener(move |this, ext: &ExternalPaths, _window, cx| {
+                this.drop_onto(dest.clone(), ext.paths().to_vec(), ClipMode::Copy, cx);
+            }))
+    }
+
+    /// Reload the active directory (refresh button / cmd-r / F5). A no-op
+    /// while a search is active — the results are recomputed live.
+    fn reload_dir(&mut self, cx: &mut Context<Self>) {
+        if !self.query.is_empty() || self.settings_open {
+            return;
+        }
+        let cwd = self.cwd.clone();
+        self.load_dir(&cwd, cx);
+        self.notice = Some("refreshed".into());
+        cx.notify();
+    }
+
+    /// Move or copy many items into `dest_dir` as one undo batch. Runs
+    /// sequentially off-thread; an occupied destination auto-resolves to
+    /// the next free "name 2" variant (no per-item prompt), and items
+    /// already in `dest_dir` are skipped. One job tracks the run; byte
+    /// progress reflects the item currently copying. Shared by clipboard
+    /// paste (dest = cwd) and drag-and-drop (dest = the dropped-on folder).
+    fn spawn_transfer_batch(
+        &mut self,
+        sources: Vec<PathBuf>,
+        mode: ClipMode,
+        dest_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         let progress = std::sync::Arc::new(ops::OpProgress::default());
         let job_id = self.next_job_id;
         self.next_job_id += 1;
@@ -2290,7 +2441,8 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 this.jobs.retain(|job| job.id != job_id);
                 if !applied.is_empty() {
-                    this.notice = Some(format!("pasted {} items", applied.len()).into());
+                    let verb = if mode == ClipMode::Copy { "copied" } else { "moved" };
+                    this.notice = Some(format!("{verb} {} items", applied.len()).into());
                     this.journal.record(applied);
                 }
                 let cwd = this.cwd.clone();
@@ -3163,17 +3315,15 @@ impl Workspace {
         });
     }
 
+    /// The navigation bar (second row): refresh/back/forward/up, the path
+    /// breadcrumbs, then the search box pinned to the right.
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let settings = self.settings.read(cx).settings();
-        let is_grid = settings.view == ViewMode::Grid;
-        let preview_open = settings.preview_open;
         let (can_back, can_forward) = (!self.history_back.is_empty(), !self.history_forward.is_empty());
         let dim = |enabled: bool| if enabled { theme.text_dim } else { theme.border };
-        // Three-column layout: the left (nav + breadcrumbs) and right
-        // (view controls) groups each take an equal flexible share, so
-        // the fixed-width search box in the middle stays optically
-        // centred regardless of how long the breadcrumb trail is.
+        // Left: the navigation controls followed by the path, taking the
+        // flexible share so a long breadcrumb trail eats into the gap
+        // before the search box (which keeps its fixed width on the right).
         let left = div()
             .flex_1()
             .min_w_0()
@@ -3181,6 +3331,10 @@ impl Workspace {
             .items_center()
             .gap_1()
             .overflow_hidden()
+            .child(
+                ui::top_bar::toolbar_button(&theme, "refresh", "icons/refresh-cw.svg", theme.text_dim)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.reload_dir(cx))),
+            )
             .child(
                 ui::top_bar::toolbar_button(&theme, "back", "icons/chevron-left.svg", dim(can_back))
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_back(cx))),
@@ -3202,12 +3356,16 @@ impl Workspace {
             )
             .child(self.render_breadcrumbs(cx));
 
-        // The toggle lights for the *effective* mode, not just the
+        // The magic toggle lights for the *effective* mode, not just the
         // explicit flag: a command typed in normal mode auto-switches the
         // app into magic view, and the icon must say so — otherwise the
         // results list vanishes with no visible reason. `in_magic_view`
         // is the same predicate the render path branches on.
-        let center = div().flex_1().min_w_0().flex().justify_center().child(
+        // A definite width so the search box's `w_full` resolves (a
+        // `flex_none` parent would otherwise shrink-wrap to nothing); the
+        // box's own `max_w` still caps it. The nav controls to the left
+        // take the remaining space and shrink first on a narrow window.
+        let search = div().flex_none().w(px(340.)).flex().justify_end().child(
             ui::top_bar::search_box(&theme, !self.query.is_empty() || self.in_magic_view())
                 .child(
                     ui::top_bar::scope_selector(
@@ -3230,55 +3388,7 @@ impl Workspace {
                 )),
         );
 
-        let right = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap_1()
-            // Grid-only zoom stepper.
-            .children(is_grid.then(|| {
-                ui::top_bar::toolbar_button(&theme, "zoom-out", "icons/minus.svg", theme.text_dim)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(-1, cx)))
-            }))
-            .children(is_grid.then(|| {
-                ui::top_bar::toolbar_button(&theme, "zoom-in", "icons/plus.svg", theme.text_dim)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(1, cx)))
-            }))
-            // List ⇄ grid toggle: shows the layout it switches to.
-            .child(
-                ui::top_bar::toolbar_button(
-                    &theme,
-                    "view-toggle",
-                    if is_grid { "icons/list.svg" } else { "icons/layout-grid.svg" },
-                    theme.text_dim,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_view(cx))),
-            )
-            // Details/preview panel toggle.
-            .child(
-                ui::top_bar::toolbar_button(
-                    &theme,
-                    "preview-toggle",
-                    "icons/panel-right.svg",
-                    if preview_open { theme.accent } else { theme.text_dim },
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_preview(cx))),
-            )
-            .child(
-                ui::top_bar::toolbar_button(
-                    &theme,
-                    "settings",
-                    "icons/settings.svg",
-                    if self.settings_open { theme.accent } else { theme.text_dim },
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.toggle_settings(cx);
-                })),
-            );
-
-        ui::top_bar::top_bar(&theme).child(left).child(center).child(right)
+        ui::top_bar::top_bar(&theme).child(left).child(search)
     }
 
     /// Settings live in a centred modal over the browse view (rather
@@ -3779,7 +3889,7 @@ impl Workspace {
     }
 
     fn render_browse_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        match self.settings.read(cx).settings().view {
+        let inner = match self.settings.read(cx).settings().view {
             ViewMode::List => div()
                 .flex()
                 .flex_col()
@@ -3789,7 +3899,24 @@ impl Workspace {
                 .child(self.render_file_list(cx))
                 .into_any_element(),
             ViewMode::Grid => self.render_grid(window, cx),
-        }
+        };
+        // The whole pane accepts an OS-file drop into the current folder
+        // (a copy). Folder rows/cards register their own handlers and win
+        // when the drop lands on them; this catches drops on empty space
+        // or on non-folder rows. Internal drags are not handled here — the
+        // items are already in this folder.
+        let dest = self.cwd.clone();
+        div()
+            .id("browse-pane")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(inner)
+            .on_drop(cx.listener(move |this, ext: &ExternalPaths, _window, cx| {
+                this.drop_onto(dest.clone(), ext.paths().to_vec(), ClipMode::Copy, cx);
+            }))
+            .into_any_element()
     }
 
     /// The card grid: a `uniform_list` whose rows are strips of N cards,
@@ -3861,7 +3988,8 @@ impl Workspace {
         };
         let name_tip: SharedString = name.clone().into();
         let icon = self.render_icon_cell(&name, &path, is_dir, size, cx);
-        ui::grid::card(theme, ("card", ix), size, is_selected)
+        let drag = self.drag_items(ix, *theme);
+        let card = ui::grid::card(theme, ("card", ix), size, is_selected)
             .tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
             .child(ui::grid::card_icon_area(size).child(icon))
             .child(ui::grid::card_name(theme, size).child(name))
@@ -3878,8 +4006,14 @@ impl Workspace {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.open_entry_menu(ix, false, event.position, window, cx);
                 }),
-            )
-            .into_any_element()
+            );
+        let card = card.when_some(drag, |card, items| {
+            card.on_drag(items, |items, position, _window, cx| {
+                cx.new(|_| items.clone().at(position))
+            })
+        });
+        let card = if is_dir { self.folder_drop_target(card, path, *theme, cx) } else { card };
+        card.into_any_element()
     }
 
     fn render_file_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3922,39 +4056,48 @@ impl Workspace {
                                 .child(div().w_full().text_sm().truncate().child(name))
                                 .into_any_element(),
                         };
-                        Some(
-                            ui::list_row::list_row(&theme, ix, is_selected)
-                                // Full name on hover (helps when it's truncated);
-                                // suppressed mid-rename so it doesn't cover the field.
-                                .when(!is_renaming, |row| {
-                                    row.tooltip(ui::tooltip::text_tooltip(name_tip, theme))
-                                })
-                                .child(icon)
-                                .child(name_cell)
-                                .child(ui::list_row::detail_cell(
-                                    &theme,
-                                    ui::list_row::MODIFIED_COL_WIDTH,
-                                    format_modified(modified, std::time::SystemTime::now()),
-                                ))
-                                .child(ui::list_row::detail_cell(
-                                    &theme,
-                                    ui::list_row::SIZE_COL_WIDTH,
-                                    if is_dir { "—".to_string() } else { format_size(size) },
-                                ))
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
-                                    if event.click_count() >= 2 {
-                                        this.activate(ix, cx);
-                                    } else {
-                                        this.select_click(ix, event.modifiers(), cx);
-                                    }
-                                }))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                        this.open_entry_menu(ix, false, event.position, window, cx);
-                                    }),
-                                ),
-                        )
+                        let drag = (!is_renaming).then(|| this.drag_items(ix, theme)).flatten();
+                        let row = ui::list_row::list_row(&theme, ix, is_selected)
+                            // Full name on hover (helps when it's truncated);
+                            // suppressed mid-rename so it doesn't cover the field.
+                            .when(!is_renaming, |row| {
+                                row.tooltip(ui::tooltip::text_tooltip(name_tip, theme))
+                            })
+                            .child(icon)
+                            .child(name_cell)
+                            .child(ui::list_row::detail_cell(
+                                &theme,
+                                ui::list_row::MODIFIED_COL_WIDTH,
+                                format_modified(modified, std::time::SystemTime::now()),
+                            ))
+                            .child(ui::list_row::detail_cell(
+                                &theme,
+                                ui::list_row::SIZE_COL_WIDTH,
+                                if is_dir { "—".to_string() } else { format_size(size) },
+                            ))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                                if event.click_count() >= 2 {
+                                    this.activate(ix, cx);
+                                } else {
+                                    this.select_click(ix, event.modifiers(), cx);
+                                }
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.open_entry_menu(ix, false, event.position, window, cx);
+                                }),
+                            );
+                        // Any row can be a drag source; only folders accept a drop.
+                        let row = row.when_some(drag, |row, items| {
+                            row.on_drag(items, |items, position, _window, cx| {
+                                cx.new(|_| items.clone().at(position))
+                            })
+                        });
+                        let row = row.when(is_dir, |row| {
+                            this.folder_drop_target(row, path.clone(), theme, cx)
+                        });
+                        Some(row)
                     })
                     .collect()
             }),
@@ -4411,40 +4554,96 @@ impl Workspace {
 
     /// The tab strip, shown only with more than one tab open. The "+"
     /// opens a tab at the active tab's folder.
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.tabs.len() < 2 {
-            return None;
-        }
+    /// The topmost bar: the tab strip on the left and the window/view
+    /// icon group (zoom, list⇄grid, preview, settings) on the right.
+    /// Always shown — a single tab still gets a chip, and the icon group
+    /// needs a stable home now that it has left the nav bar.
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = *cx.theme();
-        let mut bar = ui::tabs::tab_bar(&theme);
+        let settings = self.settings.read(cx).settings();
+        let is_grid = settings.view == ViewMode::Grid;
+        let preview_open = settings.preview_open;
+
+        // Only offer a close control when closing is meaningful (more than
+        // one tab); a lone tab reads as the window's title, not a chip to
+        // dismiss.
+        let closable = self.tabs.len() > 1;
+        let mut tabs = ui::tabs::tab_group();
         for i in 0..self.tabs.len() {
-            bar = bar.child(
-                ui::tabs::tab(&theme, ("tab", i), i == self.active_tab)
-                    .child(ui::tabs::tab_label(self.tab_title(i)))
-                    .child(ui::tabs::tab_close(&theme, ("tab-close", i)).on_click(cx.listener(
-                        move |this, _: &ClickEvent, _window, cx| {
-                            cx.stop_propagation();
-                            this.close_tab(i, cx);
-                        },
-                    )))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.activate_tab(i, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
-                            this.close_tab(i, cx);
-                        }),
-                    ),
+            let mut chip = ui::tabs::tab(&theme, ("tab", i), i == self.active_tab)
+                .child(ui::tabs::tab_label(self.tab_title(i)));
+            if closable {
+                chip = chip.child(ui::tabs::tab_close(&theme, ("tab-close", i)).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(i, cx);
+                    }),
+                ));
+            }
+            tabs = tabs.child(
+                chip.on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.activate_tab(i, cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                        this.close_tab(i, cx);
+                    }),
+                ),
             );
         }
         let cwd = self.cwd.clone();
-        bar = bar.child(ui::tabs::new_tab_button(&theme, "new-tab").on_click(cx.listener(
+        tabs = tabs.child(ui::tabs::new_tab_button(&theme, "new-tab").on_click(cx.listener(
             move |this, _: &ClickEvent, _window, cx| {
                 this.open_tab(cwd.clone(), cx);
             },
         )));
-        Some(bar.into_any_element())
+
+        let icons = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            // Grid-only zoom stepper.
+            .children(is_grid.then(|| {
+                ui::top_bar::toolbar_button(&theme, "zoom-out", "icons/minus.svg", theme.text_dim)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(-1, cx)))
+            }))
+            .children(is_grid.then(|| {
+                ui::top_bar::toolbar_button(&theme, "zoom-in", "icons/plus.svg", theme.text_dim)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(1, cx)))
+            }))
+            // List ⇄ grid toggle: shows the layout it switches to.
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "view-toggle",
+                    if is_grid { "icons/list.svg" } else { "icons/layout-grid.svg" },
+                    theme.text_dim,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_view(cx))),
+            )
+            // Details/preview panel toggle.
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "preview-toggle",
+                    "icons/panel-right.svg",
+                    if preview_open { theme.accent } else { theme.text_dim },
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_preview(cx))),
+            )
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "settings",
+                    "icons/settings.svg",
+                    if self.settings_open { theme.accent } else { theme.text_dim },
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx))),
+            );
+
+        ui::tabs::tab_bar(&theme).child(tabs).child(icons).into_any_element()
     }
 
     /// The right-hand details/preview panel for the lead item. `None`
@@ -4615,6 +4814,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoUp, _window, cx| this.go_up(cx)))
             .on_action(cx.listener(|this, _: &GoBack, _window, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _window, cx| this.go_forward(cx)))
+            .on_action(cx.listener(|this, _: &Refresh, _window, cx| this.reload_dir(cx)))
             .on_action(cx.listener(|this, _: &NewTab, _window, cx| {
                 let cwd = this.cwd.clone();
                 this.open_tab(cwd, cx);
@@ -4685,8 +4885,8 @@ impl Render for Workspace {
             .font_family(ui::fonts::UI_FONT_FAMILY)
             .bg(theme.bg)
             .text_color(theme.text)
+            .child(self.render_tab_bar(cx))
             .child(self.render_top_bar(cx))
-            .children(self.render_tab_bar(cx))
             .children(self.render_filter_chips(cx))
             .child(
                 div()
@@ -4751,6 +4951,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-]", GoForward, None),
             #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-r", Refresh, None),
+            #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-,", ToggleSettings, None),
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-i", TogglePreview, None),
@@ -4773,6 +4975,10 @@ fn main() {
             KeyBinding::new("alt-left", GoBack, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("alt-right", GoForward, None),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-r", Refresh, None),
+            // F5 refreshes on every platform (Explorer convention).
+            KeyBinding::new("f5", Refresh, None),
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-,", ToggleSettings, None),
             #[cfg(not(target_os = "macos"))]
@@ -4805,9 +5011,11 @@ fn main() {
         let titlebar = TitlebarOptions {
             title: None,
             appears_transparent: true,
+            // The tab bar is now the topmost bar, so the inset traffic
+            // lights are centered against its height, not the nav bar's.
             traffic_light_position: Some(gpui::point(
                 px(12.),
-                px((ui::top_bar::TOP_BAR_HEIGHT - 12.) / 2.),
+                px((ui::tabs::TAB_BAR_HEIGHT - 12.) / 2.),
             )),
         };
         #[cfg(not(target_os = "macos"))]
@@ -4986,5 +5194,42 @@ mod magic_ui_tests {
         assert_eq!(plural_items(1), "item");
         assert_eq!(plural_items(0), "items");
         assert_eq!(plural_items(2), "items");
+    }
+}
+
+#[cfg(test)]
+mod drop_target_tests {
+    use super::is_valid_drop;
+    use std::path::Path;
+
+    #[test]
+    fn accepts_a_move_into_a_sibling_folder() {
+        assert!(is_valid_drop(Path::new("/home/user/Archive"), Path::new("/home/user/report.pdf")));
+    }
+
+    #[test]
+    fn rejects_an_item_already_in_the_destination() {
+        // The file is already directly inside the target — a move would
+        // be a no-op, so the drop must be filtered out.
+        assert!(!is_valid_drop(Path::new("/home/user"), Path::new("/home/user/report.pdf")));
+    }
+
+    #[test]
+    fn rejects_dropping_a_folder_onto_itself() {
+        assert!(!is_valid_drop(Path::new("/home/user/docs"), Path::new("/home/user/docs")));
+    }
+
+    #[test]
+    fn rejects_dropping_a_folder_into_its_own_descendant() {
+        // Moving /a into /a/b/c would try to relocate a directory inside
+        // its own subtree — nonsensical, and must be refused.
+        assert!(!is_valid_drop(Path::new("/a/b/c"), Path::new("/a")));
+    }
+
+    #[test]
+    fn allows_moving_a_child_out_to_a_deeper_unrelated_path() {
+        // The destination is nested, but not under the source, so it's a
+        // legitimate move.
+        assert!(is_valid_drop(Path::new("/a/b/c"), Path::new("/other/file.txt")));
     }
 }
