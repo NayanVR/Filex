@@ -1,0 +1,218 @@
+# Release pipeline — runs on a version tag (e.g. v1.4.0). Builds each
+# platform's artifact, signs it with our own Ed25519 key (the boundary that
+# replaces OS code signing — see docs/design-distribution.md §4), publishes
+# a GitHub Release with the artifacts + per-platform update manifest, and
+# bumps the Homebrew cask.
+#
+# The update client fetches the manifest at the STABLE url
+#   https://github.com/<owner>/<repo>/releases/latest/download/filex-<os>.json
+# which always resolves to the newest release; each manifest's `url` points
+# at that release's immutable, tagged artifact asset.
+#
+# Required secrets:
+#   FILEX_SIGNING_KEY  — hex Ed25519 private key from `filex-sign keygen`.
+#   TAP_GITHUB_TOKEN   — PAT with push access to the Homebrew tap repo.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Homebrew tap repository the cask lives in (owner/repo).
+  TAP_REPO: NayanVR/homebrew-filex
+
+jobs:
+  # --- Windows: MSI (app + SCM service), signed -------------------------
+  windows:
+    name: windows (msi)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install WiX Toolset v3
+        run: choco install wixtoolset --no-progress -y
+      - name: Add WiX to PATH
+        shell: pwsh
+        run: |
+          $candle = Get-ChildItem "C:\Program Files (x86)\WiX Toolset*\bin\candle.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $candle) { throw "WiX candle.exe not found after install" }
+          Add-Content $env:GITHUB_PATH $candle.Directory.FullName
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+        env:
+          RUSTFLAGS: ""
+      - name: Build release (app + service, updater on)
+        run: cargo build --release --locked
+      - name: Build the MSI
+        run: cargo wix --no-build -v
+      - name: Build filex-sign
+        run: cargo build --release --locked --no-default-features --bin filex-sign
+      - name: Sign artifact + write manifest
+        shell: bash
+        env:
+          FILEX_SIGNING_KEY: ${{ secrets.FILEX_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          MSI="$(ls target/wix/*.msi | head -n1)"
+          ASSET="Filex-${VERSION}-x64.msi"
+          cp "$MSI" "$ASSET"
+          URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ASSET}"
+          ./target/release/filex-sign sign \
+            --version "$VERSION" --url "$URL" \
+            --in "$ASSET" --out filex-windows.json
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Filex-*-x64.msi
+            filex-windows.json
+
+  # --- Linux: tarball of the binary, signed -----------------------------
+  linux:
+    name: linux (tarball)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GPUI system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libwayland-dev libvulkan-dev
+      - name: Build release
+        run: cargo build --release --locked --bin filex
+      - name: Build filex-sign
+        run: cargo build --release --locked --no-default-features --bin filex-sign
+      - name: Package + sign
+        env:
+          FILEX_SIGNING_KEY: ${{ secrets.FILEX_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="filex-${VERSION}-linux-x86_64.tar.gz"
+          tar -C target/release -czf "$ASSET" filex
+          URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ASSET}"
+          ./target/release/filex-sign sign \
+            --version "$VERSION" --url "$URL" \
+            --in "$ASSET" --out filex-linux.json
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            filex-*-linux-x86_64.tar.gz
+            filex-linux.json
+
+  # --- macOS: ad-hoc-signed .app in a tarball (Homebrew cask) -----------
+  # NOTE: builds for the runner's arch only (arm64 on macos-14+). Intel
+  # Macs would need a separate x86_64 / universal build — deferred.
+  macos:
+    name: macos (app tarball)
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
+      sha256: ${{ steps.pkg.outputs.sha256 }}
+      asset: ${{ steps.pkg.outputs.asset }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release --locked --bin filex
+      - name: Build filex-sign
+        run: cargo build --release --locked --no-default-features --bin filex-sign
+      - name: Bundle .app, ad-hoc sign, package + sign
+        id: pkg
+        env:
+          FILEX_SIGNING_KEY: ${{ secrets.FILEX_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP="Filex.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp target/release/filex "$APP/Contents/MacOS/filex"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Filex</string>
+            <key>CFBundleDisplayName</key><string>Filex</string>
+            <key>CFBundleIdentifier</key><string>dev.filex.app</string>
+            <key>CFBundleExecutable</key><string>filex</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>10.15</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          # Ad-hoc signature (free): required for the binary to run on Apple
+          # Silicon; does NOT clear Gatekeeper (one first-launch prompt, by
+          # design — docs/design-distribution.md decision 2).
+          codesign --force --deep --sign - "$APP"
+          ASSET="filex-${VERSION}-macos.tar.gz"
+          tar -czf "$ASSET" "$APP"
+          URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ASSET}"
+          ./target/release/filex-sign sign \
+            --version "$VERSION" --url "$URL" \
+            --in "$ASSET" --out filex-macos.json
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "$ASSET" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            filex-*-macos.tar.gz
+            filex-macos.json
+
+  # --- Bump the Homebrew cask in the tap repo ---------------------------
+  homebrew:
+    name: bump homebrew cask
+    needs: macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+      - name: Render cask
+        env:
+          VERSION: ${{ needs.macos.outputs.version }}
+          SHA256: ${{ needs.macos.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Casks
+          cat > tap/Casks/filex.rb <<CASK
+          cask "filex" do
+            version "${VERSION}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v#{version}/filex-#{version}-macos.tar.gz"
+            name "Filex"
+            desc "Fast cross-platform file explorer"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+
+            app "Filex.app"
+          end
+          CASK
+      - name: Commit + push
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/filex.rb
+          git commit -m "filex ${{ needs.macos.outputs.version }}" || { echo "no change"; exit 0; }
+          git push
