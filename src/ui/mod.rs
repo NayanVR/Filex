@@ -26,3 +26,4 @@ pub mod tabs;
 pub mod theme;
 pub mod tooltip;
 pub mod top_bar;
+pub mod update_banner;
