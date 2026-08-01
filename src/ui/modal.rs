@@ -13,6 +13,9 @@ use super::theme::Theme;
 pub fn backdrop(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
+        // Swallow all mouse events so the browse list behind the dialog
+        // does not keep hovering and clicking through the dim overlay.
+        .occlude()
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))

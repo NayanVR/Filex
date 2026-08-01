@@ -22,8 +22,15 @@ pub const MENU_WIDTH: f32 = 200.;
 
 /// Transparent overlay covering the window; a click anywhere on it
 /// (i.e. outside the menu) should close — callers chain `.on_click`.
+///
+/// `.occlude()` is load-bearing, not cosmetic: without it the overlay is
+/// transparent to hover and clicks, so the rows *behind* the menu still
+/// highlight on hover and — worse — still fire their own click when you
+/// pick a menu item. Occluding makes the overlay swallow every mouse
+/// event in its bounds; the menu panel sits on top as a child, so its
+/// items keep working while the background is inert.
 pub fn overlay(id: impl Into<ElementId>) -> Stateful<Div> {
-    div().id(id).absolute().inset_0()
+    div().id(id).absolute().inset_0().occlude()
 }
 
 /// The anchored menu card. `position` is in window coordinates,

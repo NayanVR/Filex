@@ -135,6 +135,55 @@ pub fn filter_chip(
     chip.child(label.into()).child(div().text_color(theme.text_dim).child("✕"))
 }
 
+/// The magic-mode toggle that lives at the trailing edge of the search
+/// box. `active` lights it in the accent colour and gives it a filled
+/// background so the mode reads at a glance. The whole pill is the click
+/// target; callers chain `.on_click`.
+pub fn magic_toggle(theme: &Theme, active: bool) -> Stateful<Div> {
+    let hover = theme.hover;
+    let (bg, tint) = if active {
+        (theme.selected, theme.accent)
+    } else {
+        (gpui::transparent_black().into(), theme.text_dim)
+    };
+    div()
+        .id("magic-toggle")
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(22.))
+        .rounded_md()
+        .bg(bg)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .child(icon::ui_icon("icons/sparkles.svg", tint).size(px(15.)))
+}
+
+/// The scope dropdown at the search box's left edge: the current scope
+/// label and a chevron. `open` tints it accent so it reads as active
+/// while its menu is up. Callers chain `.on_mouse_down` to open the menu.
+pub fn scope_selector(theme: &Theme, label: &'static str, open: bool) -> Stateful<Div> {
+    let hover = theme.hover;
+    let text = if open { theme.accent } else { theme.text_dim };
+    div()
+        .id("scope-selector")
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .pl_1()
+        .pr_1p5()
+        .py_0p5()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .text_xs()
+        .text_color(text)
+        .child(label)
+        .child(icon::ui_icon("icons/chevron-down.svg", text).size(px(12.)))
+}
+
 pub fn search_box(theme: &Theme, active: bool) -> Div {
     div()
         .flex()

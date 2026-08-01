@@ -98,7 +98,7 @@ every keystroke — a latency regression on the common case (typing
 nothing.
 
 Instead: **run the fuzzy pass only if the literal pass returned fewer
-than `limit` hits.** Then:
+than `FUZZY_GATE` (50) hits.** Then:
 
 - The common case is byte-for-byte today's code path and today's latency.
 - Fuzzy hits are pure filler below literal hits, which is also exactly
@@ -107,12 +107,52 @@ than `limit` hits.** Then:
   found almost nothing — i.e. when the user is currently staring at an
   empty result list and would rather wait.
 
-The gate is `hits < limit`, deliberately not `hits == 0`: `dsr` may match
-one junk file literally, and that must not suppress the acronym hits.
+The gate is `hits < FUZZY_GATE`, deliberately not `hits == 0`: `dsr` may
+match one junk file literally, and that must not suppress the acronym
+hits.
 
-Accepted trade-off: a query with ≥ `limit` literal hits never shows
-acronym matches, even if one would have been the better answer. Revisit
-only if it bites in dogfooding.
+Accepted trade-off: a query with ≥ `FUZZY_GATE` literal hits never shows
+acronym matches, even if one would have been the better answer. Fifty
+rows is already more than fits on screen, so the user has plenty to look
+at; below that the fallback is worth a second scan.
+
+### Correction (2026-07-31): the gate was `limit`, and that was wrong
+
+As originally written and shipped, this section said `hits < limit`, and
+that is what `finish` implemented. Two problems, found while chasing a
+"search is stupidly slow" report:
+
+1. **Decision 1 silently scaled it.** `manager::search_all` overfetches by
+   `OVERFETCH` and passes `limit * OVERFETCH` down as `limit`, so the
+   number that actually reached the gate was 2000 for the UI's 500 — and
+   4004 on the Magic command path, which raises the limit to
+   `MAX_PLAN_OPS + 1`. Two individually-correct decisions, composed into a
+   gate four times wider than either intended.
+2. **Even un-scaled, `limit` was the wrong quantity.** The prose above
+   describes the gate as "the user is staring at an empty result list",
+   but `limit` is a *display capacity* in the hundreds, not a measure of
+   whether a result list is useful. Any query specific enough to be worth
+   typing has fewer than 500 literal hits.
+
+Net effect: the second full scan of the arena ran on essentially every
+keystroke, which is exactly the regression this decision exists to
+prevent. Measured at 1.2M entries, the literal pass is a flat ~4-7 ms and
+the fuzzy pass adds ~20-24 ms on top. Through `search_all` on the 200k
+bench corpus, a query with a useful-sized result list (`invoice_010`,
+~100 literal hits) went from ~16.7 ms to ~1.2 ms once the gate was fixed.
+
+Guarded now by `overfetching_does_not_widen_the_fuzzy_gate` and
+`the_fuzzy_pass_still_runs_when_the_result_list_is_nearly_empty`
+(`index/mod.rs`, both sides of the boundary) and
+`a_useful_literal_result_list_gets_no_fuzzy_filler` (`index/manager.rs`,
+the composition). Note what tests *cannot* cover: in the window
+`limit <= literal hits < limit * OVERFETCH` the bug cost only latency —
+fuzzy hits rank below every literal hit and were truncated away before
+being returned — so no assertion on output could ever have caught it.
+That is why `benches/search_bench.rs` grew an `app_keystroke_200k` group
+that goes through `search_all` instead of calling `VolumeIndex::search`
+directly; every pre-existing case used a `limit` the app never passes,
+which is the other half of why this survived.
 
 ## Decision 3: the scoring model
 

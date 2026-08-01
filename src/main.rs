@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use filex::index::watcher::SharedIndex;
-use filex::index::{LiveIndex, VolumeIndex, manager, start_live_index};
+use filex::index::{LiveIndex, MatchKind, VolumeIndex, manager, start_live_index};
 use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
@@ -104,6 +104,38 @@ fn open_with_default_app(path: &Path) -> std::io::Result<()> {
 
 const SEARCH_RESULT_LIMIT: usize = 500;
 
+/// How long the query must hold still before a scan starts.
+///
+/// Sized against typing, not against the scan: ~50 ms is below a fast
+/// typist's inter-key interval only at the tail of a burst, so the scan
+/// fires once the word is finished rather than once per character. Short
+/// enough to stay imperceptible on the final keystroke — the one the user
+/// is actually waiting on — and the scan it guards costs several times
+/// this on a large index, so trading it away is strictly a win.
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Latency at or above which an operation logs itself at `warn` rather
+/// than `debug`. The point is a shipped `.app` launched by double-click
+/// has no `RUST_LOG`, so `debug` never writes — but a user staring at a
+/// 10-second search needs *something* in the log. Set well above a
+/// healthy scan (tens of ms) so normal use stays silent and only genuine
+/// stalls speak up.
+const SLOW_OP_MS: u64 = 500;
+
+/// Minimum gap between refreshes triggered by *filesystem* events.
+///
+/// Deliberately far longer than [`SEARCH_DEBOUNCE`], because the two are
+/// answering different questions. A keystroke is the user waiting on us;
+/// an FSEvent is a browser cache or a `node_modules` write, and nobody is
+/// waiting on it. Refreshing per burst meant a full parallel scan of the
+/// arena *plus* an O(n) live-entry count many times a second on an active
+/// home directory — the app pinning cores while sitting idle.
+///
+/// A trailing throttle rather than a debounce: under continuous churn a
+/// debounce would keep pushing its deadline back and never refresh at
+/// all.
+const FS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// A short label for a set of files: the single name quoted, or a count.
 /// `None` for an empty set (callers use it to bail early).
 /// "item" / "items" — Magic card headings and job labels count files.
@@ -114,21 +146,54 @@ fn plural_items(n: usize) -> &'static str {
 /// One Magic-plan op as a review row: what it acts on, and where that
 /// ends up. The target is `None` for a delete — there is no destination,
 /// and inventing "→ Trash" would imply a path the op does not have.
-fn describe_op(op: &FileOp) -> (SharedString, Option<SharedString>) {
-    let name = |path: &Path| -> SharedString {
-        path.file_name().unwrap_or_default().to_string_lossy().into_owned().into()
+/// The three cells of a plan row — source name, the folder it lives in,
+/// and where it is going (`None` for a delete) — plus the full
+/// `source → destination` string for the row's hover tooltip.
+struct PlanRow {
+    name: SharedString,
+    location: SharedString,
+    dest: Option<SharedString>,
+    tooltip: SharedString,
+}
+
+fn describe_op(op: &FileOp) -> PlanRow {
+    let file_name = |path: &Path| -> String {
+        path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    };
+    let parent = |path: &Path| -> String {
+        path.parent().map(|p| p.display().to_string()).unwrap_or_default()
     };
     match op {
-        FileOp::Delete { path } => (name(path), None),
+        FileOp::Delete { path } => PlanRow {
+            name: file_name(path).into(),
+            location: parent(path).into(),
+            dest: None,
+            tooltip: format!("{} → Trash", path.display()).into(),
+        },
         FileOp::Move { from, to } | FileOp::Copy { from, to } => {
-            // The parent, not the full destination: every row in a plan
-            // shares it, and the file name is already in the left column.
-            let dest = to.parent().unwrap_or(to.as_path());
-            (name(from), Some(format!("→ {}", dest.display()).into()))
+            // Show the full destination path when the plan retargeted this
+            // file to dodge a collision (`ROADMAP.md` → `ROADMAP 2.md`),
+            // so the rename is visible; otherwise the destination folder,
+            // since the name is already in the source cell.
+            let renamed = to.file_name() != from.file_name();
+            let dest = if renamed {
+                format!("→ {}", to.display())
+            } else {
+                format!("→ {}", to.parent().unwrap_or(to.as_path()).display())
+            };
+            PlanRow {
+                name: file_name(from).into(),
+                location: parent(from).into(),
+                dest: Some(dest.into()),
+                tooltip: format!("{} → {}", from.display(), to.display()).into(),
+            }
         }
-        FileOp::Rename { path, new_name } => {
-            (name(path), Some(format!("→ {new_name}").into()))
-        }
+        FileOp::Rename { path, new_name } => PlanRow {
+            name: file_name(path).into(),
+            location: parent(path).into(),
+            dest: Some(format!("→ {new_name}").into()),
+            tooltip: format!("{} → {new_name}", path.display()).into(),
+        },
     }
 }
 
@@ -174,6 +239,19 @@ fn rows_from_tagged_paths(paths: Vec<PathBuf>, limit: usize) -> Vec<SearchRow> {
 /// Keep only the rows whose path carries every one of `required` tags
 /// (the filename-search ∩ `tag:` intersection). A no-op when `required`
 /// is empty. Blocking (scans the sidecar) — call off the UI thread.
+/// May a hit feed a Magic plan?
+///
+/// Fuzzy (subsequence) hits are excluded from command queries, because a
+/// command query's rows *are* its plan — every row becomes a file the
+/// batch renames, moves or deletes. Subsequence matching is far too loose
+/// to carry that weight: `gravloc` is a subsequence of
+/// `xstate-graph.development.cjs.js`, which is a fine thing to surface
+/// when someone is looking for a file and an unacceptable thing to rename
+/// on their behalf. Ordinary searches keep every fuzzy hit.
+fn usable_in_plan(kind: MatchKind, command_query: bool) -> bool {
+    !command_query || kind != MatchKind::Fuzzy
+}
+
 fn filter_rows_by_tags(
     rows: Vec<SearchRow>,
     store: &PlatformTags,
@@ -187,8 +265,10 @@ fn filter_rows_by_tags(
     rows.into_iter().filter(|row| tagged.contains(&row.target)).collect()
 }
 
-fn read_index(index: &SharedIndex) -> std::sync::RwLockReadGuard<'_, VolumeIndex> {
-    index.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+/// A lock-free snapshot of the index (optimization B). Derefs (through the
+/// `Arc`) to `VolumeIndex`; hold it only as long as the read.
+fn read_index(index: &SharedIndex) -> arc_swap::Guard<std::sync::Arc<VolumeIndex>> {
+    index.load()
 }
 
 enum RootState {
@@ -268,6 +348,49 @@ struct Job {
     id: u64,
     label: SharedString,
     progress: std::sync::Arc<ops::OpProgress>,
+}
+
+/// How the search bar chooses between normal search and magic mode
+/// (`docs/design-magic-mode.md` v2). Three states, not a bool, because
+/// auto-switch and an explicit toggle both exist and can disagree: the
+/// toggle has to be able to force magic mode *off* on a query that
+/// auto-switch would otherwise light up, and *on* for a query that hasn't
+/// parsed into a command yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MagicMode {
+    /// The default. A command-shaped query with structured evidence flips
+    /// into magic view on its own; anything else is a normal search. The
+    /// query clearing resets to this.
+    Auto,
+    /// The user toggled magic on. The delete gate is dropped and the plan
+    /// view is shown even before a command parses (it prompts for one).
+    On,
+    /// The user toggled magic off while it was showing. Stays a normal
+    /// search even for a command-shaped query, until the toggle or a
+    /// cleared query returns it to [`Auto`](Self::Auto).
+    Off,
+}
+
+/// Where a query (normal or magic) looks: across every indexed root, or
+/// only within the folder currently on screen. Chosen from the search
+/// bar's scope dropdown; defaults to [`Anywhere`](Self::Anywhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchScope {
+    /// Every indexed root — the index's whole reach.
+    Anywhere,
+    /// Only `cwd` and its subtree. Resolved per-scan against the index so
+    /// it costs nothing when off, and a folder the index hasn't caught up
+    /// to yet simply returns nothing.
+    CurrentDir,
+}
+
+impl SearchScope {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Anywhere => "Anywhere",
+            Self::CurrentDir => "Current Dir",
+        }
+    }
 }
 
 /// A parsed Magic command and the plan it resolved to, for the review
@@ -395,6 +518,17 @@ struct Workspace {
     search_generation: u64,
     /// The Magic card's state when the query parses as a command.
     magic: Option<MagicState>,
+    /// How the search bar decides between normal search and magic mode.
+    /// See [`MagicMode`] — the three states exist so the toggle can both
+    /// force magic *on* and force it *off* against what auto-switch would
+    /// otherwise do.
+    magic_mode: MagicMode,
+    /// Whether queries look everywhere or only under `cwd` — the search
+    /// bar's scope dropdown. Applies to both normal and magic searches.
+    search_scope: SearchScope,
+    /// Anchor for the open scope dropdown (window coords from the click),
+    /// or `None` when closed. Same overlay pattern as `context_menu`.
+    scope_menu: Option<Point<Pixels>>,
     /// The user's well-known folders, for resolving "… to Documents".
     /// Read once at startup — `from_os` does environment lookups and has
     /// no business running per keystroke.
@@ -430,6 +564,8 @@ struct Workspace {
     context_menu: Option<ContextMenu>,
     browse_scroll: UniformListScrollHandle,
     results_scroll: UniformListScrollHandle,
+    /// Scroll handle for the virtualized Magic plan list.
+    magic_scroll: UniformListScrollHandle,
     thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
     /// Lazily-fetched metadata for the details panel's current item.
     preview_meta: Option<PreviewMeta>,
@@ -464,6 +600,21 @@ struct Workspace {
     tags: std::sync::Arc<PlatformTags>,
     /// Mounted volumes with capacity, refreshed on a slow timer.
     drives: Vec<Drive>,
+    /// Pending debounced scan from [`Workspace::update_search`]. Held so
+    /// the next keystroke cancels it by dropping it — a `gpui::Task`
+    /// cancels on drop.
+    search_debounce: Option<gpui::Task<()>>,
+    /// Cancel flag for the *in-flight* scan (the one already past the
+    /// debounce and running on the background pool). Dropping the debounce
+    /// task only stops a scan that hasn't started; this stops one that
+    /// has. A new search sets the old flag and installs a fresh one — see
+    /// [`Workspace::update_search`].
+    search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// True while a filesystem-driven refresh is already scheduled. This
+    /// is a *throttle*, not a debounce: further events during the window
+    /// are dropped rather than pushing the deadline back, so continuous
+    /// churn still refreshes on a fixed cadence instead of starving.
+    fs_refresh_pending: bool,
 }
 
 impl Workspace {
@@ -541,6 +692,9 @@ impl Workspace {
             results: Vec::new(),
             search_generation: 0,
             magic: None,
+            magic_mode: MagicMode::Auto,
+            search_scope: SearchScope::Anywhere,
+            scope_menu: None,
             user_dirs: filex::magic::UserDirs::from_os(),
             selection: Selection::default(),
             search_selection: Selection::default(),
@@ -555,6 +709,7 @@ impl Workspace {
             context_menu: None,
             browse_scroll: UniformListScrollHandle::new(),
             results_scroll: UniformListScrollHandle::new(),
+            magic_scroll: UniformListScrollHandle::new(),
             thumbnails: std::collections::HashMap::new(),
             preview_meta: None,
             preview_tags: Vec::new(),
@@ -571,6 +726,9 @@ impl Workspace {
                     .unwrap_or_else(|| std::env::temp_dir().join("filex").join("tags.json")),
             )),
             drives: Vec::new(),
+            search_debounce: None,
+            search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fs_refresh_pending: false,
         };
         this.load_dir(&cwd, cx);
         this.spawn_tag_prune(cx);
@@ -774,16 +932,39 @@ impl Workspace {
             // Live-update loop for this root.
             while change_rx.next().await.is_some() {
                 while change_rx.try_recv().is_ok() {} // drain bursts
-                let alive = this.update(cx, |this, cx| {
-                    this.refresh_root_stats(path.clone(), cx);
-                    if !this.query.is_empty() {
-                        this.update_search(cx);
-                    }
-                });
+                let alive =
+                    this.update(cx, |this, cx| this.refresh_after_fs_change(path.clone(), cx));
                 if alive.is_err() {
                     break;
                 }
             }
+        })
+        .detach();
+    }
+
+    /// React to filesystem activity under `path`, at most once per
+    /// [`FS_REFRESH_INTERVAL`].
+    ///
+    /// Both things this does are O(arena): the file count walks every
+    /// entry, and re-running the query is a full parallel scan. Neither
+    /// is something a `node_modules` write should be able to trigger at
+    /// event rate — unthrottled, an active home directory kept both
+    /// running continuously.
+    fn refresh_after_fs_change(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.fs_refresh_pending {
+            return; // already scheduled; this burst folds into it
+        }
+        self.fs_refresh_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FS_REFRESH_INTERVAL).await;
+            this.update(cx, |this, cx| {
+                this.fs_refresh_pending = false;
+                this.refresh_root_stats(path, cx);
+                if !this.query.is_empty() {
+                    this.update_search(cx);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -866,7 +1047,7 @@ impl Workspace {
         });
     }
 
-    fn load_dir(&mut self, path: &Path, cx: &App) {
+    fn load_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
         let settings = self.settings.read(cx).settings();
         let (sort, show_hidden) = (settings.sort, settings.show_hidden_files);
         match read_dir_sorted(path, &sort) {
@@ -874,6 +1055,7 @@ impl Workspace {
                 if !show_hidden {
                     entries.retain(|entry| !entry.is_hidden);
                 }
+                let changed = self.cwd != path;
                 self.cwd = path.to_path_buf();
                 self.entries = entries;
                 self.load_error = None;
@@ -883,6 +1065,16 @@ impl Workspace {
                 self.renaming = None;
                 self.pending_delete = None;
                 self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                // A "Current Dir" search follows the folder you're in, so
+                // navigating with a scoped query live must re-scope it to
+                // the new directory. "Anywhere" is cwd-independent, so it
+                // is left untouched.
+                if changed
+                    && self.search_scope == SearchScope::CurrentDir
+                    && !self.query.is_empty()
+                {
+                    self.update_search(cx);
+                }
             }
             Err(err) => {
                 self.load_error = Some(format!("{err:#}").into());
@@ -1406,12 +1598,25 @@ impl Workspace {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let tokens = filex::search_filter::filter_tokens(&self.query, now);
-        // Phrases are read from whatever the `key:value` parse left as
-        // plain text, exactly as update_search does — so the chips always
-        // show precisely the filters the search is applying.
-        let residual = filex::search_filter::parse_query(&self.query, now).text;
-        let phrases = filex::phrases::expand(&residual, now).phrases;
+        // Chips must describe the search that actually ran. For a command
+        // query that is *not* the raw text: `magic::parse` reads only the
+        // command's target ("pdfs from downloads", not the verb or the
+        // destination) and expands it with `expand_as_description`, whose
+        // lone-word rule differs from `expand`. Deriving chips from the
+        // whole query instead showed filters the plan does not apply —
+        // "move all pdfs from downloads to documents" grew a `kind:document`
+        // chip off the destination word, while the command carried only
+        // `ext:pdf`.
+        let source = match &self.magic {
+            Some(state) => state.command.selection.source.clone(),
+            None => self.query.clone(),
+        };
+        let tokens = filex::search_filter::filter_tokens(&source, now);
+        let residual = filex::search_filter::parse_query(&source, now).text;
+        let phrases = match &self.magic {
+            Some(_) => filex::phrases::expand_as_description(&residual, now).phrases,
+            None => filex::phrases::expand(&residual, now).phrases,
+        };
         if tokens.is_empty() && phrases.is_empty() {
             return None;
         }
@@ -1457,45 +1662,62 @@ impl Workspace {
         Some(strip.into_any_element())
     }
 
-    /// The Magic card: what the command was understood to mean, the ops
-    /// it resolved to, and the confirm control. `None` when the query
-    /// isn't a command.
+    /// The full-pane magic view (`docs/design-magic-mode.md` v2): the plan
+    /// *replaces* the results list rather than floating above it. Shown
+    /// whenever [`in_magic_view`](Self::in_magic_view) holds.
     ///
-    /// A card is shown for a *failed* plan too. The user typed a real
-    /// command; "no folder called Archive" is an answer, silence is not.
-    fn render_magic_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let state = self.magic.as_ref()?;
+    /// Three shapes: a hint (magic mode on, nothing typed yet), a resolved
+    /// plan (the reviewable op list with confirm/cancel), or a refusal
+    /// (the command parsed but couldn't build a plan — say why).
+    fn render_magic_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = *cx.theme();
+        let Some(state) = self.magic.as_ref() else {
+            // Explicit magic mode, no command yet.
+            return ui::magic_card::pane()
+                .child(ui::magic_card::pane_hint(
+                    &theme,
+                    "Type a command",
+                    &[
+                        "move all pdfs to Documents",
+                        "delete screenshots older than 30 days",
+                        "rename * to invoice-{n}.{ext}",
+                    ],
+                ))
+                .into_any_element();
+        };
+
         let verb = state.command.verb;
         let destructive = verb == filex::magic::Verb::Delete;
-
-        let mut card = ui::magic_card::card(&theme);
         let echo = format!("matching “{}”", state.command.selection.source);
+
+        let mut header = ui::magic_card::pane_header(&theme);
+        let mut body: Option<gpui::AnyElement> = None;
+        let mut action_bar: Option<gpui::Div> = None;
+
         match &state.outcome {
-            // The search behind this plan hasn't landed yet.
             None => {
-                card = card
-                    .child(ui::magic_card::heading(&theme, verb.label()))
-                    .child(ui::magic_card::subtitle(&theme, echo))
-                    .child(ui::magic_card::subtitle(
+                header = header.child(ui::magic_card::heading(&theme, verb.label())).child(
+                    ui::magic_card::subtitle(
                         &theme,
                         if self.any_root_ready() {
                             "finding matches…"
                         } else {
                             "still indexing — matches will appear when ready…"
                         },
-                    ));
+                    ),
+                );
+                header = header.child(ui::magic_card::subtitle(&theme, echo));
             }
             Some(Ok(plan)) => {
                 let count = state.checked.iter().filter(|c| **c).count();
-                card = card
+                header = header
                     .child(ui::magic_card::heading(
                         &theme,
                         format!("{} {} {}", verb.label(), count, plural_items(count)),
                     ))
                     .child(ui::magic_card::subtitle(&theme, echo));
                 if plan.skipped > 0 {
-                    card = card.child(ui::magic_card::subtitle(
+                    header = header.child(ui::magic_card::subtitle(
                         &theme,
                         format!(
                             "{} already {} — nothing to do for {}",
@@ -1506,24 +1728,45 @@ impl Workspace {
                     ));
                 }
 
-                let mut list = ui::magic_card::op_list("magic-ops");
-                for (ix, op) in plan.ops.iter().enumerate() {
-                    let (source, target) = describe_op(op);
-                    list = list.child(
-                        ui::magic_card::op_row(
-                            &theme,
-                            ("magic-op", ix),
-                            state.checked.get(ix).copied().unwrap_or(false),
-                            source,
-                            target,
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.toggle_magic_op(ix, cx);
-                        })),
-                    );
-                }
-                card = card.child(list).child(
-                    ui::magic_card::actions()
+                // Virtualized: a 342-op plan renders only the visible rows.
+                // Building every row as a child (the old approach) is what
+                // made the plan view sluggish to scroll on a large batch.
+                let list = uniform_list(
+                    "magic-plan",
+                    plan.ops.len(),
+                    cx.processor(|this, range: Range<usize>, _window, cx| {
+                        let theme = *cx.theme();
+                        let Some(state) = this.magic.as_ref() else { return Vec::new() };
+                        let Some(Ok(plan)) = state.outcome.as_ref() else { return Vec::new() };
+                        range
+                            .filter_map(|ix| {
+                                let op = plan.ops.get(ix)?;
+                                let checked = state.checked.get(ix).copied().unwrap_or(false);
+                                let PlanRow { name, location, dest, tooltip } = describe_op(op);
+                                Some(
+                                    ui::magic_card::op_row(
+                                        &theme,
+                                        ("magic-op", ix),
+                                        checked,
+                                        name,
+                                        location,
+                                        dest,
+                                    )
+                                    .tooltip(ui::tooltip::text_tooltip(tooltip, theme))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                        this.toggle_magic_op(ix, cx);
+                                    })),
+                                )
+                            })
+                            .collect()
+                    }),
+                )
+                .track_scroll(self.magic_scroll.clone())
+                .flex_1();
+                body = Some(list.into_any_element());
+
+                action_bar = Some(
+                    ui::magic_card::pane_actions(&theme)
                         .child(
                             ui::magic_card::secondary_button(&theme, "magic-cancel", "Cancel")
                                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -1545,13 +1788,18 @@ impl Workspace {
                 );
             }
             Some(Err(err)) => {
-                card = card
+                header = header
                     .child(ui::magic_card::heading(&theme, verb.label()))
                     .child(ui::magic_card::subtitle(&theme, echo))
                     .child(ui::magic_card::refusal(&theme, format!("{err}")));
             }
         }
-        Some(ui::magic_card::finish(card))
+
+        ui::magic_card::pane()
+            .child(header)
+            .children(body)
+            .children(action_bar)
+            .into_any_element()
     }
 
     /// Run the checked ops as one undo batch — the same background
@@ -1637,6 +1885,10 @@ impl Workspace {
     }
 
     fn clear_search(&mut self, cx: &mut Context<Self>) {
+        // A forced mode is scoped to the query that prompted it: clearing
+        // the box returns to Auto so the next, unrelated query decides
+        // afresh rather than inheriting a stuck On/Off.
+        self.magic_mode = MagicMode::Auto;
         // The input owns the text; its Changed event clears our mirror
         // and re-runs the (now empty) search.
         self.search_input.update(cx, |input, cx| {
@@ -2381,8 +2633,96 @@ impl Workspace {
         }
     }
 
-    /// Kick off a merged query across every ready root on the background
+    /// The search-bar toggle. Clicking it means "give me the other mode
+    /// than what I'm seeing": from any magic view (forced or auto) to a
+    /// forced-off normal search, and from any normal search to forced-on
+    /// magic. Without the forced-off state, clicking the toggle on an
+    /// auto-switched command would set `On` and look like a no-op, and
+    /// there'd be no way back to plain search without editing the query.
+    fn toggle_magic_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.magic_mode = if self.in_magic_view() { MagicMode::Off } else { MagicMode::On };
+        window.focus(&self.search_input.focus_handle(cx));
+        self.update_search(cx);
+        cx.notify();
+    }
+
+    /// Open the scope dropdown anchored at the click position (same
+    /// overlay pattern as the context menu).
+    fn open_scope_menu(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        self.scope_menu = Some(Self::clamped_menu_position(position, 88., window));
+        cx.notify();
+    }
+
+    fn close_scope_menu(&mut self, cx: &mut Context<Self>) {
+        if self.scope_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Pick a search scope and re-run the query under it. No-op (beyond
+    /// closing the menu) when the scope is unchanged.
+    fn set_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
+        self.scope_menu = None;
+        if self.search_scope != scope {
+            self.search_scope = scope;
+            self.update_search(cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the plan view replaces the results list right now. The one
+    /// predicate the render path and the search path share, so they can't
+    /// disagree about which mode is active.
+    fn in_magic_view(&self) -> bool {
+        match self.magic_mode {
+            MagicMode::On => true,
+            MagicMode::Off => false,
+            // Auto follows whether a command actually parsed.
+            MagicMode::Auto => self.magic.is_some(),
+        }
+    }
+
+    /// Schedule a search for the current query, coalescing keystrokes.
+    ///
+    /// Every caller wanting results should come through here rather than
+    /// [`run_search`](Self::run_search). A search is a full parallel scan
+    /// of every root's arena, and it is **not cancellable once started**:
+    /// the generation check drops a stale scan's *results*, but the scan
+    /// itself still runs to completion on the shared rayon pool. So firing
+    /// one per keystroke meant a 12-character query launched 12 full
+    /// scans, 11 of them pure waste, all competing for the same cores —
+    /// measured at ~124 ms of scan work against a 1.2M-entry index, which
+    /// is latency the user waits through before seeing what they typed.
+    ///
+    /// [`SEARCH_DEBOUNCE`] collapses that to one scan per settled query.
+    fn update_search(&mut self, cx: &mut Context<Self>) {
+        // Bump now, not in `run_search`: a query that has already changed
+        // must invalidate scans still in flight immediately, so their
+        // results can't land under the newer query.
+        self.search_generation += 1;
+        // Signal any scan already running on the pool to stop, then hand
+        // the next scan a fresh flag. The generation check discards a
+        // stale scan's *results*; this stops it spending CPU and holding
+        // the arena read lock to produce them. Without it, a burst of
+        // per-keystroke searches on a large index piles up and convoys
+        // with the FS writer — measured at multi-second stalls.
+        self.search_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.search_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Coalesce the burst. Dropping the previous task cancels its
+        // timer, so an N-character word costs one scan, not N.
+        self.search_debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+            this.update(cx, |this, cx| this.run_search(cx)).ok();
+        }));
+        cx.notify();
+    }
+
+    /// Run a merged query across every ready root on the background
     /// executor. Stale completions are dropped by generation check.
+    ///
+    /// Call [`update_search`](Self::update_search) instead — this is the
+    /// debounced tail, and calling it directly puts a full scan on every
+    /// keystroke again.
     ///
     /// The raw query is split (a pure
     /// [`parse_query`](filex::search_filter::parse_query)) into filename
@@ -2392,10 +2732,8 @@ impl Workspace {
     /// paths carrying every named tag (the sidecar store). A query with no
     /// filename text and no index filters — only `tag:` — lists the tagged
     /// files straight from the sidecar, skipping the index scan.
-    fn update_search(&mut self, cx: &mut Context<Self>) {
-        self.search_generation += 1;
+    fn run_search(&mut self, cx: &mut Context<Self>) {
         let generation = self.search_generation;
-        cx.notify();
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2405,11 +2743,33 @@ impl Workspace {
         // its own words: "delete screenshots older than 30 days" as a
         // literal search matches nothing, while the files the plan would
         // act on are exactly what the user needs to see under the card.
-        let command = filex::magic::parse(&self.query, now);
-        self.magic = command.as_ref().map(|command| MagicState {
-            command: command.clone(),
-            outcome: None,
-            checked: Vec::new(),
+        //
+        // The gate follows the entry (`magic::parse_with_gate`):
+        // - On:   the user opted in, so `delete old logs` parses (gate off).
+        // - Auto: a command needs structured evidence before it may
+        //         auto-switch the app into magic mode (gate on).
+        // - Off:  the user forced normal search; don't read it as a command
+        //         at all.
+        let command = match self.magic_mode {
+            MagicMode::Off => None,
+            MagicMode::On => filex::magic::parse_with_gate(&self.query, now, false),
+            MagicMode::Auto => filex::magic::parse_with_gate(&self.query, now, true),
+        };
+        // Re-searching the *same* command must not disturb the card. The
+        // live-update loop re-runs this on every filesystem event burst,
+        // and blanking `outcome` made the card flip back to "finding
+        // matches…" each time — a card on a busy home directory never
+        // settled. Worse, it is `checked` that must survive: resetting it
+        // silently re-ticks rows the user deliberately unticked, on a
+        // batch that is one click from being executed.
+        let previous = self.magic.take();
+        self.magic = command.as_ref().map(|command| match previous {
+            Some(state) if state.command == *command => state,
+            _ => MagicState {
+                command: command.clone(),
+                outcome: None,
+                checked: Vec::new(),
+            },
         });
 
         let (text, all_filters, limit) = match &command {
@@ -2425,6 +2785,16 @@ impl Workspace {
                 filex::magic::MAX_PLAN_OPS + 1,
             ),
             None => {
+                // Forced-on magic mode with no command yet (empty box, or a
+                // half-typed command): show nothing rather than a normal
+                // search. The magic view renders its own "type a command"
+                // hint — running a filename search here would repopulate
+                // exactly the results list the mode is meant to replace.
+                if self.magic_mode == MagicMode::On {
+                    self.results.clear();
+                    self.search_selection.clear();
+                    return;
+                }
                 let parsed = filex::search_filter::parse_query(&self.query, now);
                 // Natural-language phrases in whatever text the `key:value`
                 // parse left over ("photos from last week"). Pure and
@@ -2463,11 +2833,21 @@ impl Workspace {
         if text.is_empty() && index_filters.is_empty() {
             let store = self.tags.clone();
             let required = tags_required;
+            // Scope tag results the same way as everything else, so the
+            // dropdown means one thing across query kinds.
+            let scope_dir = match self.search_scope {
+                SearchScope::Anywhere => None,
+                SearchScope::CurrentDir => Some(self.cwd.clone()),
+            };
             cx.spawn(async move |this, cx| {
                 let rows = cx
                     .background_executor()
                     .spawn(async move {
-                        rows_from_tagged_paths(store.paths_with_all_tags(&required), limit)
+                        let mut paths = store.paths_with_all_tags(&required);
+                        if let Some(dir) = &scope_dir {
+                            paths.retain(|p| p.starts_with(dir));
+                        }
+                        rows_from_tagged_paths(paths, limit)
                     })
                     .await;
                 this.update(cx, |this, cx| {
@@ -2499,6 +2879,13 @@ impl Workspace {
                 let result = cx
                     .background_executor()
                     .spawn(async move {
+                        // KNOWN GAP: unlike the local path below, these hits
+                        // carry no `MatchKind` over the wire, so
+                        // `usable_in_plan` cannot be applied and a command
+                        // query in service mode can still plan against fuzzy
+                        // matches. Closing it means adding the kind to the
+                        // IPC hit; until then Magic is only fully safe on
+                        // the local index.
                         client.search(&text, &index_filters, limit as u32).map(|hits| {
                             let rows = hits
                                 .into_iter()
@@ -2544,19 +2931,45 @@ impl Workspace {
         }
         let store = self.tags.clone();
         let frecency = self.frecency.clone();
+        let command_query = command.is_some();
+        let cancel = self.search_cancel.clone();
+        // "Current Dir" scopes the scan to cwd; "Anywhere" leaves it open.
+        // The path is resolved to a subtree per-index inside the scan (off
+        // the UI thread), so this is just the directory to hand down.
+        let scope_dir = match self.search_scope {
+            SearchScope::Anywhere => None,
+            SearchScope::CurrentDir => Some(self.cwd.clone()),
+        };
 
         cx.spawn(async move |this, cx| {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
-                    let rows = manager::search_all(
+                    // Per-scan latency, the number the CLAUDE.md
+                    // search-as-you-type rule is about. Invisible from
+                    // outside the process otherwise — run the app with
+                    // `RUST_LOG=filex=debug` to see it.
+                    let started = std::time::Instant::now();
+                    let rows: Vec<SearchRow> = manager::search_all_scoped(
                         &indexes,
                         &text,
                         &index_filters,
                         limit,
                         &frecency,
+                        &cancel,
+                        scope_dir.as_deref(),
                     )
                         .into_iter()
+                        // A command's plan is built from these rows, so a
+                        // fuzzy hit here becomes a file the batch acts on.
+                        // Subsequence matching is far too loose for that:
+                        // `rename gravloc to …` matched 148 files of which
+                        // 4 contained "gravloc" — the rest were things like
+                        // `xstate-graph.development.cjs.js`, which a plan
+                        // would happily have renamed. Fuzzy is a good way to
+                        // *find* something you then look at; it is not
+                        // evidence you meant to modify it.
+                        .filter(|hit| usable_in_plan(hit.score.kind, command_query))
                         .map(|hit| SearchRow {
                             name: hit.name.into(),
                             path_label: hit.path.display().to_string().into(),
@@ -2564,6 +2977,25 @@ impl Workspace {
                             target: hit.path,
                         })
                         .collect();
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    // A scan of even a 2M-entry arena is tens of
+                    // milliseconds (docs/design-search-ranking.md). Anything
+                    // near a second is not scan *work* — it is almost
+                    // certainly `search_all` blocked acquiring the read lock
+                    // while the writer holds it for a big rescan. Surfaced at
+                    // warn so it lands in the log with no `RUST_LOG` set,
+                    // which is the only way to see it in a shipped .app.
+                    if elapsed_ms >= SLOW_OP_MS {
+                        tracing::warn!(
+                            query = %text,
+                            limit,
+                            hits = rows.len(),
+                            elapsed_ms,
+                            "slow search — scan or lock wait over budget"
+                        );
+                    } else {
+                        tracing::debug!(query = %text, limit, hits = rows.len(), elapsed_ms, "index scan");
+                    }
                     filter_rows_by_tags(rows, &store, &tags_required)
                 })
                 .await;
@@ -2593,10 +3025,22 @@ impl Workspace {
         let matches: Vec<PathBuf> = self.results.iter().map(|row| row.target.clone()).collect();
         let ctx = filex::magic::PlanContext { cwd: &self.cwd, dirs: &self.user_dirs };
         let outcome = filex::magic::build(&state.command, &matches, &ctx);
-        state.checked = match &outcome {
-            Ok(plan) => vec![true; plan.ops.len()],
-            Err(_) => Vec::new(),
-        };
+        // Only re-tick when the plan actually changed. This runs on every
+        // filesystem event burst, not just on a new query, so rebuilding
+        // `checked` unconditionally would keep restoring rows the user had
+        // unticked — silently re-arming a destructive batch under them.
+        // Comparing the ops (not just their count) is what makes "same
+        // plan" mean the same files in the same order.
+        let unchanged = matches!(
+            (&outcome, &state.outcome),
+            (Ok(new), Some(Ok(old))) if new.ops == old.ops
+        );
+        if !unchanged {
+            state.checked = match &outcome {
+                Ok(plan) => vec![true; plan.ops.len()],
+                Err(_) => Vec::new(),
+            };
+        }
         state.outcome = Some(outcome);
     }
 
@@ -2758,9 +3202,32 @@ impl Workspace {
             )
             .child(self.render_breadcrumbs(cx));
 
+        // The toggle lights for the *effective* mode, not just the
+        // explicit flag: a command typed in normal mode auto-switches the
+        // app into magic view, and the icon must say so — otherwise the
+        // results list vanishes with no visible reason. `in_magic_view`
+        // is the same predicate the render path branches on.
         let center = div().flex_1().min_w_0().flex().justify_center().child(
-            ui::top_bar::search_box(&theme, !self.query.is_empty())
-                .child(self.search_input.clone()),
+            ui::top_bar::search_box(&theme, !self.query.is_empty() || self.in_magic_view())
+                .child(
+                    ui::top_bar::scope_selector(
+                        &theme,
+                        self.search_scope.label(),
+                        self.scope_menu.is_some(),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.open_scope_menu(event.position, window, cx);
+                        }),
+                    ),
+                )
+                .child(div().flex_1().min_w_0().child(self.search_input.clone()))
+                .child(ui::top_bar::magic_toggle(&theme, self.in_magic_view()).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.toggle_magic_mode(window, cx);
+                    }),
+                )),
         );
 
         let right = div()
@@ -3654,6 +4121,43 @@ impl Workspace {
         }
     }
 
+    /// The search-scope dropdown (Anywhere / Current Dir), when open.
+    fn render_scope_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let position = *self.scope_menu.as_ref()?;
+        let theme = *cx.theme();
+        let current = self.search_scope;
+        let items = [SearchScope::Anywhere, SearchScope::CurrentDir]
+            .into_iter()
+            .enumerate()
+            .map(|(i, scope)| {
+                let label = if scope == current {
+                    format!("✓ {}", scope.label())
+                } else {
+                    format!("   {}", scope.label())
+                };
+                ui::menu::item(&theme, ("scope-item", i), label, false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.set_scope(scope, cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            ui::menu::overlay("scope-menu-overlay")
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.close_scope_menu(cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                        this.close_scope_menu(cx);
+                    }),
+                )
+                .child(ui::menu::panel(&theme, position, items))
+                .into_any_element(),
+        )
+    }
+
     fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.context_menu.as_ref()?;
         let theme = *cx.theme();
@@ -4184,22 +4688,29 @@ impl Render for Workspace {
             .child(self.render_top_bar(cx))
             .children(self.render_tab_bar(cx))
             .children(self.render_filter_chips(cx))
-            .children(self.render_magic_card(cx))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .child(self.render_sidebar(cx))
-                    .child(if searching {
+                    // Magic view replaces the results list outright — the
+                    // plan is the content, not a card above unrelated rows
+                    // (docs/design-magic-mode.md v2). Details panel is
+                    // suppressed alongside it: it describes a browse/search
+                    // selection that magic mode isn't showing.
+                    .child(if self.in_magic_view() {
+                        self.render_magic_pane(cx)
+                    } else if searching {
                         self.render_search_pane(cx)
                     } else {
                         self.render_browse_pane(window, cx)
                     })
-                    .children(self.render_details_panel(cx)),
+                    .children((!self.in_magic_view()).then(|| self.render_details_panel(cx)).flatten()),
             )
             .children(self.render_jobs(cx))
             .child(self.render_status_bar(&theme))
+            .children(self.render_scope_menu(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_settings_modal(cx))
             .children(self.render_conflict_modal(cx))
@@ -4209,6 +4720,15 @@ impl Render for Workspace {
 fn main() {
     let _logging_guard = filex::logging::init("filex");
     filex::telemetry::install_panic_hook("filex");
+    // A startup line at the default level, so the log file is never empty:
+    // "logs are blank" then means "not writing", not "nothing happened".
+    // Names the log directory in the log itself, and the slow-op warnings
+    // land here without any RUST_LOG needed.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "filex starting — slow operations (>{SLOW_OP_MS}ms) log at warn; \
+         set RUST_LOG=filex=debug for per-scan timing"
+    );
     Application::new().with_assets(ui::assets::Assets).run(|cx: &mut App| {
         // Register the bundled UI font before anything renders.
         ui::fonts::register(cx);
@@ -4339,6 +4859,37 @@ mod magic_ui_tests {
     use super::*;
     use filex::magic::{Plan, Verb};
 
+    /// Regression for the real case in dogfooding: `rename gravloc to …`
+    /// returned 148 rows, of which 4 actually contained "gravloc". The
+    /// rest were subsequence matches on unrelated files, and every one of
+    /// them would have been renamed on confirm.
+    #[test]
+    fn a_command_plan_never_includes_fuzzy_matches() {
+        use filex::index::{ROOT, VolumeIndex};
+
+        let mut index = VolumeIndex::new("/vol");
+        for name in ["Gravloc", "Gravloc.pdf", "Gravloc Logo.af"] {
+            index.insert(ROOT, name, false).unwrap();
+        }
+        // Subsequence-matches "gravloc" (g-r-a-v-l-o-c) but shares no
+        // substring with it — exactly the shape that polluted the plan.
+        for name in ["xstate-graph.development.cjs.js", "generate_umath_validation.cpp"] {
+            index.insert(ROOT, name, false).unwrap();
+        }
+
+        let hits = index.search("gravloc", 500);
+        assert!(
+            hits.iter().any(|h| h.score.kind == MatchKind::Fuzzy),
+            "fixture must actually produce fuzzy hits, or this proves nothing"
+        );
+
+        let planned = hits.iter().filter(|h| usable_in_plan(h.score.kind, true)).count();
+        let searched = hits.iter().filter(|h| usable_in_plan(h.score.kind, false)).count();
+
+        assert_eq!(planned, 3, "only the literal Gravloc matches may be planned");
+        assert_eq!(searched, hits.len(), "ordinary search still shows everything");
+    }
+
     fn state(outcome: Result<Plan, filex::magic::PlanError>, checked: Vec<bool>) -> MagicState {
         MagicState {
             command: filex::magic::parse("delete screenshots older than 30 days", 1_785_067_200)
@@ -4393,27 +4944,41 @@ mod magic_ui_tests {
     }
 
     #[test]
-    fn delete_rows_show_no_destination() {
-        // "→ Trash" would imply a path the op does not carry.
-        let (source, target) = describe_op(&delete("/photos/shot.png"));
-        assert_eq!(source, SharedString::from("shot.png"));
-        assert_eq!(target, None);
+    fn delete_rows_show_the_source_folder_and_no_destination() {
+        let row = describe_op(&delete("/photos/shot.png"));
+        assert_eq!(row.name, SharedString::from("shot.png"));
+        // The folder the file lives in is shown so identical names in
+        // different folders are distinguishable.
+        assert_eq!(row.location.to_string(), Path::new("/photos").display().to_string());
+        assert_eq!(row.dest, None);
     }
 
     #[test]
-    fn transfer_rows_show_the_destination_folder_not_the_file() {
+    fn transfer_rows_show_source_folder_and_destination_folder() {
         let op = FileOp::Move { from: "/a/shot.png".into(), to: "/b/Archive/shot.png".into() };
-        let (source, target) = describe_op(&op);
-        assert_eq!(source, SharedString::from("shot.png"));
-        assert_eq!(target.unwrap().to_string(), format!("→ {}", Path::new("/b/Archive").display()));
+        let row = describe_op(&op);
+        assert_eq!(row.name, SharedString::from("shot.png"));
+        assert_eq!(row.location.to_string(), Path::new("/a").display().to_string());
+        // Same name at the destination → show the folder, not the file.
+        assert_eq!(row.dest.unwrap().to_string(), format!("→ {}", Path::new("/b/Archive").display()));
+    }
+
+    #[test]
+    fn a_retargeted_transfer_row_shows_the_full_new_path() {
+        // Collision keep-both: the destination name differs from the
+        // source, so the whole retargeted path is shown, not just the
+        // folder — otherwise the rename would be invisible.
+        let op = FileOp::Move { from: "/a/shot.png".into(), to: "/b/shot 2.png".into() };
+        let row = describe_op(&op);
+        assert_eq!(row.dest.unwrap().to_string(), format!("→ {}", Path::new("/b/shot 2.png").display()));
     }
 
     #[test]
     fn rename_rows_show_the_new_name() {
         let op = FileOp::Rename { path: "/a/img01.png".into(), new_name: "shot-1.png".into() };
-        let (source, target) = describe_op(&op);
-        assert_eq!(source, SharedString::from("img01.png"));
-        assert_eq!(target.unwrap().to_string(), "→ shot-1.png");
+        let row = describe_op(&op);
+        assert_eq!(row.name, SharedString::from("img01.png"));
+        assert_eq!(row.dest.unwrap().to_string(), "→ shot-1.png");
     }
 
     #[test]

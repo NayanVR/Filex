@@ -23,15 +23,51 @@ pub mod windows;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::{Result, bail};
 use memchr::memmem;
 use rayon::prelude::*;
+
+/// A cancel flag that is never set, for the non-cancellable public search
+/// entry points. Threading a real flag is opt-in via the `*_cancellable`
+/// methods; everything else (tests, benches, one-shot lookups) shares
+/// this constant-false sentinel so their signatures stay unchanged.
+pub(crate) static NEVER_CANCEL: AtomicBool = AtomicBool::new(false);
 
 /// Stable handle to an entry; index into `VolumeIndex::entries`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntryId(u32);
 
 pub const ROOT: EntryId = EntryId(0);
+
+/// Per-scan controls threaded through the parallel search.
+///
+/// Bundled into one struct rather than two parameters because they ride
+/// together down every layer (`search_cancellable` → `finish` →
+/// `fuzzy_pass`) and the list would otherwise only grow.
+#[derive(Clone, Copy)]
+pub struct ScanCtl<'a> {
+    /// Polled once per candidate; when a newer query sets it, the scan
+    /// winds down to a near-no-op. See [`VolumeIndex::search_cancellable`].
+    pub cancel: &'a AtomicBool,
+    /// When `Some(dir)`, only entries within `dir`'s subtree count — the
+    /// "Current Dir" search scope. Others are skipped as if unmatched.
+    pub scope: Option<EntryId>,
+}
+
+impl<'a> ScanCtl<'a> {
+    /// Cancellable, unscoped — the shape every pre-scope caller wants.
+    pub fn new(cancel: &'a AtomicBool) -> Self {
+        Self { cancel, scope: None }
+    }
+}
+
+/// A never-cancelled, unscoped control, for the plain public search
+/// entry points and tests.
+pub(crate) fn plain_scan() -> ScanCtl<'static> {
+    ScanCtl { cancel: &NEVER_CANCEL, scope: None }
+}
 
 /// Maximum parent-chain length tolerated when materializing a path,
 /// guarding against cycles introduced by a buggy delta stream.
@@ -85,6 +121,23 @@ impl FileEntry {
         self.flags & FLAG_HAS_META != 0
     }
 }
+
+/// How few literal hits it takes to fall back to the fuzzy pass.
+///
+/// The fuzzy pass is a *second* full scan of the arena, and it is not
+/// cheap: unlike the literal pass's SIMD substring find, it UTF-8-decodes
+/// every surviving name and runs two alignment passes over it. Measured
+/// at ~20-24 ms against a 1.2M-entry index, versus ~4-7 ms for the
+/// literal pass alone.
+///
+/// So the gate has to mean "the result list is *empty enough to be
+/// useless*", not "the result list isn't completely full". Fifty rows is
+/// already more than fits on screen; below that, a `dsr` →
+/// `Design System Review.pdf` acronym hit is worth a second scan, and
+/// above it the user has plenty to look at and the scan is pure latency.
+///
+/// See `docs/design-search-ranking.md` decision 2 and [`Self::finish`].
+pub const FUZZY_GATE: usize = 50;
 
 /// How a hit matched the query, in ranking order (lower is better).
 ///
@@ -154,6 +207,32 @@ impl Score {
             name_len: (bits & PACKED_NAME_LEN_MAX as u32) as u16,
         }
     }
+}
+
+/// A 256-bit set of the byte values present in `bytes`, packed into four
+/// `u64` lanes. Used by the fuzzy prefilter ([`mask_covers`]) as a cheap
+/// necessary condition for a subsequence match.
+fn byte_mask(bytes: &[u8]) -> [u64; 4] {
+    let mut mask = [0u64; 4];
+    for &b in bytes {
+        mask[(b >> 6) as usize] |= 1u64 << (b & 63);
+    }
+    mask
+}
+
+/// Whether `name` contains **every** byte in `needle_mask` — the necessary
+/// condition for `name` to contain the needle as a subsequence. Building
+/// the name's own byte mask is one linear pass with no allocation; the
+/// four-lane AND is a handful of instructions. A superset test on folded
+/// bytes, so a genuine (case-insensitive, possibly multi-byte) match is
+/// never rejected: if a needle char occurs in the match, all its bytes are
+/// present in the name.
+fn mask_covers(name: &[u8], needle_mask: &[u64; 4]) -> bool {
+    let nm = byte_mask(name);
+    needle_mask[0] & nm[0] == needle_mask[0]
+        && needle_mask[1] & nm[1] == needle_mask[1]
+        && needle_mask[2] & nm[2] == needle_mask[2]
+        && needle_mask[3] & nm[3] == needle_mask[3]
 }
 
 /// Classify a literal (substring) match of `needle` in the folded
@@ -242,7 +321,11 @@ pub struct SearchHit {
     pub score: Score,
 }
 
-#[derive(Debug)]
+// `Clone` is what makes a published snapshot independent of the writer's
+// mutable head (optimization B): the writer clones its head into a fresh
+// `Arc` to publish, then keeps mutating its own copy. All fields are
+// owned/clonable, so this is a straight deep copy.
+#[derive(Debug, Clone)]
 pub struct VolumeIndex {
     root_path: PathBuf,
     entries: Vec<FileEntry>,
@@ -550,6 +633,30 @@ impl VolumeIndex {
         None // cycle or absurd depth
     }
 
+    /// Whether `entry` lies within `ancestor`'s subtree (inclusive) — the
+    /// membership test behind the "Current Dir" search scope. Walks parent
+    /// links, bounded like [`path_of`](Self::path_of) against a cyclic
+    /// index. `ancestor == ROOT` is trivially true (the whole index).
+    pub fn is_within(&self, entry: EntryId, ancestor: EntryId) -> bool {
+        if ancestor == ROOT {
+            return true;
+        }
+        let mut current = entry;
+        for _ in 0..MAX_PATH_DEPTH {
+            if current == ancestor {
+                return true;
+            }
+            if current == ROOT {
+                return false;
+            }
+            match self.entry(current) {
+                Some(e) => current = e.parent,
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// Live (non-tombstoned) children of a directory entry.
     pub fn children_of(&self, id: EntryId) -> impl Iterator<Item = EntryId> + '_ {
         self.children
@@ -630,6 +737,26 @@ impl VolumeIndex {
     /// single-character queries that match nearly everything — no
     /// all-matches allocation, no global sort (see benches/).
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        self.search_cancellable(query, limit, &plain_scan())
+    }
+
+    /// [`search`](Self::search), abortable mid-scan and optionally scoped
+    /// to a subtree (see [`ScanCtl`]).
+    ///
+    /// `ctl.cancel` is polled once per candidate: when a newer keystroke
+    /// sets it, every remaining closure cheaply returns `None`, so the
+    /// rayon fold winds down to a near-no-op instead of scoring and
+    /// ranking two million entries whose results the generation check
+    /// will discard anyway. `ctl.scope`, when set, restricts hits to that
+    /// directory's subtree — the "Current Dir" scope — checked only after
+    /// the cheap name match so unmatched entries never pay for the
+    /// parent-chain walk.
+    pub fn search_cancellable(
+        &self,
+        query: &str,
+        limit: usize,
+        ctl: &ScanCtl,
+    ) -> Vec<SearchHit> {
         if query.is_empty() || limit == 0 {
             return Vec::new();
         }
@@ -643,20 +770,39 @@ impl VolumeIndex {
             .skip(1) // root
             .filter(|(_, e)| !e.is_tombstone())
             .filter_map(|(ix, entry)| {
+                if ctl.cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
                 let haystack = self.name_lower_bytes(entry.name_lower);
                 let kind = literal_kind(&finder, haystack, needle.as_bytes())?;
+                if let Some(scope) = ctl.scope
+                    && !self.is_within(EntryId(ix as u32), scope)
+                {
+                    return None;
+                }
                 Some((Score::literal(kind, entry.name_lower.len).pack(), ix as u32))
             })
             .fold(|| TopK::new(limit), TopK::push)
             .reduce(|| TopK::new(limit), TopK::merge);
 
-        self.finish(top, &needle, &finder, &[], limit)
+        self.finish(top, &needle, &finder, &[], limit, ctl)
     }
 
     /// Turn a literal pass's heap into hits, running the gated fuzzy pass
     /// first if the literal pass came up short. See
     /// `docs/design-search-ranking.md` decision 2: this is what keeps the
     /// common keystroke on exactly the pre-fuzzy code path.
+    ///
+    /// The gate is [`FUZZY_GATE`], **not** `limit`. `limit` is the wrong
+    /// number twice over: callers reaching this through
+    /// [`manager::search_all`](crate::index::manager::search_all) pass an
+    /// overfetched `limit * OVERFETCH`, and even the un-multiplied display
+    /// limit is in the hundreds — so gating on it ran the second scan for
+    /// any query specific enough to be useful, which is the opposite of
+    /// decision 2's intent ("only when the user is staring at an empty
+    /// result list"). `min` with `limit` keeps the original property that a
+    /// caller asking for fewer hits than the gate never pays for a pass it
+    /// has no room to show.
     fn finish(
         &self,
         literal: TopK,
@@ -664,9 +810,10 @@ impl VolumeIndex {
         finder: &memmem::Finder<'_>,
         filters: &[crate::search_filter::Filter],
         limit: usize,
+        ctl: &ScanCtl,
     ) -> Vec<SearchHit> {
-        let top = if literal.len() < limit {
-            literal.merge(self.fuzzy_pass(needle, finder, filters, limit))
+        let top = if literal.len() < limit.min(FUZZY_GATE) {
+            literal.merge(self.fuzzy_pass(needle, finder, filters, limit, ctl))
         } else {
             literal
         };
@@ -690,15 +837,33 @@ impl VolumeIndex {
         finder: &memmem::Finder<'_>,
         filters: &[crate::search_filter::Filter],
         limit: usize,
+        ctl: &ScanCtl,
     ) -> TopK {
+        // Cheap necessary-condition prefilter (docs/design-search-ranking.md
+        // "trigram bitmap in front of the scan"): a name can only contain
+        // the needle as a subsequence if it contains *every byte* of the
+        // needle. Testing that on the folded bytes — a couple of 64-bit AND
+        // s, no UTF-8 decode, no alignment — rejects the vast majority of a
+        // 2M-entry arena before the expensive `fuzzy::penalty`. It is a
+        // superset test on folded bytes, so it never rejects a real match
+        // (see `byte_mask`).
+        let needle_mask = byte_mask(needle.as_bytes());
         self.entries
             .par_iter()
             .enumerate()
             .skip(1)
             .filter(|(_, e)| !e.is_tombstone())
             .filter_map(|(ix, entry)| {
-                if finder.find(self.name_lower_bytes(entry.name_lower)).is_some() {
+                if ctl.cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                let lower = self.name_lower_bytes(entry.name_lower);
+                if finder.find(lower).is_some() {
                     return None; // already a literal hit
+                }
+                // Prefilter before the costly decode + alignment below.
+                if !mask_covers(lower, &needle_mask) {
+                    return None;
                 }
                 // Fuzzy scoring reads the *original* name: camelCase
                 // humps are one of its word-boundary signals, and the
@@ -706,6 +871,11 @@ impl VolumeIndex {
                 let name = std::str::from_utf8(self.name_bytes(entry.name)).ok()?;
                 let penalty = crate::fuzzy::penalty(name, needle)?;
                 if !filters.is_empty() && !self.passes_filters(entry, name, filters) {
+                    return None;
+                }
+                if let Some(scope) = ctl.scope
+                    && !self.is_within(EntryId(ix as u32), scope)
+                {
                     return None;
                 }
                 let score =
@@ -751,11 +921,23 @@ impl VolumeIndex {
         filters: &[crate::search_filter::Filter],
         limit: usize,
     ) -> Vec<SearchHit> {
+        self.search_filtered_cancellable(query, filters, limit, &plain_scan())
+    }
+
+    /// [`search_filtered`](Self::search_filtered), abortable mid-scan and
+    /// optionally subtree-scoped — see [`ScanCtl`].
+    pub fn search_filtered_cancellable(
+        &self,
+        query: &str,
+        filters: &[crate::search_filter::Filter],
+        limit: usize,
+        ctl: &ScanCtl,
+    ) -> Vec<SearchHit> {
         if limit == 0 {
             return Vec::new();
         }
         if filters.is_empty() {
-            return self.search(query, limit);
+            return self.search_cancellable(query, limit, ctl);
         }
         let needle = (!query.is_empty()).then(|| query.to_lowercase());
         let finder = needle.as_ref().map(|n| memmem::Finder::new(n.as_bytes()));
@@ -767,6 +949,9 @@ impl VolumeIndex {
             .skip(1)
             .filter(|(_, e)| !e.is_tombstone())
             .filter_map(|(ix, entry)| {
+                if ctl.cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
                 // Name-match first (cheapest cut) when there's a needle;
                 // filter-only queries rank every survivor by name length.
                 let kind = match (&finder, &needle) {
@@ -777,17 +962,23 @@ impl VolumeIndex {
                     _ => MatchKind::Substring,
                 };
                 let name = std::str::from_utf8(self.name_bytes(entry.name)).ok()?;
-                if self.passes_filters(entry, name, filters) {
-                    Some((Score::literal(kind, entry.name_lower.len).pack(), ix as u32))
-                } else {
-                    None
+                if !self.passes_filters(entry, name, filters) {
+                    return None;
                 }
+                if let Some(scope) = ctl.scope
+                    && !self.is_within(EntryId(ix as u32), scope)
+                {
+                    return None;
+                }
+                Some((Score::literal(kind, entry.name_lower.len).pack(), ix as u32))
             })
             .fold(|| TopK::new(limit), TopK::push)
             .reduce(|| TopK::new(limit), TopK::merge);
 
         match (&needle, &finder) {
-            (Some(needle), Some(finder)) => self.finish(top, needle, finder, filters, limit),
+            (Some(needle), Some(finder)) => {
+                self.finish(top, needle, finder, filters, limit, ctl)
+            }
             // Filter-only: there is no needle to fuzzy-match against.
             _ => top
                 .into_sorted()
@@ -953,7 +1144,7 @@ fn backfill_loop(
     let tick = std::time::Duration::from_millis(500);
     while !shutdown.load(Ordering::Relaxed) {
         let batch = {
-            let idx = index.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let idx = index.load();
             idx.unpopulated_batch(BACKFILL_BATCH)
         };
         if batch.is_empty() {
@@ -980,11 +1171,15 @@ fn backfill_loop(
             updates.push((id, name, size, mtime));
         }
         {
-            let mut idx = index.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut idx = index.write();
             for (id, name, size, mtime) in updates {
                 idx.backfill_meta(id, &name, size, mtime);
             }
         }
+        // Publish the backfilled metadata so searches with `size:`/
+        // `modified:` filters see it. The backfill is already paced (a
+        // batch every ~10 ms+), so this publish rate is naturally bounded.
+        index.publish();
         // Yield between batches so the writer/readers aren't starved.
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -1053,10 +1248,9 @@ impl Drop for LiveIndex {
         drop(self.watcher.take()); // stop events; delta senders close
         drop(self.writer.take()); // join: every sent delta is now applied
         if let Some(persistence) = self.persistence.take() {
-            let index = self
-                .index
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // The writer has joined (its senders are dropped), so the head
+            // is quiescent and the snapshot reflects every applied event.
+            let index = self.index.load();
             if let Err(err) = persist::save(&index, persistence.checkpoint(), &persistence.path) {
                 tracing::error!("failed to save index snapshot: {err:#}");
             }
@@ -1182,7 +1376,7 @@ fn assemble_live_index(
     };
     drop(delta_tx); // watcher + saver hold the remaining senders
 
-    let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
+    let shared = watcher::SharedIndex::new(index);
     let writer = watcher::IndexWriter::spawn(shared.clone(), delta_rx, on_change, save_hook)?;
     // Populate size/mtime that bootstrap left name-only, off the critical
     // path (Option C). Idle-polls once caught up.
@@ -1486,14 +1680,14 @@ mod tests {
         // Before backfill nothing has size metadata.
         assert!(index.search_filtered("", &[Filter::Size(Bound::Ge(5000))], 10).is_empty());
 
-        let shared: watcher::SharedIndex = std::sync::Arc::new(std::sync::RwLock::new(index));
+        let shared = watcher::SharedIndex::new(index);
         let backfiller = MetaBackfiller::spawn(shared.clone()).unwrap();
 
         // Bounded wait for the background pass to fill size/mtime.
         let mut names: Vec<String> = Vec::new();
         for _ in 0..40 {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            let idx = shared.read().unwrap();
+            let idx = shared.load();
             names = idx
                 .search_filtered("", &[Filter::Size(Bound::Ge(5000))], 10)
                 .iter()
@@ -1584,6 +1778,64 @@ mod tests {
     }
 
     #[test]
+    fn an_already_cancelled_search_returns_nothing() {
+        // A scan whose flag is set before it starts must produce no hits —
+        // every candidate's closure short-circuits. This is the mechanism
+        // that stops a superseded per-keystroke search from spending CPU
+        // and holding the read lock; a stale generation would discard its
+        // results anyway, so returning them is pure waste.
+        let mut index = VolumeIndex::new("/vol");
+        for i in 0..1000 {
+            index.insert(ROOT, &format!("report_{i:04}.txt"), false).unwrap();
+        }
+        let flag = AtomicBool::new(true);
+        let cancelled = ScanCtl::new(&flag);
+
+        // Both scan paths (no-filter and filtered) honour the flag.
+        assert!(index.search_cancellable("report", 500, &cancelled).is_empty());
+        assert!(
+            index
+                .search_filtered_cancellable(
+                    "report",
+                    &[crate::search_filter::Filter::Ext("txt".into())],
+                    500,
+                    &cancelled,
+                )
+                .is_empty()
+        );
+
+        // And the fuzzy fallback path: a needle with no literal hits would
+        // normally trigger the second scan — cancelled, it too yields none.
+        assert!(index.search_cancellable("xqz", 500, &cancelled).is_empty());
+
+        // Sanity: the same queries with a live (false) flag do find things,
+        // so the emptiness above is the cancel, not a broken fixture.
+        let live_flag = AtomicBool::new(false);
+        let live = ScanCtl::new(&live_flag);
+        assert!(!index.search_cancellable("report", 500, &live).is_empty());
+    }
+
+    #[test]
+    fn a_scoped_search_only_returns_hits_within_the_directory() {
+        // "Current Dir": resolve a subfolder to its entry and scope to it.
+        let mut index = VolumeIndex::new("/vol");
+        let inside = index.insert(ROOT, "project", true).unwrap();
+        index.insert(inside, "report.txt", false).unwrap();
+        let elsewhere = index.insert(ROOT, "other", true).unwrap();
+        index.insert(elsewhere, "report.txt", false).unwrap();
+
+        let flag = AtomicBool::new(false);
+        let scoped = ScanCtl { cancel: &flag, scope: Some(inside) };
+
+        let hits = index.search_cancellable("report", 500, &scoped);
+        assert_eq!(hits.len(), 1, "only the report under `project`");
+        assert_eq!(index.path_of(hits[0].id).unwrap(), PathBuf::from("/vol/project/report.txt"));
+
+        // Unscoped finds both.
+        assert_eq!(index.search("report", 500).len(), 2);
+    }
+
+    #[test]
     fn search_falls_back_to_fuzzy_when_nothing_matches_literally() {
         let mut index = VolumeIndex::new("/vol");
         let acronym = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
@@ -1596,6 +1848,37 @@ mod tests {
     }
 
     #[test]
+    fn the_fuzzy_prefilter_never_rejects_a_real_match() {
+        // The prefilter is a necessary-condition cut; it must not drop a
+        // genuine subsequence hit — including case-insensitively and across
+        // word boundaries (the acronym case).
+        let cases: &[(&str, &str)] = &[
+            ("Design System Review.pdf", "dsr"),
+            ("MyCamelCaseFile.rs", "mccf"),
+            ("UPPER_snake.TXT", "usnake"),  // mixed case survives folding
+            ("a-b-c-d.log", "abcd"),
+        ];
+        for (name, needle) in cases {
+            let mut index = VolumeIndex::new("/vol");
+            index.insert(ROOT, name, false).unwrap();
+            assert_eq!(
+                index.search(needle, 10).len(),
+                1,
+                "prefilter dropped {needle:?} against {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_mask_prefilter_covers_and_rejects_correctly() {
+        let needle = byte_mask(b"abc");
+        assert!(mask_covers(b"xaybzc", &needle), "all three present (scattered)");
+        assert!(mask_covers(b"cba", &needle), "order irrelevant to the prefilter");
+        assert!(!mask_covers(b"ab", &needle), "missing 'c' -> rejected");
+        assert!(mask_covers(b"anything", &byte_mask(b"")), "empty needle covers all");
+    }
+
+    #[test]
     fn fuzzy_hits_rank_below_every_literal_hit() {
         let mut index = VolumeIndex::new("/vol");
         let fuzzy = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
@@ -1603,6 +1886,59 @@ mod tests {
 
         let ids: Vec<EntryId> = index.search("dsr", 10).into_iter().map(|h| h.id).collect();
         assert_eq!(ids, vec![literal, fuzzy]);
+    }
+
+    /// Regression: the fuzzy gate was `literal.len() < limit`, and
+    /// [`manager::search_all`] hands `finish` an *overfetched*
+    /// `limit * OVERFETCH` (2000 for the UI's 500, 4004 for a Magic
+    /// command). So any query with fewer than 2000 literal hits — i.e.
+    /// every query specific enough to be worth typing — paid for a second
+    /// full scan of the arena on every keystroke, ~20-24 ms against a
+    /// 1.2M-entry index versus ~4-7 ms for the literal pass alone.
+    ///
+    /// The two tests below pin both sides of [`FUZZY_GATE`], because the
+    /// bug is only visible as a boundary: the old code passed every test
+    /// that used a small `limit`.
+    #[test]
+    fn overfetching_does_not_widen_the_fuzzy_gate() {
+        let mut index = VolumeIndex::new("/vol");
+        for i in 0..FUZZY_GATE {
+            index.insert(ROOT, &format!("dsr_{i}.txt"), false).unwrap();
+        }
+        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+
+        // Room for far more hits than exist — the shape `search_all` asks
+        // for once OVERFETCH has multiplied the display limit.
+        let hits = index.search("dsr", 2000);
+
+        assert_eq!(hits.len(), FUZZY_GATE, "only the literal hits");
+        assert!(
+            hits.iter().all(|h| h.score.kind != MatchKind::Fuzzy),
+            "{FUZZY_GATE} literal hits is already more than fills a screen; \
+             the fuzzy pass must not run just because the caller overfetched"
+        );
+    }
+
+    #[test]
+    fn the_fuzzy_pass_still_runs_when_the_result_list_is_nearly_empty() {
+        // The other side of the boundary: one hit fewer than the gate, and
+        // the acronym fallback must still be there. This is the recall the
+        // gate is spending latency to buy, so it needs its own guard.
+        let mut index = VolumeIndex::new("/vol");
+        for i in 0..FUZZY_GATE - 1 {
+            index.insert(ROOT, &format!("dsr_{i}.txt"), false).unwrap();
+        }
+        let acronym = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+
+        let hits = index.search("dsr", 2000);
+
+        assert_eq!(hits.len(), FUZZY_GATE, "the literal hits plus the acronym");
+        let fuzzy: Vec<EntryId> = hits
+            .iter()
+            .filter(|h| h.score.kind == MatchKind::Fuzzy)
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(fuzzy, vec![acronym], "below the gate the fallback still runs");
     }
 
     #[test]
@@ -1756,7 +2092,7 @@ mod tests {
         {
             let live =
                 start_live_index_with_snapshot(dir.path(), snap.clone(), || {}).unwrap();
-            let index = live.index.read().unwrap();
+            let index = live.index.load();
             assert_eq!(index.search("keep", 10).len(), 1);
             drop(index);
         }
@@ -1777,7 +2113,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             {
-                let index = live.index.read().unwrap();
+                let index = live.index.load();
                 let converged = index.search("offline-new", 10).len() == 1
                     && index.search("doomed", 10).is_empty()
                     && index.search("keep", 10).len() == 1;
@@ -1813,7 +2149,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             if notify_rx.recv_timeout(Duration::from_millis(250)).is_ok() {
-                let index = live.index.read().unwrap();
+                let index = live.index.load();
                 if index.search("live-e2e", 10).len() == 1 {
                     return;
                 }

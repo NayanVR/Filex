@@ -34,7 +34,7 @@
 //! drag paths already drive it. Growing a second conflict story inside
 //! Magic mode would mean two behaviors for one situation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ops::FileOp;
@@ -183,13 +183,38 @@ impl std::error::Error for PlanError {}
 // Parsing
 // ---------------------------------------------------------------------
 
-/// Read `raw` as a command. `None` means "this is not a command" — which
-/// covers both "no verb here" and "a verb, but the rest doesn't complete
-/// into something unambiguous". Both mean no Magic card.
+/// Read `raw` as a command with the delete gate **on** — the
+/// auto-switch reading. `None` means "this is not a command": either no
+/// verb, a verb that doesn't complete unambiguously, or a bare `delete`
+/// with no structured evidence (see [`clears_delete_gate`]).
+///
+/// This is the strict reading, used to decide whether a query typed in
+/// *normal* mode should flip the app into magic mode on its own. When the
+/// user has explicitly toggled magic mode on, call
+/// [`parse_with_gate`]`(.., false)` instead, which drops the delete gate.
 ///
 /// `now` (unix seconds) anchors relative dates, so the parse is pure and
 /// deterministic — same contract as [`phrases::expand`].
 pub fn parse(raw: &str, now: i64) -> Option<Command> {
+    parse_with_gate(raw, now, true)
+}
+
+/// [`parse`], with control over the delete gate.
+///
+/// `require_delete_evidence` is the difference between the two entry
+/// paths into magic mode, per `docs/design-magic-mode.md` v2:
+///
+/// - `true` (auto-switch): a `delete` must carry a kind/date/size/ext
+///   filter, so `delete reminder` — indistinguishable from the filename
+///   `delete-reminder.js` — cannot silently arm a delete command. This is
+///   what `tests/magic_false_positives.rs` measures.
+/// - `false` (explicit toggle): the user has opted in, so `delete old
+///   logs` is taken at face value. The gate's whole job was guarding an
+///   *inference*; once the mode is chosen there is nothing to guard.
+///
+/// Everything else about the parse is identical either way — only the
+/// delete gate moves.
+pub fn parse_with_gate(raw: &str, now: i64, require_delete_evidence: bool) -> Option<Command> {
     let words: Vec<&str> = raw.split_whitespace().collect();
     let (first, rest) = words.split_first()?;
     let verb = verb_of(&first.to_ascii_lowercase())?;
@@ -219,7 +244,7 @@ pub fn parse(raw: &str, now: i64) -> Option<Command> {
     };
 
     let selection = selection_from(target, now)?;
-    if !clears_delete_gate(verb, &selection) {
+    if require_delete_evidence && !clears_delete_gate(verb, &selection) {
         return None;
     }
     Some(Command { verb, selection, action })
@@ -606,6 +631,16 @@ pub fn build(
 /// the classic "move a folder inside itself" recursion, and it is
 /// skipped here so one degenerate match doesn't void an otherwise fine
 /// plan.
+///
+/// **Collisions are resolved, not refused.** Two matched files sharing a
+/// base name — `a/ROADMAP.md` and `b/ROADMAP.md` both moving to
+/// `Downloads` — would land on one path. Rather than void the whole plan
+/// (the old behaviour: "two files would both become …"), the second is
+/// retargeted to the first free `name 2` variant, exactly as the execute
+/// path, paste and drag already do. The destination folder is read once
+/// up front so this costs one `read_dir`, not a stat per file, and the
+/// preview then shows the real outcome (`… → Downloads/ROADMAP 2.md`)
+/// instead of a dead end.
 fn transfer_ops(
     matches: &[PathBuf],
     dest: &Destination,
@@ -613,15 +648,28 @@ fn transfer_ops(
     moving: bool,
 ) -> Result<Vec<FileOp>, PlanError> {
     let dir = resolve_destination(dest, ctx)?;
+    // Names already spoken for in `dir`: what is on disk now, plus what
+    // earlier ops in this plan have claimed. Checked in memory so the
+    // common no-collision plan does no per-file I/O.
+    let mut taken: HashSet<String> = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                taken.insert(name.to_owned());
+            }
+        }
+    }
     let mut ops = Vec::with_capacity(matches.len());
     for from in matches {
         if from.parent() == Some(dir.as_path()) || dir.starts_with(from) {
             continue;
         }
-        let Some(name) = from.file_name() else {
+        let Some(name) = from.file_name().and_then(|n| n.to_str()) else {
             return Err(PlanError::InvalidName(from.display().to_string()));
         };
-        let to = dir.join(name);
+        let free = free_variant(name, &taken);
+        taken.insert(free.clone());
+        let to = dir.join(&free);
         ops.push(if moving {
             FileOp::Move { from: from.clone(), to }
         } else {
@@ -629,6 +677,30 @@ fn transfer_ops(
         });
     }
     Ok(ops)
+}
+
+/// The first of `name`, `name 2`, `name 3`… (Finder's convention, split
+/// at the last dot so `x.tar.gz` → `x.tar 2.gz`) that is not already in
+/// `taken`. Returns `name` itself when it is free.
+fn free_variant(name: &str, taken: &HashSet<String>) -> String {
+    if !taken.contains(name) {
+        return name.to_owned();
+    }
+    let path = Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path.extension().and_then(|e| e.to_str());
+    for n in 2..10_000u32 {
+        let candidate = match ext {
+            Some(ext) => format!("{stem} {n}.{ext}"),
+            None => format!("{stem} {n}"),
+        };
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    // Pathological: 10k variants all taken. Fall back to the original —
+    // execute-time `next_free_name` gets one more chance to resolve it.
+    name.to_owned()
 }
 
 fn rename_ops(matches: &[PathBuf], pattern: &NamePattern) -> Result<Vec<FileOp>, PlanError> {
@@ -656,13 +728,16 @@ fn rename_ops(matches: &[PathBuf], pattern: &NamePattern) -> Result<Vec<FileOp>,
 /// This is the failure a bad rename pattern produces, and catching it
 /// here means the preview never shows a checklist that cannot complete.
 fn check_collisions(ops: &[FileOp]) -> Result<(), PlanError> {
-    let mut seen: Vec<PathBuf> = Vec::with_capacity(ops.len());
+    // A set, not a `Vec` + `contains`: this runs on the UI thread from
+    // `rebuild_magic_plan`, once per rebuild, and the linear scan made it
+    // quadratic — ~240k `PathBuf` comparisons for a 697-file plan and
+    // ~500k at `MAX_PLAN_OPS`.
+    let mut seen: HashSet<PathBuf> = HashSet::with_capacity(ops.len());
     for op in ops {
-        if let Some(dest) = op.destination() {
-            if seen.contains(&dest) {
-                return Err(PlanError::Collision(dest));
-            }
-            seen.push(dest);
+        if let Some(dest) = op.destination()
+            && !seen.insert(dest.clone())
+        {
+            return Err(PlanError::Collision(dest));
         }
     }
     Ok(())
@@ -797,6 +872,19 @@ mod tests {
         ] {
             assert!(cmd(query).is_none(), "{query:?} should not offer to delete anything");
         }
+    }
+
+    #[test]
+    fn explicit_magic_mode_drops_the_delete_gate() {
+        // With the gate off (the user toggled magic mode on), a bare-text
+        // delete is taken at face value — this is the recall the v1 gate
+        // deliberately cost, recovered once intent is no longer inferred.
+        let command = parse_with_gate("delete old logs", 1_785_067_200, false).unwrap();
+        assert_eq!(command.verb, Verb::Delete);
+        // Auto-switch (gate on) still refuses the same query.
+        assert!(parse_with_gate("delete old logs", 1_785_067_200, true).is_none());
+        // The default `parse` is the gated, auto-switch reading.
+        assert!(parse("delete old logs", 1_785_067_200).is_none());
     }
 
     #[test]
@@ -996,6 +1084,56 @@ mod tests {
         assert_eq!(plan.ops.len(), 1);
         assert_eq!(plan.skipped, 1);
         assert_eq!(plan.ops[0], FileOp::Move { from: outside, to: archive.join("a.png") });
+    }
+
+    #[test]
+    fn two_matches_sharing_a_name_are_retargeted_not_refused() {
+        // The dogfooding case: `move roadmap to Downloads` where two
+        // different folders each hold a ROADMAP.md. The old plan refused
+        // outright ("two files would both become …"); now the second is
+        // retargeted to "ROADMAP 2.md" so the plan is reviewable.
+        let cwd = tempfile::tempdir().unwrap();
+        let downloads = cwd.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        std::fs::create_dir(cwd.path().join("a")).unwrap();
+        std::fs::create_dir(cwd.path().join("b")).unwrap();
+        let dirs = UserDirs::default();
+
+        let command = cmd("move roadmap to Downloads").unwrap();
+        let first = cwd.path().join("a/ROADMAP.md");
+        let second = cwd.path().join("b/ROADMAP.md");
+        let plan =
+            build(&command, &[first.clone(), second.clone()], &ctx(cwd.path(), &dirs)).unwrap();
+
+        assert_eq!(plan.ops.len(), 2, "both files are planned, none refused");
+        // `matches` is sorted, so a/ROADMAP.md keeps the base name and
+        // b/ROADMAP.md takes the numbered variant.
+        assert_eq!(
+            plan.ops,
+            vec![
+                FileOp::Move { from: first, to: downloads.join("ROADMAP.md") },
+                FileOp::Move { from: second, to: downloads.join("ROADMAP 2.md") },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_match_named_like_an_existing_destination_file_is_retargeted() {
+        // A single move whose name is already occupied on disk gets the
+        // numbered variant too — the folder is read once, so the preview
+        // is truthful without a per-file stat.
+        let cwd = tempfile::tempdir().unwrap();
+        let downloads = cwd.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        std::fs::write(downloads.join("notes.md"), b"existing").unwrap();
+        std::fs::create_dir(cwd.path().join("src")).unwrap();
+        let dirs = UserDirs::default();
+
+        let command = cmd("move notes to Downloads").unwrap();
+        let from = cwd.path().join("src/notes.md");
+        let plan = build(&command, &[from.clone()], &ctx(cwd.path(), &dirs)).unwrap();
+
+        assert_eq!(plan.ops, vec![FileOp::Move { from, to: downloads.join("notes 2.md") }]);
     }
 
     #[test]

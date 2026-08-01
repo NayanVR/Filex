@@ -61,6 +61,7 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("star"),
     icon!("clock"),
     icon!("trash-2"),
+    icon!("sparkles"),
 ];
 
 /// Serves the embedded [`ICONS`]. Registered via

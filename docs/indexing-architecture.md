@@ -218,6 +218,24 @@ a full scan is **~5–10 ms**, well under a keystroke. Structure:
 - Query thread pool (separate from the writer). Each keystroke submits a query
   tagged with the current `generation` and an `AtomicBool` cancel token; a newer
   keystroke cancels in-flight scans (checked per chunk).
+  > **Built 2026-07-31 (after a stall on a real 2.2M-entry index).** The
+  > `generation` tag discards a stale scan's *results*; the cancel token now
+  > also stops it *producing* them. `Workspace::search_cancel` is an
+  > `Arc<AtomicBool>`; each new search sets the old flag and installs a fresh
+  > one, and the flag is threaded into `manager::search_all_cancellable` →
+  > `VolumeIndex::search_cancellable` / `search_filtered_cancellable`, polled
+  > once per candidate in the rayon `filter_map` (and before each path
+  > materialization). A superseded scan winds down to a near-no-op instead of
+  > scoring and ranking millions of entries and holding the read lock to do
+  > it. `SEARCH_DEBOUNCE` (50 ms) still coalesces the keystroke burst ahead of
+  > this; the two are complementary — debounce reduces how many scans start,
+  > cancellation stops the ones that did.
+  >
+  > Why it mattered: without cancellation, typing "move gravloc to documents"
+  > launched a scan per keystroke, each taking *seconds* on the 2.2M index
+  > (each holds the arena read lock), and they convoyed with the FS writer —
+  > logged lock waits of 5–8 s in both directions. The cancel token plus the
+  > watcher fix above are the two halves of that fix.
 - Case-insensitive by scanning the folded pool with a folded needle; the match
   hit index maps back to `EntryId` via a sorted `(pool_offset → EntryId)` lookup
   (binary search over entry order, since the pool is append-ordered).
@@ -225,8 +243,15 @@ a full scan is **~5–10 ms**, well under a keystroke. Structure:
   links only for name-matches — cheap because name matching already cut the set.
 - Ranking, computed only on matches: prefix match > word-boundary > substring;
   then dirs/files, then name length. Truncate to top ~1000 for the UI.
-- Later (not Phase 1): a trigram bitmap in front of the scan if profiling says we
-  need it. Don't build it speculatively.
+- A cheap **byte-presence prefilter** in front of the fuzzy pass (built
+  2026-08-01, `byte_mask`/`mask_covers`): a name can hold the needle as a
+  subsequence only if it contains every byte of the (folded) needle, tested
+  with four 64-bit ANDs and no UTF-8 decode. It rejects most of the arena
+  before the costly `fuzzy::penalty` alignment, cutting the low-hit/no-hit
+  keystroke — the one that scans everything — by ~30% on a synthetic 2M index
+  and more on real (longer) names. A full trigram bitmap is the next lever if
+  profiling still says so; the prefilter is the cheap first cut the note below
+  anticipated. Don't build the trigram index speculatively.
 
 ### Concurrency model
 
@@ -241,13 +266,45 @@ UI thread (GPUI) ──query──▶ search pool ──top-K results──▶ c
 ```
 
 - Readers get a consistent snapshot via `arc_swap::ArcSwap<VolumeIndex>`; the
-  writer applies a batch to its private copy-on-write head and publishes.
-  (Phase 1 can start with `RwLock` + short write batches; swap in `ArcSwap` or an
-  im-style persistent structure if writer stalls show up. The interface —
-  `index.snapshot()` — hides the choice.)
+  writer applies a batch to its private head and publishes.
+
+  > **Built 2026-07-31 (optimization B).** `SharedIndex` (src/index/watcher.rs)
+  > wraps `{ snapshot: ArcSwap<VolumeIndex>, head: Mutex<Arc<VolumeIndex>> }`.
+  > Readers call `load()` — a lock-free atomic load of the snapshot `Arc` — and
+  > scan it; they take **no lock at all**, so a background writer can never
+  > stall a search and a slow search can never stall the writer (the reader↔
+  > writer convoy that produced 5–8 s lock waits is gone by construction). The
+  > two background writers (the delta `IndexWriter` and the metadata backfill)
+  > serialize on `head`'s `Mutex`, which readers never touch; each mutates the
+  > head in place via `write()` and republishes via `publish()`. `publish`
+  > deep-clones the head (the price of an immutable snapshot), so it is
+  > **rate-limited** to at most once per `PUBLISH_INTERVAL` (150 ms) with a
+  > quiescent-tick flush — otherwise the many-small-batches workload seen in
+  > the logs would clone the whole 2.2M-entry index on every tiny event. Cost:
+  > ~one full-index clone per interval during sustained churn (writer-thread
+  > CPU, off the read path) and transient ~2× memory during that clone; ~1×
+  > and zero clones while idle. `replace()` handles the wholesale swaps
+  > (compaction, root rescan). Optimization A (metadata prefetch) still applies
+  > *within* the head write, keeping even the head `Mutex` hold short.
 - GPUI integration: queries are spawned with `cx.background_executor()`; results
   come back through `cx.spawn` and set state + `cx.notify()`. **The UI thread
   never takes an index lock.**
+
+  > **Optimization A — filesystem syscalls off the write lock (built 2026-07-31).**
+  > While still on `RwLock` (the ArcSwap step below is not done yet), the writer
+  > no longer `stat`s files under the lock. `MetaSource::prefetch` gathers
+  > size/mtime for every file upsert in a batch *before* the write lock is
+  > taken, and `apply_prepared` commits from that prefetched data — the lock is
+  > held for in-memory arena mutation only. This directly shortens the writer's
+  > `hold_ms`, which is what stalls concurrent searches; a burst of file changes
+  > used to serialize one `stat` per file (a ~1950-file batch measured at ~2 s
+  > of held lock, all `stat` time). The writer log now carries `prefetch_ms`
+  > (off-lock) alongside `hold_ms` (on-lock) so the split is visible. Directory
+  > walks (`index_subtree`) are *not* yet prefetched — after the known-directory
+  > no-op they run only for genuinely new subtrees/rescans, which is rare;
+  > moving those off the lock is the remaining part of A. **B** (ArcSwap
+  > snapshot reads, per the diagram above) is the larger next step, which
+  > removes reader/writer contention entirely rather than just shortening it.
 
 ### On-disk persistence
 

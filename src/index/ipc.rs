@@ -17,7 +17,6 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::PoisonError;
 
 use anyhow::{Context as _, Result, bail, ensure};
 
@@ -293,7 +292,7 @@ impl IndexHost for MultiRootHost {
                 .iter()
                 .map(|(path, index)| RootStatus {
                     path: path.display().to_string(),
-                    files: index.read().unwrap_or_else(PoisonError::into_inner).len() as u64,
+                    files: index.load().len() as u64,
                 })
                 .collect(),
         }
@@ -435,7 +434,6 @@ mod tests {
     use super::*;
     use crate::index::{ROOT, VolumeIndex};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, RwLock};
 
     #[test]
     fn requests_and_responses_roundtrip() {
@@ -507,8 +505,8 @@ mod tests {
         b.insert(ROOT, "main", true).unwrap();
         MultiRootHost {
             roots: vec![
-                (PathBuf::from("/vol-a"), Arc::new(RwLock::new(a))),
-                (PathBuf::from("/vol-b"), Arc::new(RwLock::new(b))),
+                (PathBuf::from("/vol-a"), SharedIndex::new(a)),
+                (PathBuf::from("/vol-b"), SharedIndex::new(b)),
             ],
         }
     }
