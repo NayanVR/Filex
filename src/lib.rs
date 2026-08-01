@@ -18,3 +18,4 @@ pub mod telemetry;
 pub mod selection;
 pub mod settings;
 pub mod tags;
+pub mod update;

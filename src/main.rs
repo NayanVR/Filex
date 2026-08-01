@@ -142,6 +142,25 @@ fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     command.spawn().map(drop)
 }
 
+/// The update affordance for this platform's UI banner. macOS copies a
+/// `brew` command; Linux opens the releases page to re-download the
+/// tarball. (Windows applies via the service, so it isn't handled here.)
+#[cfg(all(not(target_os = "windows"), feature = "updater"))]
+fn platform_affordance() -> filex::update::UpdateAffordance {
+    #[cfg(target_os = "macos")]
+    {
+        filex::update::UpdateAffordance::RunCommand("brew upgrade filex".to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // TODO(block 5): point at the real releases URL once the repo is
+        // published.
+        filex::update::UpdateAffordance::OpenUrl(
+            "https://github.com/NayanVR/filex/releases/latest".to_string(),
+        )
+    }
+}
+
 const SEARCH_RESULT_LIMIT: usize = 500;
 
 /// How long the query must hold still before a scan starts.
@@ -551,6 +570,11 @@ struct Workspace {
     appearance: WindowAppearance,
     /// Transient user-facing message (e.g. why a root couldn't be added).
     notice: Option<SharedString>,
+    /// The auto-updater's UI state, rendered as a slim banner above the
+    /// status bar. Advanced by a background manifest check on launch
+    /// (macOS/Linux); the Windows service path would report via IPC
+    /// (pending — the banner stays `Idle` there for now).
+    update_status: filex::update::UpdateStatus,
     #[cfg(target_os = "macos")]
     fda_missing: bool,
     /// Connection to filex-indexd, when the elevated service is running.
@@ -778,6 +802,7 @@ impl Workspace {
             search_debounce: None,
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fs_refresh_pending: false,
+            update_status: filex::update::UpdateStatus::default(),
         };
         this.load_dir(&cwd, cx);
         this.spawn_tag_prune(cx);
@@ -794,6 +819,10 @@ impl Workspace {
         }
         this.spawn_fda_check(cx);
         this.spawn_drive_refresh(cx);
+        // macOS/Linux check the manifest themselves (no service); Windows
+        // learns of updates from filex-indexd instead.
+        #[cfg(all(not(target_os = "windows"), feature = "updater"))]
+        this.spawn_update_check(cx);
         this
     }
 
@@ -820,6 +849,103 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// Manifest URL for the UI-side "is there a newer version?" check.
+    /// Empty until release infra (block 5) fills it; empty disables the
+    /// check, so the banner simply never appears.
+    #[cfg(all(not(target_os = "windows"), feature = "updater"))]
+    const UPDATE_MANIFEST_URL: &'static str = "";
+
+    /// Check the manifest once on launch (distribution decision 7: no
+    /// timer) and surface the banner if a newer version exists. Notice-
+    /// only — macOS/Linux install via their package manager, so this never
+    /// downloads or verifies an artifact. Off-thread; a failed check is
+    /// silent (retried next launch).
+    #[cfg(all(not(target_os = "windows"), feature = "updater"))]
+    fn spawn_update_check(&self, cx: &mut Context<Self>) {
+        let url = Self::UPDATE_MANIFEST_URL;
+        if url.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let cancel = filex::update::CancelFlag::new();
+                    filex::update::check_for_newer_version(
+                        filex::update::http_fetch,
+                        url,
+                        filex::update::CURRENT_VERSION,
+                        &cancel,
+                    )
+                })
+                .await;
+            if let Ok(Some(version)) = found {
+                this.update(cx, |this, cx| {
+                    this.update_status = filex::update::UpdateStatus::Available {
+                        version,
+                        affordance: platform_affordance(),
+                    };
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Act on the update banner's primary button per the current
+    /// affordance: copy the command, open the releases page, or (Windows,
+    /// unused here) restart.
+    fn apply_update_action(&mut self, cx: &mut Context<Self>) {
+        let filex::update::UpdateStatus::Available { affordance, .. } = &self.update_status else {
+            return;
+        };
+        match affordance.clone() {
+            filex::update::UpdateAffordance::RunCommand(cmd) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd));
+                self.notice = Some("Update command copied — run it in your terminal".into());
+            }
+            filex::update::UpdateAffordance::OpenUrl(url) => {
+                let _ = open_with_default_app(std::path::Path::new(&url));
+            }
+            filex::update::UpdateAffordance::Restart => {}
+        }
+        cx.notify();
+    }
+
+    /// Hide the update banner (the ✕). The check runs again next launch.
+    fn dismiss_update(&mut self, cx: &mut Context<Self>) {
+        self.update_status = filex::update::UpdateStatus::Idle;
+        cx.notify();
+    }
+
+    /// The slim update banner above the status bar, or nothing when there's
+    /// no update to show. Text/labels come from `filex::update`'s tested
+    /// pure functions; this only renders and wires the buttons.
+    fn render_update_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let content = filex::update::banner_content(&self.update_status)?;
+        let theme = *cx.theme();
+        let mut bar = ui::update_banner::update_banner(&theme)
+            .child(ui::update_banner::message(&theme, content.message));
+        if let Some(label) = content.action_label {
+            bar = bar.child(
+                ui::update_banner::action_button(&theme, "update-action", label).on_click(
+                    cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.apply_update_action(cx);
+                    }),
+                ),
+            );
+        }
+        bar = bar.child(
+            ui::update_banner::dismiss_button(&theme, "update-dismiss").on_click(cx.listener(
+                |this, _: &ClickEvent, _window, cx| {
+                    this.dismiss_update(cx);
+                },
+            )),
+        );
+        Some(bar.into_any_element())
     }
 
     /// Probe for filex-indexd; on success run in service mode, otherwise
@@ -4909,6 +5035,7 @@ impl Render for Workspace {
                     .children((!self.in_magic_view()).then(|| self.render_details_panel(cx)).flatten()),
             )
             .children(self.render_jobs(cx))
+            .children(self.render_update_banner(cx))
             .child(self.render_status_bar(&theme))
             .children(self.render_scope_menu(cx))
             .children(self.render_context_menu(cx))

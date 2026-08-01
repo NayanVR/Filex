@@ -74,16 +74,22 @@ mod service {
 
     fn run_service(arguments: Vec<OsString>) -> Result<()> {
         let shutdown = Arc::new(AtomicBool::new(false));
+        // Cancels an in-flight self-update download if the service is asked
+        // to stop mid-check. Always present (not feature-gated) so the event
+        // handler stays uniform; only the update *thread* needs `updater`.
+        let update_cancel = filex::update::CancelFlag::new();
 
         // Stop/Shutdown set the flag and wake the pipe accept so the serve
         // loop returns and the LiveIndexes drop (snapshots save).
         let event_handler = {
             let shutdown = shutdown.clone();
+            let update_cancel = update_cancel.clone();
             move |control| -> ServiceControlHandlerResult {
                 match control {
                     ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                     ServiceControl::Stop | ServiceControl::Shutdown => {
                         shutdown.store(true, Ordering::Relaxed);
+                        update_cancel.cancel();
                         windows::wake_pipe_server(PIPE_NAME);
                         ServiceControlHandlerResult::NoError
                     }
@@ -109,6 +115,12 @@ mod service {
             ServiceState::Running,
             ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         )?;
+
+        // One-shot self-update check on launch (distribution decision 7: no
+        // timer). SCM path only — a console/dev run must not self-update.
+        // Runs off-thread so it never delays serving; a stop cancels it.
+        #[cfg(feature = "updater")]
+        spawn_update_check(update_cancel.clone());
 
         // SCM passes the service name as argv[0]; the rest are root paths.
         let roots =
@@ -195,6 +207,106 @@ mod service {
         drop(live_indexes);
         tracing::info!("index service stopped; snapshots saved");
         result
+    }
+
+    // --- Self-update (Windows, `updater` feature) --------------------------
+    //
+    // The service is LocalSystem, so it can apply an MSI silently: no UAC,
+    // and (because the download comes via our own HTTPS client, not a
+    // browser) no SmartScreen. The verify gate in `filex::update` is the
+    // hard boundary — an MSI is only ever handed to msiexec after
+    // `check_for_update` returns `Apply`, i.e. after signature verification.
+    // See docs/design-distribution.md §3, §4.
+
+    /// Where the Windows update manifest lives. **Empty until release infra
+    /// (block 5) fills it** — an empty URL disables the self-updater, so the
+    /// service still indexes normally; it just never self-updates.
+    #[cfg(feature = "updater")]
+    const MANIFEST_URL: &str = "";
+
+    /// Hex Ed25519 public key that update payloads must verify against,
+    /// from the CI-held keypair (block 0). Empty disables the self-updater.
+    #[cfg(feature = "updater")]
+    const UPDATE_PUBLIC_KEY: &str = "";
+
+    /// Run the on-launch update check off the serving thread.
+    #[cfg(feature = "updater")]
+    fn spawn_update_check(cancel: filex::update::CancelFlag) {
+        std::thread::spawn(move || {
+            if let Err(err) = check_and_apply_update(&cancel) {
+                tracing::warn!("self-update check did not complete: {err:#}");
+            }
+        });
+    }
+
+    /// Check for a newer release and, if one verifies, hand it to msiexec.
+    #[cfg(feature = "updater")]
+    fn check_and_apply_update(cancel: &filex::update::CancelFlag) -> Result<()> {
+        use filex::update::{self, CURRENT_VERSION, UpdateAction};
+
+        if MANIFEST_URL.is_empty() || UPDATE_PUBLIC_KEY.is_empty() {
+            tracing::debug!("self-update disabled: manifest URL or public key not configured");
+            return Ok(());
+        }
+
+        match update::check_for_update(
+            update::http_fetch,
+            MANIFEST_URL,
+            CURRENT_VERSION,
+            UPDATE_PUBLIC_KEY,
+            cancel,
+        ) {
+            Ok(UpdateAction::UpToDate) => {
+                tracing::info!("filex-indexd is up to date ({CURRENT_VERSION})");
+                Ok(())
+            }
+            Ok(UpdateAction::Apply { version, payload }) => {
+                tracing::info!("update available: {CURRENT_VERSION} -> {version}");
+                let path = stage_msi(&version, &payload)?;
+                spawn_msiexec(&path)?;
+                tracing::info!(
+                    "handed MSI {version} to msiexec; the upgrade will restart the service"
+                );
+                Ok(())
+            }
+            Err(err) => Err(anyhow::anyhow!("{err}")),
+        }
+    }
+
+    /// Write the verified MSI to a temp file for msiexec to consume.
+    #[cfg(feature = "updater")]
+    fn stage_msi(version: &str, bytes: &[u8]) -> Result<PathBuf> {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push(format!("filex-update-{version}.msi"));
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(path)
+    }
+
+    /// Launch `msiexec` to apply the staged MSI, detached so it OUTLIVES
+    /// this service.
+    ///
+    /// The MSI's `ServiceControl` stops filex-indexd mid-upgrade, so we must
+    /// spawn without waiting and let the SCM stop us cleanly while msiexec
+    /// swaps both binaries and starts the new service. `DETACHED_PROCESS`
+    /// plus not waiting means dropping the `Child` here does not kill it.
+    #[cfg(feature = "updater")]
+    fn spawn_msiexec(msi_path: &std::path::Path) -> Result<()> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+        let args = filex::update::msiexec_args(&msi_path.to_string_lossy());
+        let child = Command::new("msiexec")
+            .args(&args)
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+            .spawn()?;
+        tracing::info!("spawned msiexec (pid {})", child.id());
+        Ok(())
     }
 }
 
