@@ -9,16 +9,16 @@ use gpui::{
     WindowOptions, actions, div, prelude::*, px, size, uniform_list,
 };
 
+use filex::drives::Drive;
 use filex::index::watcher::SharedIndex;
 use filex::index::{LiveIndex, MatchKind, VolumeIndex, manager, start_live_index};
-use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
 use filex::search_filter::Filter;
-use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
 use filex::selection::Selection;
 use filex::settings::{SortBy, ThemeMode, ViewMode};
+use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
 
 mod settings_store;
 mod thumbnails;
@@ -72,19 +72,22 @@ impl DragItems {
 impl gpui::Render for DragItems {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        div().pl(self.position.x + px(12.)).pt(self.position.y + px(8.)).child(
-            div()
-                .flex()
-                .items_center()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(theme.accent)
-                .text_color(theme.on_accent)
-                .text_xs()
-                .shadow_md()
-                .child(self.label.clone()),
-        )
+        div()
+            .pl(self.position.x + px(12.))
+            .pt(self.position.y + px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(theme.accent)
+                    .text_color(theme.on_accent)
+                    .text_xs()
+                    .shadow_md()
+                    .child(self.label.clone()),
+            )
     }
 }
 
@@ -113,7 +116,13 @@ fn fetch_preview_meta(path: &Path) -> PreviewMeta {
     }
     // `image_dimensions` reads only the header and errors on non-images.
     let dimensions = image::image_dimensions(path).ok();
-    PreviewMeta { path: path.to_path_buf(), size, modified, created, dimensions }
+    PreviewMeta {
+        path: path.to_path_buf(),
+        size,
+        modified,
+        created,
+        dimensions,
+    }
 }
 
 /// Open a file with the platform's default application. Detached — the
@@ -217,10 +226,15 @@ struct PlanRow {
 
 fn describe_op(op: &FileOp) -> PlanRow {
     let file_name = |path: &Path| -> String {
-        path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
     };
     let parent = |path: &Path| -> String {
-        path.parent().map(|p| p.display().to_string()).unwrap_or_default()
+        path.parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
     };
     match op {
         FileOp::Delete { path } => PlanRow {
@@ -330,7 +344,9 @@ fn filter_rows_by_tags(
     }
     let tagged: std::collections::HashSet<PathBuf> =
         store.paths_with_all_tags(required).into_iter().collect();
-    rows.into_iter().filter(|row| tagged.contains(&row.target)).collect()
+    rows.into_iter()
+        .filter(|row| tagged.contains(&row.target))
+        .collect()
 }
 
 /// A lock-free snapshot of the index (optimization B). Derefs (through the
@@ -360,7 +376,11 @@ impl RootSlot {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string())
             .into();
-        Self { path, label, state: RootState::Building }
+        Self {
+            path,
+            label,
+            state: RootState::Building,
+        }
     }
 
     fn ready_index(&self) -> Option<SharedIndex> {
@@ -398,7 +418,13 @@ struct ConflictState {
 /// What an open context menu is about.
 enum MenuTarget {
     /// A file row — browse (`from_search: false`) or a search result.
-    Entry { ix: usize, path: PathBuf, name: String, is_dir: bool, from_search: bool },
+    Entry {
+        ix: usize,
+        path: PathBuf,
+        name: String,
+        is_dir: bool,
+        from_search: bool,
+    },
     /// An indexed root in the sidebar.
     Root { path: PathBuf },
     /// A pinned folder in the sidebar's Favorites section.
@@ -489,7 +515,9 @@ struct MagicState {
 impl MagicState {
     /// The ops the user has left checked.
     fn selected_ops(&self) -> Vec<FileOp> {
-        let Some(Ok(plan)) = &self.outcome else { return Vec::new() };
+        let Some(Ok(plan)) = &self.outcome else {
+            return Vec::new();
+        };
         plan.ops
             .iter()
             .zip(&self.checked)
@@ -832,8 +860,10 @@ impl Workspace {
     fn spawn_drive_refresh(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                let drives =
-                    cx.background_executor().spawn(async { filex::drives::list_drives() }).await;
+                let drives = cx
+                    .background_executor()
+                    .spawn(async { filex::drives::list_drives() })
+                    .await;
                 let updated = this
                     .update(cx, |this, cx| {
                         if this.drives != drives {
@@ -845,17 +875,23 @@ impl Workspace {
                 if !updated {
                     break; // workspace dropped
                 }
-                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(30))
+                    .await;
             }
         })
         .detach();
     }
 
     /// Manifest URL for the UI-side "is there a newer version?" check.
-    /// Empty until release infra (block 5) fills it; empty disables the
-    /// check, so the banner simply never appears.
-    #[cfg(all(not(target_os = "windows"), feature = "updater"))]
-    const UPDATE_MANIFEST_URL: &'static str = "";
+    /// Per-OS, since each platform publishes its own manifest; the
+    /// `latest/download/…` path always resolves to the newest release.
+    #[cfg(all(target_os = "macos", feature = "updater"))]
+    const UPDATE_MANIFEST_URL: &'static str =
+        "https://github.com/NayanVR/filex/releases/latest/download/filex-macos.json";
+    #[cfg(all(target_os = "linux", feature = "updater"))]
+    const UPDATE_MANIFEST_URL: &'static str =
+        "https://github.com/NayanVR/filex/releases/latest/download/filex-linux.json";
 
     /// Check the manifest once on launch (distribution decision 7: no
     /// timer) and surface the banner if a newer version exists. Notice-
@@ -1107,8 +1143,9 @@ impl Workspace {
             // Live-update loop for this root.
             while change_rx.next().await.is_some() {
                 while change_rx.try_recv().is_ok() {} // drain bursts
-                let alive =
-                    this.update(cx, |this, cx| this.refresh_after_fs_change(path.clone(), cx));
+                let alive = this.update(cx, |this, cx| {
+                    this.refresh_after_fs_change(path.clone(), cx)
+                });
                 if alive.is_err() {
                     break;
                 }
@@ -1156,7 +1193,9 @@ impl Workspace {
                 .await;
             this.update(cx, |this, cx| {
                 if let Some(slot) = this.slot_mut(&path)
-                    && let RootState::Ready { files: slot_files, .. } = &mut slot.state
+                    && let RootState::Ready {
+                        files: slot_files, ..
+                    } = &mut slot.state
                 {
                     *slot_files = files;
                     cx.notify();
@@ -1244,9 +1283,7 @@ impl Workspace {
                 // navigating with a scoped query live must re-scope it to
                 // the new directory. "Anywhere" is cwd-independent, so it
                 // is left untouched.
-                if changed
-                    && self.search_scope == SearchScope::CurrentDir
-                    && !self.query.is_empty()
+                if changed && self.search_scope == SearchScope::CurrentDir && !self.query.is_empty()
                 {
                     self.update_search(cx);
                 }
@@ -1267,7 +1304,8 @@ impl Workspace {
         if self.thumbnails.len() >= thumbnails::CACHE_CAP {
             self.thumbnails.clear(); // visible rows repopulate immediately
         }
-        self.thumbnails.insert(path.clone(), ThumbnailState::Loading);
+        self.thumbnails
+            .insert(path.clone(), ThumbnailState::Loading);
         cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_executor()
@@ -1315,17 +1353,29 @@ impl Workspace {
 
     /// Length of whichever list selection currently applies to.
     fn active_list_len(&self) -> usize {
-        if self.query.is_empty() { self.entries.len() } else { self.results.len() }
+        if self.query.is_empty() {
+            self.entries.len()
+        } else {
+            self.results.len()
+        }
     }
 
     /// The selection for the active list: the global search selection
     /// while a query is live, otherwise the (per-tab) browse selection.
     fn active_selection(&self) -> &Selection {
-        if self.query.is_empty() { &self.selection } else { &self.search_selection }
+        if self.query.is_empty() {
+            &self.selection
+        } else {
+            &self.search_selection
+        }
     }
 
     fn active_selection_mut(&mut self) -> &mut Selection {
-        if self.query.is_empty() { &mut self.selection } else { &mut self.search_selection }
+        if self.query.is_empty() {
+            &mut self.selection
+        } else {
+            &mut self.search_selection
+        }
     }
 
     /// Arrow-key navigation. `extend` (shift held) grows the range from
@@ -1338,8 +1388,11 @@ impl Workspace {
             self.active_selection_mut().move_lead(delta, len)
         };
         if let Some(next) = next {
-            let handle =
-                if self.query.is_empty() { &self.browse_scroll } else { &self.results_scroll };
+            let handle = if self.query.is_empty() {
+                &self.browse_scroll
+            } else {
+                &self.results_scroll
+            };
             handle.scroll_to_item(next, ScrollStrategy::Center);
         }
         self.refresh_preview(cx);
@@ -1350,16 +1403,26 @@ impl Workspace {
     /// platform's default application.
     fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
         let (path, is_dir, from_search) = if self.query.is_empty() {
-            let Some(entry) = self.entries.get(ix) else { return };
+            let Some(entry) = self.entries.get(ix) else {
+                return;
+            };
             (entry.path.clone(), entry.is_dir, false)
         } else {
-            let Some(row) = self.results.get(ix) else { return };
+            let Some(row) = self.results.get(ix) else {
+                return;
+            };
             (row.target.clone(), row.is_dir, true)
         };
         self.open_target(path, is_dir, from_search, cx);
     }
 
-    fn open_target(&mut self, path: PathBuf, is_dir: bool, from_search: bool, cx: &mut Context<Self>) {
+    fn open_target(
+        &mut self,
+        path: PathBuf,
+        is_dir: bool,
+        from_search: bool,
+        cx: &mut Context<Self>,
+    ) {
         if is_dir {
             self.navigate(path, cx);
             if from_search {
@@ -1380,14 +1443,17 @@ impl Workspace {
     /// Jump to a file's parent directory and select it there (context
     /// menu "Reveal in Folder" on search results).
     fn reveal(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let Some(parent) = path.parent().map(Path::to_path_buf) else { return };
+        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+            return;
+        };
         self.clear_search(cx);
         self.navigate(parent, cx);
         if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
             && let Some(ix) = self.entries.iter().position(|entry| entry.name == name)
         {
             self.selection.select_one(ix);
-            self.browse_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+            self.browse_scroll
+                .scroll_to_item(ix, ScrollStrategy::Center);
         }
         self.refresh_preview(cx);
         cx.notify();
@@ -1410,8 +1476,11 @@ impl Workspace {
     /// Write every selected item's path to the OS clipboard (one per
     /// line), for pasting into a terminal or another app.
     fn copy_selected_paths(&mut self, cx: &mut Context<Self>) {
-        let paths: Vec<String> =
-            self.selected_paths().iter().map(|(path, _)| path.display().to_string()).collect();
+        let paths: Vec<String> = self
+            .selected_paths()
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
         if paths.is_empty() {
             return;
         }
@@ -1428,7 +1497,11 @@ impl Workspace {
     /// Trash every selected item (context-menu "Move to Trash" — no
     /// two-press confirm, the click is already explicit).
     fn trash_selected(&mut self, cx: &mut Context<Self>) {
-        let paths = self.selected_paths().into_iter().map(|(path, _)| path).collect();
+        let paths = self
+            .selected_paths()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
         self.delete_paths(paths, cx);
     }
 
@@ -1575,7 +1648,11 @@ impl Workspace {
 
     /// The folder name shown on tab `i` (the drive/root shows as "/").
     fn tab_title(&self, i: usize) -> SharedString {
-        let cwd = if i == self.active_tab { &self.cwd } else { &self.tabs[i].cwd };
+        let cwd = if i == self.active_tab {
+            &self.cwd
+        } else {
+            &self.tabs[i].cwd
+        };
         cwd.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string())
@@ -1583,7 +1660,12 @@ impl Workspace {
     }
 
     fn is_favorite(&self, path: &Path, cx: &App) -> bool {
-        self.settings.read(cx).settings().favorites.iter().any(|p| p == path)
+        self.settings
+            .read(cx)
+            .settings()
+            .favorites
+            .iter()
+            .any(|p| p == path)
     }
 
     /// Pin a folder to the sidebar's Favorites (idempotent).
@@ -1622,7 +1704,12 @@ impl Workspace {
     }
 
     fn is_section_collapsed(&self, id: &str, cx: &App) -> bool {
-        self.settings.read(cx).settings().collapsed_sections.iter().any(|s| s == id)
+        self.settings
+            .read(cx)
+            .settings()
+            .collapsed_sections
+            .iter()
+            .any(|s| s == id)
     }
 
     fn toggle_section(&mut self, id: &'static str, cx: &mut Context<Self>) {
@@ -1647,8 +1734,7 @@ impl Workspace {
 
     /// Rebuild the cached frecency table after `recents` changed.
     fn refresh_frecency(&mut self) {
-        self.frecency =
-            std::sync::Arc::new(self.recents.score_table(filex::frecency::now_secs()));
+        self.frecency = std::sync::Arc::new(self.recents.score_table(filex::frecency::now_secs()));
     }
 
     fn persist_recents(&self, cx: &Context<Self>) {
@@ -1680,15 +1766,18 @@ impl Workspace {
         if !self.settings.read(cx).settings().crash_reports {
             return;
         }
-        let (Some(url), Some(dir)) =
-            (filex::telemetry::endpoint(), filex::telemetry::default_queue_dir())
-        else {
+        let (Some(url), Some(dir)) = (
+            filex::telemetry::endpoint(),
+            filex::telemetry::default_queue_dir(),
+        ) else {
             return; // no endpoint configured, or no data dir
         };
         cx.background_executor()
             .spawn(async move {
                 let sent = filex::telemetry::drain(&dir, |report| {
-                    let Ok(body) = serde_json::to_string(report) else { return false };
+                    let Ok(body) = serde_json::to_string(report) else {
+                        return false;
+                    };
                     ureq::post(&url)
                         .set("Content-Type", "application/json")
                         .send_string(&body)
@@ -1752,14 +1841,16 @@ impl Workspace {
     /// chip) by rewriting the search input's text.
     fn remove_filter_token(&mut self, token: &str, cx: &mut Context<Self>) {
         let rewritten = filex::search_filter::without_token(&self.query, token);
-        self.search_input.update(cx, |input, cx| input.set_text(rewritten, cx));
+        self.search_input
+            .update(cx, |input, cx| input.set_text(rewritten, cx));
     }
 
     /// Remove an inferred natural-language phrase (clicking its chip) by
     /// stripping the words that produced it.
     fn remove_phrase(&mut self, source: &str, cx: &mut Context<Self>) {
         let rewritten = filex::phrases::without_phrase(&self.query, source);
-        self.search_input.update(cx, |input, cx| input.set_text(rewritten, cx));
+        self.search_input
+            .update(cx, |input, cx| input.set_text(rewritten, cx));
     }
 
     /// The removable filter chips shown under the top bar — one pill per
@@ -1807,7 +1898,10 @@ impl Workspace {
                         .iter()
                         .find(|t| t.name.eq_ignore_ascii_case(name))
                         .and_then(|t| t.color);
-                    (name.clone(), Some(ui::details::tag_dot_color(&theme, color)))
+                    (
+                        name.clone(),
+                        Some(ui::details::tag_dot_color(&theme, color)),
+                    )
                 }
                 _ => (token.clone(), None),
             };
@@ -1871,16 +1965,16 @@ impl Workspace {
 
         match &state.outcome {
             None => {
-                header = header.child(ui::magic_card::heading(&theme, verb.label())).child(
-                    ui::magic_card::subtitle(
+                header = header
+                    .child(ui::magic_card::heading(&theme, verb.label()))
+                    .child(ui::magic_card::subtitle(
                         &theme,
                         if self.any_root_ready() {
                             "finding matches…"
                         } else {
                             "still indexing — matches will appear when ready…"
                         },
-                    ),
-                );
+                    ));
                 header = header.child(ui::magic_card::subtitle(&theme, echo));
             }
             Some(Ok(plan)) => {
@@ -1897,7 +1991,11 @@ impl Workspace {
                         format!(
                             "{} already {} — nothing to do for {}",
                             plan.skipped,
-                            if verb == filex::magic::Verb::Rename { "named that" } else { "there" },
+                            if verb == filex::magic::Verb::Rename {
+                                "named that"
+                            } else {
+                                "there"
+                            },
                             if plan.skipped == 1 { "it" } else { "them" },
                         ),
                     ));
@@ -1911,13 +2009,22 @@ impl Workspace {
                     plan.ops.len(),
                     cx.processor(|this, range: Range<usize>, _window, cx| {
                         let theme = *cx.theme();
-                        let Some(state) = this.magic.as_ref() else { return Vec::new() };
-                        let Some(Ok(plan)) = state.outcome.as_ref() else { return Vec::new() };
+                        let Some(state) = this.magic.as_ref() else {
+                            return Vec::new();
+                        };
+                        let Some(Ok(plan)) = state.outcome.as_ref() else {
+                            return Vec::new();
+                        };
                         range
                             .filter_map(|ix| {
                                 let op = plan.ops.get(ix)?;
                                 let checked = state.checked.get(ix).copied().unwrap_or(false);
-                                let PlanRow { name, location, dest, tooltip } = describe_op(op);
+                                let PlanRow {
+                                    name,
+                                    location,
+                                    dest,
+                                    tooltip,
+                                } = describe_op(op);
                                 Some(
                                     ui::magic_card::op_row(
                                         &theme,
@@ -1928,9 +2035,11 @@ impl Workspace {
                                         dest,
                                     )
                                     .tooltip(ui::tooltip::text_tooltip(tooltip, theme))
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                        this.toggle_magic_op(ix, cx);
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, _window, cx| {
+                                            this.toggle_magic_op(ix, cx);
+                                        },
+                                    )),
                                 )
                             })
                             .collect()
@@ -1956,9 +2065,11 @@ impl Workspace {
                                 count > 0,
                                 destructive,
                             )
-                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                this.confirm_magic(cx);
-                            })),
+                            .on_click(cx.listener(
+                                |this, _: &ClickEvent, _window, cx| {
+                                    this.confirm_magic(cx);
+                                },
+                            )),
                         ),
                 );
             }
@@ -1988,7 +2099,9 @@ impl Workspace {
     /// whole; stopping midway to ask about file 40 of 200 would be a
     /// worse experience than the batch being uniformly predictable.
     fn confirm_magic(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.magic.as_ref() else { return };
+        let Some(state) = self.magic.as_ref() else {
+            return;
+        };
         let ops = state.selected_ops();
         if ops.is_empty() {
             return;
@@ -1999,8 +2112,13 @@ impl Workspace {
         self.next_job_id += 1;
         self.jobs.push(Job {
             id: job_id,
-            label: format!("{} {} {}", verb.label().to_lowercase(), ops.len(), plural_items(ops.len()))
-                .into(),
+            label: format!(
+                "{} {} {}",
+                verb.label().to_lowercase(),
+                ops.len(),
+                plural_items(ops.len())
+            )
+            .into(),
             progress: progress.clone(),
         });
         self.spawn_job_ticker(job_id, cx);
@@ -2044,8 +2162,13 @@ impl Workspace {
                 this.jobs.retain(|job| job.id != job_id);
                 if !applied.is_empty() {
                     this.notice = Some(
-                        format!("{} {} {}", verb.label().to_lowercase(), applied.len(), plural_items(applied.len()))
-                            .into(),
+                        format!(
+                            "{} {} {}",
+                            verb.label().to_lowercase(),
+                            applied.len(),
+                            plural_items(applied.len())
+                        )
+                        .into(),
                     );
                     this.journal.record(applied);
                 }
@@ -2080,8 +2203,12 @@ impl Workspace {
         if !self.query.is_empty() || self.settings_open {
             return;
         }
-        let Some(ix) = self.active_selection().lead() else { return };
-        let Some(entry) = self.entries.get(ix) else { return };
+        let Some(ix) = self.active_selection().lead() else {
+            return;
+        };
+        let Some(entry) = self.entries.get(ix) else {
+            return;
+        };
         let name = entry.name.clone();
         let input = cx.new(SearchInput::new);
         input.update(cx, |input, cx| {
@@ -2089,14 +2216,17 @@ impl Workspace {
             input.set_text(name, cx);
             input.select_all_text(cx);
         });
-        let subscription =
-            cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
-                if matches!(event, SearchInputEvent::Dismissed) {
-                    this.cancel_rename(window, cx);
-                }
-            });
+        let subscription = cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
+            if matches!(event, SearchInputEvent::Dismissed) {
+                this.cancel_rename(window, cx);
+            }
+        });
         window.focus(&input.focus_handle(cx));
-        self.renaming = Some(RenameState { ix, input, _subscription: subscription });
+        self.renaming = Some(RenameState {
+            ix,
+            input,
+            _subscription: subscription,
+        });
         cx.notify();
     }
 
@@ -2113,12 +2243,20 @@ impl Workspace {
         };
         window.focus(&self.search_input.focus_handle(cx));
         cx.notify();
-        let Some(entry) = self.entries.get(ix) else { return };
+        let Some(entry) = self.entries.get(ix) else {
+            return;
+        };
         let new_name = input.read(cx).text().trim().to_string();
         if new_name.is_empty() || new_name == entry.name {
             return; // nothing to do — treated as cancel
         }
-        self.run_op(FileOp::Rename { path: entry.path.clone(), new_name }, cx);
+        self.run_op(
+            FileOp::Rename {
+                path: entry.path.clone(),
+                new_name,
+            },
+            cx,
+        );
     }
 
     /// The (path, name) at a list index in whichever list is active
@@ -2135,7 +2273,10 @@ impl Workspace {
 
     /// Every selected item's (path, name), in list order.
     fn selected_paths(&self) -> Vec<(PathBuf, String)> {
-        self.active_selection().iter().filter_map(|ix| self.path_at(ix)).collect()
+        self.active_selection()
+            .iter()
+            .filter_map(|ix| self.path_at(ix))
+            .collect()
     }
 
     /// The lead item (path, name, is_dir) — the details panel's subject
@@ -2155,7 +2296,9 @@ impl Workspace {
     /// kicks off the metadata fetch for the current item.
     fn toggle_preview(&mut self, cx: &mut Context<Self>) {
         self.settings.update(cx, |store, cx| {
-            store.update(cx, |settings| settings.preview_open = !settings.preview_open);
+            store.update(cx, |settings| {
+                settings.preview_open = !settings.preview_open
+            });
         });
         self.refresh_preview(cx);
     }
@@ -2251,8 +2394,7 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(()) => {
-                        if this.lead_item().map(|(p, _, _)| p).as_deref() == Some(path.as_path())
-                        {
+                        if this.lead_item().map(|(p, _, _)| p).as_deref() == Some(path.as_path()) {
                             this.preview_tags = tags;
                         }
                         this.refresh_sidebar_tags(cx);
@@ -2274,7 +2416,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((path, _, _)) = self.lead_item() else { return };
+        let Some((path, _, _)) = self.lead_item() else {
+            return;
+        };
         let input = cx.new(SearchInput::new);
         let (seed, color, original) = match existing {
             Some(tag) => (tag.name.clone(), tag.color, Some(tag.name)),
@@ -2287,15 +2431,19 @@ impl Workspace {
                 input.select_all_text(cx);
             }
         });
-        let subscription =
-            cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
-                if matches!(event, SearchInputEvent::Dismissed) {
-                    this.cancel_tag_editor(window, cx);
-                }
-            });
+        let subscription = cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
+            if matches!(event, SearchInputEvent::Dismissed) {
+                this.cancel_tag_editor(window, cx);
+            }
+        });
         window.focus(&input.focus_handle(cx));
-        self.tag_editor =
-            Some(TagEditor { path, input, color, existing: original, _subscription: subscription });
+        self.tag_editor = Some(TagEditor {
+            path,
+            input,
+            color,
+            existing: original,
+            _subscription: subscription,
+        });
         cx.notify();
     }
 
@@ -2318,23 +2466,29 @@ impl Workspace {
     /// item's tag set (adding, or replacing the edited tag in place) and
     /// persist it. An empty name is treated as cancel.
     fn commit_tag_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.tag_editor.take() else { return };
+        let Some(editor) = self.tag_editor.take() else {
+            return;
+        };
         window.focus(&self.search_input.focus_handle(cx));
         let name = editor.input.read(cx).text().trim().to_string();
         if name.is_empty() {
             cx.notify();
             return;
         }
-        let new_tag = Tag { name, color: editor.color };
-        let tags =
-            filex::tags::upsert_tag(&self.preview_tags, editor.existing.as_deref(), new_tag);
+        let new_tag = Tag {
+            name,
+            color: editor.color,
+        };
+        let tags = filex::tags::upsert_tag(&self.preview_tags, editor.existing.as_deref(), new_tag);
         self.spawn_set_tags(editor.path, tags, cx);
         cx.notify();
     }
 
     /// Remove the tag currently being edited (the editor's Remove button).
     fn remove_editing_tag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.tag_editor.take() else { return };
+        let Some(editor) = self.tag_editor.take() else {
+            return;
+        };
         window.focus(&self.search_input.focus_handle(cx));
         if let Some(original) = editor.existing {
             let mut tags = self.preview_tags.clone();
@@ -2351,7 +2505,9 @@ impl Workspace {
             return;
         }
         let items = self.selected_paths();
-        let Some(label) = describe_items(&items) else { return };
+        let Some(label) = describe_items(&items) else {
+            return;
+        };
         self.notice = Some(
             match mode {
                 ClipMode::Copy => format!("copied {label} — paste into a folder"),
@@ -2382,7 +2538,9 @@ impl Workspace {
         // auto-resolves conflicts (keep-both) and lands as one undo.
         if let [source] = &sources[..] {
             let source = source.clone();
-            let Some(file_name) = source.file_name() else { return };
+            let Some(file_name) = source.file_name() else {
+                return;
+            };
             let dest = self.cwd.join(file_name);
             if dest == source {
                 self.notice = Some(match mode {
@@ -2396,8 +2554,14 @@ impl Workspace {
                 return;
             }
             let op = match mode {
-                ClipMode::Copy => FileOp::Copy { from: source, to: dest },
-                ClipMode::Cut => FileOp::Move { from: source, to: dest },
+                ClipMode::Copy => FileOp::Copy {
+                    from: source,
+                    to: dest,
+                },
+                ClipMode::Cut => FileOp::Move {
+                    from: source,
+                    to: dest,
+                },
             };
             if mode == ClipMode::Cut {
                 self.clipboard = None; // a move can only happen once
@@ -2417,9 +2581,16 @@ impl Workspace {
     /// multi-select drags as a group), otherwise just that one item.
     fn drag_source_paths(&self, ix: usize) -> Vec<PathBuf> {
         if self.active_selection().contains(ix) && self.active_selection().iter().count() > 1 {
-            self.active_selection().iter().filter_map(|i| self.path_at(i).map(|(p, _)| p)).collect()
+            self.active_selection()
+                .iter()
+                .filter_map(|i| self.path_at(i).map(|(p, _)| p))
+                .collect()
         } else {
-            self.path_at(ix).map(|(p, _)| vec![p]).into_iter().flatten().collect()
+            self.path_at(ix)
+                .map(|(p, _)| vec![p])
+                .into_iter()
+                .flatten()
+                .collect()
         }
     }
 
@@ -2432,10 +2603,20 @@ impl Workspace {
             return None;
         }
         let label: SharedString = match paths.as_slice() {
-            [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned().into(),
+            [one] => one
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+                .into(),
             many => format!("{} items", many.len()).into(),
         };
-        Some(DragItems { paths, label, theme, position: Point::default() })
+        Some(DragItems {
+            paths,
+            label,
+            theme,
+            position: Point::default(),
+        })
     }
 
     /// Handle a drop of in-app items or OS files onto `dest_dir`. Internal
@@ -2452,8 +2633,10 @@ impl Workspace {
         if !dest_dir.is_dir() {
             return;
         }
-        let sources: Vec<PathBuf> =
-            sources.into_iter().filter(|src| is_valid_drop(&dest_dir, src)).collect();
+        let sources: Vec<PathBuf> = sources
+            .into_iter()
+            .filter(|src| is_valid_drop(&dest_dir, src))
+            .collect();
         if sources.is_empty() {
             return;
         }
@@ -2523,7 +2706,11 @@ impl Workspace {
         let progress = std::sync::Arc::new(ops::OpProgress::default());
         let job_id = self.next_job_id;
         self.next_job_id += 1;
-        let verb = if mode == ClipMode::Copy { "copying" } else { "moving" };
+        let verb = if mode == ClipMode::Copy {
+            "copying"
+        } else {
+            "moving"
+        };
         self.jobs.push(Job {
             id: job_id,
             label: format!("{verb} {} items", sources.len()).into(),
@@ -2540,7 +2727,9 @@ impl Workspace {
                     async move {
                         let mut applied = Vec::new();
                         for source in sources {
-                            let Some(name) = source.file_name() else { continue };
+                            let Some(name) = source.file_name() else {
+                                continue;
+                            };
                             let mut dest = dest_dir.join(name);
                             if dest == source {
                                 continue; // pasting into the same folder
@@ -2552,8 +2741,14 @@ impl Workspace {
                                 }
                             }
                             let op = match mode {
-                                ClipMode::Copy => FileOp::Copy { from: source, to: dest },
-                                ClipMode::Cut => FileOp::Move { from: source, to: dest },
+                                ClipMode::Copy => FileOp::Copy {
+                                    from: source,
+                                    to: dest,
+                                },
+                                ClipMode::Cut => FileOp::Move {
+                                    from: source,
+                                    to: dest,
+                                },
                             };
                             if let Ok(mut done) = ops::apply_with_progress(&op, &progress) {
                                 migrate_tags(&tags, &mut done);
@@ -2567,7 +2762,11 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 this.jobs.retain(|job| job.id != job_id);
                 if !applied.is_empty() {
-                    let verb = if mode == ClipMode::Copy { "copied" } else { "moved" };
+                    let verb = if mode == ClipMode::Copy {
+                        "copied"
+                    } else {
+                        "moved"
+                    };
                     this.notice = Some(format!("{verb} {} items", applied.len()).into());
                     this.journal.record(applied);
                 }
@@ -2592,7 +2791,9 @@ impl Workspace {
             return;
         }
         let items = self.selected_paths();
-        let Some(label) = describe_items(&items) else { return };
+        let Some(label) = describe_items(&items) else {
+            return;
+        };
         let paths: Vec<PathBuf> = items.into_iter().map(|(path, _)| path).collect();
         let confirm = self.settings.read(cx).settings().confirm_delete;
         if confirm && self.pending_delete.as_deref() != Some(&paths[..]) {
@@ -2677,7 +2878,9 @@ impl Workspace {
     /// Resolve the open conflict dialog: keep both (retarget to the
     /// first free "name 2" variant) or cancel.
     fn resolve_conflict(&mut self, keep_both: bool, cx: &mut Context<Self>) {
-        let Some(ConflictState { op, dest }) = self.conflict.take() else { return };
+        let Some(ConflictState { op, dest }) = self.conflict.take() else {
+            return;
+        };
         cx.notify();
         if !keep_both {
             return;
@@ -2685,7 +2888,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let retargeted = cx
                 .background_executor()
-                .spawn(async move { ops::next_free_name(&dest).map(|free| op.with_destination(free)) })
+                .spawn(
+                    async move { ops::next_free_name(&dest).map(|free| op.with_destination(free)) },
+                )
                 .await;
             this.update(cx, |this, cx| match retargeted {
                 Ok(op) => this.spawn_apply(op, cx),
@@ -2714,7 +2919,11 @@ impl Workspace {
                 FileOp::Move { from, .. } => ("moving", from),
                 _ => unreachable!(),
             };
-            let name = source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let name = source
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             self.jobs.push(Job {
                 id: job_id,
                 label: format!("{verb} {name}").into(),
@@ -2806,11 +3015,13 @@ impl Workspace {
                     job.label.clone(),
                     job.progress.fraction(),
                 )
-                .child(ui::job::cancel_button(&theme, ("job-cancel", id as usize)).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.cancel_job(id, cx);
-                    }),
-                )),
+                .child(
+                    ui::job::cancel_button(&theme, ("job-cancel", id as usize)).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.cancel_job(id, cx);
+                        }),
+                    ),
+                ),
             );
         }
         Some(bar.into_any_element())
@@ -2918,7 +3129,11 @@ impl Workspace {
     /// auto-switched command would set `On` and look like a no-op, and
     /// there'd be no way back to plain search without editing the query.
     fn toggle_magic_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.magic_mode = if self.in_magic_view() { MagicMode::Off } else { MagicMode::On };
+        self.magic_mode = if self.in_magic_view() {
+            MagicMode::Off
+        } else {
+            MagicMode::On
+        };
         window.focus(&self.search_input.focus_handle(cx));
         self.update_search(cx);
         cx.notify();
@@ -2926,7 +3141,12 @@ impl Workspace {
 
     /// Open the scope dropdown anchored at the click position (same
     /// overlay pattern as the context menu).
-    fn open_scope_menu(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+    fn open_scope_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         self.scope_menu = Some(Self::clamped_menu_position(position, 88., window));
         cx.notify();
     }
@@ -2984,7 +3204,8 @@ impl Workspace {
         // the arena read lock to produce them. Without it, a burst of
         // per-keystroke searches on a large index piles up and convoys
         // with the FS writer — measured at multi-second stalls.
-        self.search_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.search_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.search_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         // Coalesce the burst. Dropping the previous task cancels its
         // timer, so an N-character word costs one scan, not N.
@@ -3087,8 +3308,11 @@ impl Workspace {
                     self.search_selection.clear();
                     return;
                 }
-                let filters =
-                    parsed.filters.into_iter().chain(expansion.filters()).collect::<Vec<_>>();
+                let filters = parsed
+                    .filters
+                    .into_iter()
+                    .chain(expansion.filters())
+                    .collect::<Vec<_>>();
                 (text, filters, SEARCH_RESULT_LIMIT)
             }
         };
@@ -3164,18 +3388,20 @@ impl Workspace {
                         // matches. Closing it means adding the kind to the
                         // IPC hit; until then Magic is only fully safe on
                         // the local index.
-                        client.search(&text, &index_filters, limit as u32).map(|hits| {
-                            let rows = hits
-                                .into_iter()
-                                .map(|hit| SearchRow {
-                                    name: hit.name.into(),
-                                    path_label: hit.path.display().to_string().into(),
-                                    is_dir: hit.is_dir,
-                                    target: hit.path,
-                                })
-                                .collect();
-                            filter_rows_by_tags(rows, &store, &tags_required)
-                        })
+                        client
+                            .search(&text, &index_filters, limit as u32)
+                            .map(|hits| {
+                                let rows = hits
+                                    .into_iter()
+                                    .map(|hit| SearchRow {
+                                        name: hit.name.into(),
+                                        path_label: hit.path.display().to_string().into(),
+                                        is_dir: hit.is_dir,
+                                        target: hit.path,
+                                    })
+                                    .collect();
+                                filter_rows_by_tags(rows, &store, &tags_required)
+                            })
                     })
                     .await;
                 this.update(cx, |this, cx| {
@@ -3202,8 +3428,11 @@ impl Workspace {
             return;
         }
 
-        let indexes: Vec<SharedIndex> =
-            self.roots.iter().filter_map(RootSlot::ready_index).collect();
+        let indexes: Vec<SharedIndex> = self
+            .roots
+            .iter()
+            .filter_map(RootSlot::ready_index)
+            .collect();
         if indexes.is_empty() {
             return; // still building; root readiness re-runs the query
         }
@@ -3299,9 +3528,14 @@ impl Workspace {
     /// one-past-the-cap fetch is what lets `build` distinguish "1000
     /// files, reviewable" from "more than we will act on blind".
     fn rebuild_magic_plan(&mut self) {
-        let Some(state) = self.magic.as_mut() else { return };
+        let Some(state) = self.magic.as_mut() else {
+            return;
+        };
         let matches: Vec<PathBuf> = self.results.iter().map(|row| row.target.clone()).collect();
-        let ctx = filex::magic::PlanContext { cwd: &self.cwd, dirs: &self.user_dirs };
+        let ctx = filex::magic::PlanContext {
+            cwd: &self.cwd,
+            dirs: &self.user_dirs,
+        };
         let outcome = filex::magic::build(&state.command, &matches, &ctx);
         // Only re-tick when the plan actually changed. This runs on every
         // filesystem event burst, not just on a new query, so rebuilding
@@ -3388,7 +3622,11 @@ impl Workspace {
         let theme = *cx.theme();
         let segments = path_segments(&self.cwd);
         let elide = segments.len() > MAX_SEGMENTS;
-        let tail_start = if elide { segments.len() - TAIL_SEGMENTS } else { usize::MAX };
+        let tail_start = if elide {
+            segments.len() - TAIL_SEGMENTS
+        } else {
+            usize::MAX
+        };
 
         let mut children: Vec<gpui::AnyElement> = Vec::new();
         for (ix, (label, target)) in segments.into_iter().enumerate() {
@@ -3445,8 +3683,17 @@ impl Workspace {
     /// breadcrumbs, then the search box pinned to the right.
     fn render_top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let (can_back, can_forward) = (!self.history_back.is_empty(), !self.history_forward.is_empty());
-        let dim = |enabled: bool| if enabled { theme.text_dim } else { theme.border };
+        let (can_back, can_forward) = (
+            !self.history_back.is_empty(),
+            !self.history_forward.is_empty(),
+        );
+        let dim = |enabled: bool| {
+            if enabled {
+                theme.text_dim
+            } else {
+                theme.border
+            }
+        };
         // Left: the navigation controls followed by the path, taking the
         // flexible share so a long breadcrumb trail eats into the gap
         // before the search box (which keeps its fixed width on the right).
@@ -3458,12 +3705,22 @@ impl Workspace {
             .gap_1()
             .overflow_hidden()
             .child(
-                ui::top_bar::toolbar_button(&theme, "refresh", "icons/refresh-cw.svg", theme.text_dim)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.reload_dir(cx))),
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "refresh",
+                    "icons/refresh-cw.svg",
+                    theme.text_dim,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.reload_dir(cx))),
             )
             .child(
-                ui::top_bar::toolbar_button(&theme, "back", "icons/chevron-left.svg", dim(can_back))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_back(cx))),
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "back",
+                    "icons/chevron-left.svg",
+                    dim(can_back),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_back(cx))),
             )
             .child(
                 ui::top_bar::toolbar_button(
@@ -3507,11 +3764,13 @@ impl Workspace {
                     ),
                 )
                 .child(div().flex_1().min_w_0().child(self.search_input.clone()))
-                .child(ui::top_bar::magic_toggle(&theme, self.in_magic_view()).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.toggle_magic_mode(window, cx);
-                    }),
-                )),
+                .child(
+                    ui::top_bar::magic_toggle(&theme, self.in_magic_view()).on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.toggle_magic_mode(window, cx);
+                        },
+                    )),
+                ),
         );
 
         ui::top_bar::top_bar(&theme).child(left).child(search)
@@ -3531,9 +3790,10 @@ impl Workspace {
             Some(path) => format!("saved to {}", path.display()).into(),
             None => "no config directory found — settings won't persist".into(),
         };
-        let close = ui::top_bar::toolbar_button(&theme, "settings-close", "icons/x.svg", theme.text_dim)
-            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
-            .into_any_element();
+        let close =
+            ui::top_bar::toolbar_button(&theme, "settings-close", "icons/x.svg", theme.text_dim)
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
+                .into_any_element();
         let card = ui::settings_pane::settings_card(&theme, "settings-panel")
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(ui::settings_pane::card_header(&theme, "Settings", close))
@@ -3692,12 +3952,15 @@ impl Workspace {
         // Building spins (indexing is live); ready/failed are static.
         // Sidebar rows aren't virtualized, so animating here is fine.
         let marker = match &slot.state {
-            RootState::Building => {
-                ui::icon::spinner("icons/loader-circle.svg", theme.text_dim, 14., ("root-spin", ix))
-            }
-            RootState::Ready { .. } => {
-                ui::icon::ui_icon("icons/dot.svg", theme.accent).size(px(14.)).into_any_element()
-            }
+            RootState::Building => ui::icon::spinner(
+                "icons/loader-circle.svg",
+                theme.text_dim,
+                14.,
+                ("root-spin", ix),
+            ),
+            RootState::Ready { .. } => ui::icon::ui_icon("icons/dot.svg", theme.accent)
+                .size(px(14.))
+                .into_any_element(),
             RootState::Failed(_) => ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn)
                 .size(px(14.))
                 .into_any_element(),
@@ -3714,15 +3977,15 @@ impl Workspace {
                     this.open_root_menu(menu_path.clone(), event.position, window, cx);
                 }),
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                match &failure {
+            .on_click(
+                cx.listener(move |this, _: &ClickEvent, _window, cx| match &failure {
                     Some(err) => {
                         this.notice = Some(err.clone());
                         cx.notify();
                     }
                     None => this.navigate(path.clone(), cx),
-                }
-            }))
+                }),
+            )
     }
 
     /// Navigate a recent folder, or open a recent file with its default
@@ -3757,8 +4020,13 @@ impl Workspace {
         let theme = *cx.theme();
         let favorites = self.settings.read(cx).settings().favorites.clone();
 
-        let mut content =
-            div().id("sidebar-scroll").flex().flex_col().flex_1().min_h_0().overflow_y_scroll();
+        let mut content = div()
+            .id("sidebar-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
 
         // PLACES.
         let (header, collapsed) = self.section_header(&theme, "places", "PLACES", cx);
@@ -3817,8 +4085,8 @@ impl Workspace {
             let (header, collapsed) = self.section_header(&theme, "recents", "RECENTS", cx);
             content = content.child(header);
             if !collapsed {
-                content = content.children(self.recents.recent_paths().enumerate().map(
-                    |(ix, path)| {
+                content =
+                    content.children(self.recents.recent_paths().enumerate().map(|(ix, path)| {
                         let path = path.to_path_buf();
                         let label = path
                             .file_name()
@@ -3827,13 +4095,14 @@ impl Workspace {
                         let tip = path.display().to_string();
                         ui::sidebar::sidebar_row(&theme, ("recent", ix))
                             .tooltip(ui::tooltip::text_tooltip(tip, theme))
-                            .child(ui::icon::ui_icon("icons/clock.svg", theme.text_dim).size(px(14.)))
+                            .child(
+                                ui::icon::ui_icon("icons/clock.svg", theme.text_dim).size(px(14.)),
+                            )
                             .child(ui::sidebar::sidebar_label(label))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.open_recent(path.clone(), cx);
                             }))
-                    },
-                ));
+                    }));
                 content = content.child(
                     ui::sidebar::sidebar_row(&theme, "recents-clear")
                         .text_color(theme.text_dim)
@@ -3852,8 +4121,8 @@ impl Workspace {
             let (header, collapsed) = self.section_header(&theme, "tags", "TAGS", cx);
             content = content.child(header);
             if !collapsed {
-                content = content.children(self.sidebar_tags.iter().enumerate().map(
-                    |(ix, tag)| {
+                content =
+                    content.children(self.sidebar_tags.iter().enumerate().map(|(ix, tag)| {
                         let name = tag.name.clone();
                         let dot = ui::details::tag_dot_color(&theme, tag.color);
                         ui::sidebar::sidebar_row(&theme, ("tag", ix))
@@ -3863,8 +4132,7 @@ impl Workspace {
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 this.search_tag(name.clone(), window, cx);
                             }))
-                    },
-                ));
+                    }));
             }
         }
 
@@ -4119,7 +4387,13 @@ impl Workspace {
             .tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
             .child(ui::grid::card_icon_area(size).child(icon))
             .child(ui::grid::card_name(theme, size).child(name))
-            .child(div().flex_none().text_xs().text_color(theme.text_dim).child(detail))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.text_dim)
+                    .child(detail),
+            )
             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                 if event.click_count() >= 2 {
                     this.activate(ix, cx);
@@ -4138,7 +4412,11 @@ impl Workspace {
                 cx.new(|_| items.clone().at(position))
             })
         });
-        let card = if is_dir { self.folder_drop_target(card, path, *theme, cx) } else { card };
+        let card = if is_dir {
+            self.folder_drop_target(card, path, *theme, cx)
+        } else {
+            card
+        };
         card.into_any_element()
     }
 
@@ -4150,8 +4428,8 @@ impl Workspace {
                 let theme = *cx.theme();
                 range
                     .filter_map(|ix| {
-        // Copy row data out first: the icon cell needs &mut self (it may
-        // schedule a thumbnail decode) while `entry` borrows self.
+                        // Copy row data out first: the icon cell needs &mut self (it may
+                        // schedule a thumbnail decode) while `entry` borrows self.
                         let entry = this.entries.get(ix)?;
                         let is_dir = entry.is_dir;
                         let size = entry.size;
@@ -4159,7 +4437,8 @@ impl Workspace {
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let name_tip: SharedString = name.clone().into();
-                        let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
+                        let icon =
+                            this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
                         let rename_input = this
                             .renaming
                             .as_ref()
@@ -4199,7 +4478,11 @@ impl Workspace {
                             .child(ui::list_row::detail_cell(
                                 &theme,
                                 ui::list_row::SIZE_COL_WIDTH,
-                                if is_dir { "—".to_string() } else { format_size(size) },
+                                if is_dir {
+                                    "—".to_string()
+                                } else {
+                                    format_size(size)
+                                },
                             ))
                             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                                 if event.click_count() >= 2 {
@@ -4245,7 +4528,8 @@ impl Workspace {
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
-                        let icon = this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
+                        let icon =
+                            this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
                         Some(
                             ui::list_row::list_row(&theme, ix, is_selected)
                                 // Full path on hover — the row truncates it below.
@@ -4266,13 +4550,15 @@ impl Workspace {
                                             .child(path_label),
                                     ),
                                 )
-                                .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
-                                    if event.click_count() >= 2 {
-                                        this.activate(ix, cx);
-                                    } else {
-                                        this.select_click(ix, event.modifiers(), cx);
-                                    }
-                                }))
+                                .on_click(cx.listener(
+                                    move |this, event: &ClickEvent, _window, cx| {
+                                        if event.click_count() >= 2 {
+                                            this.activate(ix, cx);
+                                        } else {
+                                            this.select_click(ix, event.modifiers(), cx);
+                                        }
+                                    },
+                                ))
                                 .on_mouse_down(
                                     MouseButton::Right,
                                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -4291,7 +4577,10 @@ impl Workspace {
     fn render_search_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = *cx.theme();
         if !self.any_root_ready() {
-            return ui::pane::empty_state(&theme, "still indexing — results will appear when ready…");
+            return ui::pane::empty_state(
+                &theme,
+                "still indexing — results will appear when ready…",
+            );
         }
         if self.results.is_empty() {
             return ui::pane::empty_state(&theme, format!("no matches for “{}”", self.query));
@@ -4325,7 +4614,9 @@ impl Workspace {
             return;
         }
         let target = if from_search {
-            let Some(row) = self.results.get(ix) else { return };
+            let Some(row) = self.results.get(ix) else {
+                return;
+            };
             MenuTarget::Entry {
                 ix,
                 path: row.target.clone(),
@@ -4334,7 +4625,9 @@ impl Workspace {
                 from_search,
             }
         } else {
-            let Some(entry) = self.entries.get(ix) else { return };
+            let Some(entry) = self.entries.get(ix) else {
+                return;
+            };
             MenuTarget::Entry {
                 ix,
                 path: entry.path.clone(),
@@ -4432,7 +4725,13 @@ impl Workspace {
         let theme = *cx.theme();
         let mut items: Vec<gpui::AnyElement> = Vec::new();
         match &menu.target {
-            MenuTarget::Entry { ix, path, name, is_dir, from_search } => {
+            MenuTarget::Entry {
+                ix,
+                path,
+                name,
+                is_dir,
+                from_search,
+            } => {
                 let (ix, is_dir, from_search) = (*ix, *is_dir, *from_search);
                 // The whole selection is the target; single-item-only
                 // actions (open, rename, reveal, index) drop out when
@@ -4515,7 +4814,11 @@ impl Workspace {
                 if count <= 1 && is_dir {
                     let pinned = self.is_favorite(path, cx);
                     let p = path.clone();
-                    let label = if pinned { "Unpin from Sidebar" } else { "Pin to Sidebar" };
+                    let label = if pinned {
+                        "Unpin from Sidebar"
+                    } else {
+                        "Pin to Sidebar"
+                    };
                     items.push(
                         ui::menu::item(&theme, "menu-pin", label, false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -4540,8 +4843,10 @@ impl Workspace {
                 );
             }
             MenuTarget::Root { path } => {
-                let label =
-                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let label = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 items.push(ui::menu::heading(&theme, label).into_any_element());
                 let p = path.clone();
                 items.push(
@@ -4554,8 +4859,10 @@ impl Workspace {
                 );
             }
             MenuTarget::Favorite { path } => {
-                let label =
-                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let label = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 items.push(ui::menu::heading(&theme, label).into_any_element());
                 let p = path.clone();
                 items.push(
@@ -4606,7 +4913,12 @@ impl Workspace {
     fn render_conflict_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let conflict = self.conflict.as_ref()?;
         let theme = *cx.theme();
-        let name = conflict.dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = conflict
+            .dest
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         Some(
             ui::modal::backdrop("conflict-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -4615,7 +4927,10 @@ impl Workspace {
                 .child(
                     ui::modal::panel(&theme, "conflict-panel")
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(ui::modal::title(&theme, format!("“{name}” already exists here")))
+                        .child(ui::modal::title(
+                            &theme,
+                            format!("“{name}” already exists here"),
+                        ))
                         .child(ui::modal::message(
                             &theme,
                             "Nothing is overwritten: keep both renames the new one to a \
@@ -4719,11 +5034,13 @@ impl Workspace {
             );
         }
         let cwd = self.cwd.clone();
-        tabs = tabs.child(ui::tabs::new_tab_button(&theme, "new-tab").on_click(cx.listener(
-            move |this, _: &ClickEvent, _window, cx| {
-                this.open_tab(cwd.clone(), cx);
-            },
-        )));
+        tabs = tabs.child(
+            ui::tabs::new_tab_button(&theme, "new-tab").on_click(cx.listener(
+                move |this, _: &ClickEvent, _window, cx| {
+                    this.open_tab(cwd.clone(), cx);
+                },
+            )),
+        );
 
         let icons = div()
             .flex()
@@ -4733,18 +5050,26 @@ impl Workspace {
             // Grid-only zoom stepper.
             .children(is_grid.then(|| {
                 ui::top_bar::toolbar_button(&theme, "zoom-out", "icons/minus.svg", theme.text_dim)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(-1, cx)))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(-1, cx)),
+                    )
             }))
             .children(is_grid.then(|| {
                 ui::top_bar::toolbar_button(&theme, "zoom-in", "icons/plus.svg", theme.text_dim)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(1, cx)))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _window, cx| this.zoom_grid(1, cx)),
+                    )
             }))
             // List ⇄ grid toggle: shows the layout it switches to.
             .child(
                 ui::top_bar::toolbar_button(
                     &theme,
                     "view-toggle",
-                    if is_grid { "icons/list.svg" } else { "icons/layout-grid.svg" },
+                    if is_grid {
+                        "icons/list.svg"
+                    } else {
+                        "icons/layout-grid.svg"
+                    },
                     theme.text_dim,
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_view(cx))),
@@ -4755,7 +5080,11 @@ impl Workspace {
                     &theme,
                     "preview-toggle",
                     "icons/panel-right.svg",
-                    if preview_open { theme.accent } else { theme.text_dim },
+                    if preview_open {
+                        theme.accent
+                    } else {
+                        theme.text_dim
+                    },
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_preview(cx))),
             )
@@ -4764,12 +5093,21 @@ impl Workspace {
                     &theme,
                     "settings",
                     "icons/settings.svg",
-                    if self.settings_open { theme.accent } else { theme.text_dim },
+                    if self.settings_open {
+                        theme.accent
+                    } else {
+                        theme.text_dim
+                    },
                 )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx))),
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)),
+                ),
             );
 
-        ui::tabs::tab_bar(&theme).child(tabs).child(icons).into_any_element()
+        ui::tabs::tab_bar(&theme)
+            .child(tabs)
+            .child(icons)
+            .into_any_element()
     }
 
     /// The right-hand details/preview panel for the lead item. `None`
@@ -4812,8 +5150,11 @@ impl Workspace {
             Some(m) => format_modified(m.created, now).into(),
             None => "…".into(),
         };
-        let where_value: SharedString =
-            path.parent().map(|p| p.display().to_string()).unwrap_or_default().into();
+        let where_value: SharedString = path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+            .into();
 
         let mut panel = ui::details::panel(&theme, width)
             .child(ui::details::preview_box(&theme).child(preview))
@@ -4824,7 +5165,11 @@ impl Workspace {
             .child(ui::details::meta_row(&theme, "Modified", modified_value))
             .child(ui::details::meta_row(&theme, "Created", created_value));
         if let Some((w, h)) = meta.and_then(|m| m.dimensions) {
-            panel = panel.child(ui::details::meta_row(&theme, "Dimensions", format!("{w} × {h}")));
+            panel = panel.child(ui::details::meta_row(
+                &theme,
+                "Dimensions",
+                format!("{w} × {h}"),
+            ));
         }
         let panel = panel
             .child(ui::details::divider(&theme))
@@ -4852,9 +5197,9 @@ impl Workspace {
                     })),
             );
         }
-        chips = chips.child(ui::details::add_tag_chip(theme, "tag-add").on_click(cx.listener(
-            |this, _: &ClickEvent, window, cx| this.open_tag_editor(None, window, cx),
-        )));
+        chips = chips.child(ui::details::add_tag_chip(theme, "tag-add").on_click(
+            cx.listener(|this, _: &ClickEvent, window, cx| this.open_tag_editor(None, window, cx)),
+        ));
 
         let mut section = div()
             .flex()
@@ -4909,25 +5254,36 @@ impl Workspace {
         }
 
         let mut footer = div().flex().items_center().gap_2().child(
-            ui::details::tag_button(theme, "tag-save", if is_existing { "Save" } else { "Add" }, false)
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.commit_tag_editor(window, cx);
-                })),
+            ui::details::tag_button(
+                theme,
+                "tag-save",
+                if is_existing { "Save" } else { "Add" },
+                false,
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.commit_tag_editor(window, cx);
+            })),
         );
         if is_existing {
             footer = footer.child(
-                ui::details::tag_button(theme, "tag-remove", "Remove", true).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                ui::details::tag_button(theme, "tag-remove", "Remove", true).on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
                         this.remove_editing_tag(window, cx);
-                    }),
-                ),
+                    },
+                )),
             );
         }
-        footer = footer.child(ui::details::tag_button(theme, "tag-cancel", "Cancel", false).on_click(
-            cx.listener(|this, _: &ClickEvent, window, cx| this.cancel_tag_editor(window, cx)),
-        ));
+        footer = footer.child(
+            ui::details::tag_button(theme, "tag-cancel", "Cancel", false).on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.cancel_tag_editor(window, cx)),
+            ),
+        );
 
-        ui::details::tag_editor_box(theme).child(input_box).child(swatches).child(footer).into_any_element()
+        ui::details::tag_editor_box(theme)
+            .child(input_box)
+            .child(swatches)
+            .child(footer)
+            .into_any_element()
     }
 }
 
@@ -4985,20 +5341,24 @@ impl Render for Workspace {
                 this.paste_clipboard(cx);
             }))
             // cmd-a while the input is empty selects every row.
-            .on_action(cx.listener(|this, _: &search_input::SelectAll, _window, cx| {
-                this.select_all(cx);
-            }))
+            .on_action(
+                cx.listener(|this, _: &search_input::SelectAll, _window, cx| {
+                    this.select_all(cx);
+                }),
+            )
             // Escape, bubbled by the empty input: close whatever is
             // topmost — conflict dialog first, then the settings pane.
-            .on_action(cx.listener(|this, _: &search_input::ClearInput, _window, cx| {
-                if this.context_menu.is_some() {
-                    this.close_menu(cx);
-                } else if this.conflict.is_some() {
-                    this.resolve_conflict(false, cx);
-                } else if this.settings_open {
-                    this.toggle_settings(cx);
-                }
-            }))
+            .on_action(
+                cx.listener(|this, _: &search_input::ClearInput, _window, cx| {
+                    if this.context_menu.is_some() {
+                        this.close_menu(cx);
+                    } else if this.conflict.is_some() {
+                        this.resolve_conflict(false, cx);
+                    } else if this.settings_open {
+                        this.toggle_settings(cx);
+                    }
+                }),
+            )
             .on_action(cx.listener(|this, _: &Undo, _window, cx| {
                 this.undo_last(cx);
             }))
@@ -5032,7 +5392,11 @@ impl Render for Workspace {
                     } else {
                         self.render_browse_pane(window, cx)
                     })
-                    .children((!self.in_magic_view()).then(|| self.render_details_panel(cx)).flatten()),
+                    .children(
+                        (!self.in_magic_view())
+                            .then(|| self.render_details_panel(cx))
+                            .flatten(),
+                    ),
             )
             .children(self.render_jobs(cx))
             .children(self.render_update_banner(cx))
@@ -5056,137 +5420,142 @@ fn main() {
         "filex starting — slow operations (>{SLOW_OP_MS}ms) log at warn; \
          set RUST_LOG=filex=debug for per-scan timing"
     );
-    Application::new().with_assets(ui::assets::Assets).run(|cx: &mut App| {
-        // Register the bundled UI font before anything renders.
-        ui::fonts::register(cx);
-        // A default theme so `cx.theme()` is valid from the first frame;
-        // the workspace refines it against the real window appearance as
-        // soon as a window exists (see the open-window closure below).
-        cx.set_global(Theme::dark());
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-q", Quit, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-w", CloseTab, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-t", NewTab, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-up", GoUp, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-[", GoBack, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-]", GoForward, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-r", Refresh, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-,", ToggleSettings, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-i", TogglePreview, None),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-z", Undo, None),
-            // Finder's delete shortcut. Plain Delete can't work here:
-            // the always-focused search input consumes it as text
-            // editing.
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-backspace", DeleteSelected, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-q", Quit, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-w", CloseTab, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-t", NewTab, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("alt-up", GoUp, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("alt-left", GoBack, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("alt-right", GoForward, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-r", Refresh, None),
-            // F5 refreshes on every platform (Explorer convention).
-            KeyBinding::new("f5", Refresh, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-,", ToggleSettings, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-i", TogglePreview, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-z", Undo, None),
-            // Not plain Delete: the always-focused search input
-            // consumes that for text editing.
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-delete", DeleteSelected, None),
-            // Tab cycling is ctrl-tab on every platform.
-            KeyBinding::new("ctrl-tab", NextTab, None),
-            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-            KeyBinding::new("f2", RenameSelected, None),
-        ]);
-        search_input::bind_keys(cx);
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+    Application::new()
+        .with_assets(ui::assets::Assets)
+        .run(|cx: &mut App| {
+            // Register the bundled UI font before anything renders.
+            ui::fonts::register(cx);
+            // A default theme so `cx.theme()` is valid from the first frame;
+            // the workspace refines it against the real window appearance as
+            // soon as a window exists (see the open-window closure below).
+            cx.set_global(Theme::dark());
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.bind_keys([
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-q", Quit, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-w", CloseTab, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-t", NewTab, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-up", GoUp, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-[", GoBack, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-]", GoForward, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-r", Refresh, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-,", ToggleSettings, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-i", TogglePreview, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-z", Undo, None),
+                // Finder's delete shortcut. Plain Delete can't work here:
+                // the always-focused search input consumes it as text
+                // editing.
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-backspace", DeleteSelected, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-q", Quit, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-w", CloseTab, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-t", NewTab, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("alt-up", GoUp, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("alt-left", GoBack, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("alt-right", GoForward, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-r", Refresh, None),
+                // F5 refreshes on every platform (Explorer convention).
+                KeyBinding::new("f5", Refresh, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-,", ToggleSettings, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-i", TogglePreview, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-z", Undo, None),
+                // Not plain Delete: the always-focused search input
+                // consumes that for text editing.
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-delete", DeleteSelected, None),
+                // Tab cycling is ctrl-tab on every platform.
+                KeyBinding::new("ctrl-tab", NextTab, None),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+                KeyBinding::new("f2", RenameSelected, None),
+            ]);
+            search_input::bind_keys(cx);
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
-        let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
-        // macOS: unified-titlebar look — the system titlebar goes
-        // transparent and the traffic lights sit inset in our top bar
-        // (which pads left to clear them). Elsewhere the native
-        // titlebar stays.
-        #[cfg(target_os = "macos")]
-        let titlebar = TitlebarOptions {
-            title: None,
-            appears_transparent: true,
-            // The tab bar is now the topmost bar, so the inset traffic
-            // lights are centered against its height, not the nav bar's.
-            traffic_light_position: Some(gpui::point(
-                px(12.),
-                px((ui::tabs::TAB_BAR_HEIGHT - 12.) / 2.),
-            )),
-        };
-        #[cfg(not(target_os = "macos"))]
-        let titlebar = TitlebarOptions { title: Some("filex".into()), ..Default::default() };
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(titlebar),
+            let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
+            // macOS: unified-titlebar look — the system titlebar goes
+            // transparent and the traffic lights sit inset in our top bar
+            // (which pads left to clear them). Elsewhere the native
+            // titlebar stays.
+            #[cfg(target_os = "macos")]
+            let titlebar = TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                // The tab bar is now the topmost bar, so the inset traffic
+                // lights are centered against its height, not the nav bar's.
+                traffic_light_position: Some(gpui::point(
+                    px(12.),
+                    px((ui::tabs::TAB_BAR_HEIGHT - 12.) / 2.),
+                )),
+            };
+            #[cfg(not(target_os = "macos"))]
+            let titlebar = TitlebarOptions {
+                title: Some("filex".into()),
                 ..Default::default()
-            },
-            |window, cx| {
-                cx.activate(true);
-                let workspace = cx.new(|cx| {
-                    let workspace = Workspace::new(cx);
-                    // Focus the input so typing searches immediately;
-                    // navigation keys bubble up to the workspace.
-                    window.focus(&workspace.search_input.focus_handle(cx));
+            };
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(titlebar),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.activate(true);
+                    let workspace = cx.new(|cx| {
+                        let workspace = Workspace::new(cx);
+                        // Focus the input so typing searches immediately;
+                        // navigation keys bubble up to the workspace.
+                        window.focus(&workspace.search_input.focus_handle(cx));
+                        workspace
+                    });
+                    // A window now exists, so its OS appearance is known:
+                    // resolve the theme against it, and keep it in sync as
+                    // the user flips the OS between light and dark.
+                    workspace.update(cx, |ws, cx| {
+                        ws.appearance = window.appearance();
+                        ws.apply_theme(cx);
+                    });
+                    window
+                        .observe_window_appearance({
+                            let workspace = workspace.downgrade();
+                            move |window, cx| {
+                                workspace
+                                    .update(cx, |ws, cx| {
+                                        ws.appearance = window.appearance();
+                                        ws.apply_theme(cx);
+                                    })
+                                    .ok();
+                            }
+                        })
+                        .detach();
                     workspace
-                });
-                // A window now exists, so its OS appearance is known:
-                // resolve the theme against it, and keep it in sync as
-                // the user flips the OS between light and dark.
-                workspace.update(cx, |ws, cx| {
-                    ws.appearance = window.appearance();
-                    ws.apply_theme(cx);
-                });
-                window
-                    .observe_window_appearance({
-                        let workspace = workspace.downgrade();
-                        move |window, cx| {
-                            workspace
-                                .update(cx, |ws, cx| {
-                                    ws.appearance = window.appearance();
-                                    ws.apply_theme(cx);
-                                })
-                                .ok();
-                        }
-                    })
-                    .detach();
-                workspace
-            },
-        )
-        .expect("failed to open the main window");
-    });
+                },
+            )
+            .expect("failed to open the main window");
+        });
 }
 
 #[cfg(test)]
@@ -5208,7 +5577,10 @@ mod magic_ui_tests {
         }
         // Subsequence-matches "gravloc" (g-r-a-v-l-o-c) but shares no
         // substring with it — exactly the shape that polluted the plan.
-        for name in ["xstate-graph.development.cjs.js", "generate_umath_validation.cpp"] {
+        for name in [
+            "xstate-graph.development.cjs.js",
+            "generate_umath_validation.cpp",
+        ] {
             index.insert(ROOT, name, false).unwrap();
         }
 
@@ -5218,11 +5590,24 @@ mod magic_ui_tests {
             "fixture must actually produce fuzzy hits, or this proves nothing"
         );
 
-        let planned = hits.iter().filter(|h| usable_in_plan(h.score.kind, true)).count();
-        let searched = hits.iter().filter(|h| usable_in_plan(h.score.kind, false)).count();
+        let planned = hits
+            .iter()
+            .filter(|h| usable_in_plan(h.score.kind, true))
+            .count();
+        let searched = hits
+            .iter()
+            .filter(|h| usable_in_plan(h.score.kind, false))
+            .count();
 
-        assert_eq!(planned, 3, "only the literal Gravloc matches may be planned");
-        assert_eq!(searched, hits.len(), "ordinary search still shows everything");
+        assert_eq!(
+            planned, 3,
+            "only the literal Gravloc matches may be planned"
+        );
+        assert_eq!(
+            searched,
+            hits.len(),
+            "ordinary search still shows everything"
+        );
     }
 
     fn state(outcome: Result<Plan, filex::magic::PlanError>, checked: Vec<bool>) -> MagicState {
@@ -5235,11 +5620,17 @@ mod magic_ui_tests {
     }
 
     fn plan(ops: Vec<FileOp>) -> Plan {
-        Plan { verb: Verb::Delete, skipped: 0, ops }
+        Plan {
+            verb: Verb::Delete,
+            skipped: 0,
+            ops,
+        }
     }
 
     fn delete(path: &str) -> FileOp {
-        FileOp::Delete { path: PathBuf::from(path) }
+        FileOp::Delete {
+            path: PathBuf::from(path),
+        }
     }
 
     #[test]
@@ -5247,10 +5638,17 @@ mod magic_ui_tests {
         // The whole point of the review step: unchecking a row must keep
         // that file out of the batch that runs.
         let state = state(
-            Ok(plan(vec![delete("/a.png"), delete("/b.png"), delete("/c.png")])),
+            Ok(plan(vec![
+                delete("/a.png"),
+                delete("/b.png"),
+                delete("/c.png"),
+            ])),
             vec![true, false, true],
         );
-        assert_eq!(state.selected_ops(), vec![delete("/a.png"), delete("/c.png")]);
+        assert_eq!(
+            state.selected_ops(),
+            vec![delete("/a.png"), delete("/c.png")]
+        );
     }
 
     #[test]
@@ -5284,18 +5682,30 @@ mod magic_ui_tests {
         assert_eq!(row.name, SharedString::from("shot.png"));
         // The folder the file lives in is shown so identical names in
         // different folders are distinguishable.
-        assert_eq!(row.location.to_string(), Path::new("/photos").display().to_string());
+        assert_eq!(
+            row.location.to_string(),
+            Path::new("/photos").display().to_string()
+        );
         assert_eq!(row.dest, None);
     }
 
     #[test]
     fn transfer_rows_show_source_folder_and_destination_folder() {
-        let op = FileOp::Move { from: "/a/shot.png".into(), to: "/b/Archive/shot.png".into() };
+        let op = FileOp::Move {
+            from: "/a/shot.png".into(),
+            to: "/b/Archive/shot.png".into(),
+        };
         let row = describe_op(&op);
         assert_eq!(row.name, SharedString::from("shot.png"));
-        assert_eq!(row.location.to_string(), Path::new("/a").display().to_string());
+        assert_eq!(
+            row.location.to_string(),
+            Path::new("/a").display().to_string()
+        );
         // Same name at the destination → show the folder, not the file.
-        assert_eq!(row.dest.unwrap().to_string(), format!("→ {}", Path::new("/b/Archive").display()));
+        assert_eq!(
+            row.dest.unwrap().to_string(),
+            format!("→ {}", Path::new("/b/Archive").display())
+        );
     }
 
     #[test]
@@ -5303,14 +5713,23 @@ mod magic_ui_tests {
         // Collision keep-both: the destination name differs from the
         // source, so the whole retargeted path is shown, not just the
         // folder — otherwise the rename would be invisible.
-        let op = FileOp::Move { from: "/a/shot.png".into(), to: "/b/shot 2.png".into() };
+        let op = FileOp::Move {
+            from: "/a/shot.png".into(),
+            to: "/b/shot 2.png".into(),
+        };
         let row = describe_op(&op);
-        assert_eq!(row.dest.unwrap().to_string(), format!("→ {}", Path::new("/b/shot 2.png").display()));
+        assert_eq!(
+            row.dest.unwrap().to_string(),
+            format!("→ {}", Path::new("/b/shot 2.png").display())
+        );
     }
 
     #[test]
     fn rename_rows_show_the_new_name() {
-        let op = FileOp::Rename { path: "/a/img01.png".into(), new_name: "shot-1.png".into() };
+        let op = FileOp::Rename {
+            path: "/a/img01.png".into(),
+            new_name: "shot-1.png".into(),
+        };
         let row = describe_op(&op);
         assert_eq!(row.name, SharedString::from("img01.png"));
         assert_eq!(row.dest.unwrap().to_string(), "→ shot-1.png");
@@ -5331,19 +5750,28 @@ mod drop_target_tests {
 
     #[test]
     fn accepts_a_move_into_a_sibling_folder() {
-        assert!(is_valid_drop(Path::new("/home/user/Archive"), Path::new("/home/user/report.pdf")));
+        assert!(is_valid_drop(
+            Path::new("/home/user/Archive"),
+            Path::new("/home/user/report.pdf")
+        ));
     }
 
     #[test]
     fn rejects_an_item_already_in_the_destination() {
         // The file is already directly inside the target — a move would
         // be a no-op, so the drop must be filtered out.
-        assert!(!is_valid_drop(Path::new("/home/user"), Path::new("/home/user/report.pdf")));
+        assert!(!is_valid_drop(
+            Path::new("/home/user"),
+            Path::new("/home/user/report.pdf")
+        ));
     }
 
     #[test]
     fn rejects_dropping_a_folder_onto_itself() {
-        assert!(!is_valid_drop(Path::new("/home/user/docs"), Path::new("/home/user/docs")));
+        assert!(!is_valid_drop(
+            Path::new("/home/user/docs"),
+            Path::new("/home/user/docs")
+        ));
     }
 
     #[test]
@@ -5357,6 +5785,9 @@ mod drop_target_tests {
     fn allows_moving_a_child_out_to_a_deeper_unrelated_path() {
         // The destination is nested, but not under the source, so it's a
         // legitimate move.
-        assert!(is_valid_drop(Path::new("/a/b/c"), Path::new("/other/file.txt")));
+        assert!(is_valid_drop(
+            Path::new("/a/b/c"),
+            Path::new("/other/file.txt")
+        ));
     }
 }
