@@ -906,11 +906,49 @@ impl Workspace {
         }
         this.spawn_fda_check(cx);
         this.spawn_drive_refresh(cx);
+        #[cfg(feature = "observability")]
+        this.spawn_resource_sampling(cx);
         // macOS/Linux check the manifest themselves (no service); Windows
         // learns of updates from filex-indexd instead.
         #[cfg(all(not(target_os = "windows"), feature = "updater"))]
         this.spawn_update_check(cx);
         this
+    }
+
+    /// Sample memory use on a slow timer for the observability backend: the
+    /// index arena bytes (the filex-controlled figure behind the memory
+    /// question) plus process RSS. Ready-root index handles are cloned on
+    /// the UI thread; the `approx_bytes` walk and the send run off it.
+    #[cfg(feature = "observability")]
+    fn spawn_resource_sampling(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let handles = this.update(cx, |this, _cx| {
+                    this.roots
+                        .iter()
+                        .filter_map(|slot| slot.ready_index())
+                        .collect::<Vec<_>>()
+                });
+                let Ok(handles) = handles else {
+                    break; // workspace dropped
+                };
+                let roots = handles.len();
+                let arena_bytes = cx
+                    .background_executor()
+                    .spawn(async move {
+                        handles
+                            .iter()
+                            .map(|index| read_index(index).approx_bytes() as u64)
+                            .sum::<u64>()
+                    })
+                    .await;
+                filex::observability::record_resource_sample(arena_bytes, roots);
+            }
+        })
+        .detach();
     }
 
     /// Refresh the mounted-volume list on a slow timer (drives change
@@ -1168,13 +1206,25 @@ impl Workspace {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        start_live_index(&path, move || {
+                        #[cfg(feature = "observability")]
+                        let started = std::time::Instant::now();
+                        let result = start_live_index(&path, move || {
                             change_tx.unbounded_send(()).ok();
                         })
                         .map(|live| {
                             let files = read_index(&live.index).len();
                             (live, files)
-                        })
+                        });
+                        // Report how long this root's initial whole-drive
+                        // walk took (once per root, off the UI thread).
+                        #[cfg(feature = "observability")]
+                        if let Ok((_, files)) = &result {
+                            filex::observability::record_index_bootstrap(
+                                started.elapsed().as_millis() as u64,
+                                *files,
+                            );
+                        }
+                        result
                     }
                 })
                 .await;
@@ -3618,6 +3668,11 @@ impl Workspace {
                             elapsed_ms,
                             "slow search — scan or lock wait over budget"
                         );
+                        // Only the slow scans are sampled to Sentry — the
+                        // ones worth investigating — so search-as-you-type
+                        // never pays a per-keystroke measurement cost.
+                        #[cfg(feature = "observability")]
+                        filex::observability::record_search_latency(elapsed_ms, rows.len());
                     } else {
                         tracing::debug!(query = %text, limit, hits = rows.len(), elapsed_ms, "index scan");
                     }

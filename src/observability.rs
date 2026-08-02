@@ -148,6 +148,80 @@ pub fn drain_crashes_to_sentry(dir: &std::path::Path) -> usize {
     })
 }
 
+// --- Measurements (stage 3) ------------------------------------------------
+//
+// Numeric samples are sent as scrubbed *info events* carrying the values in
+// `extra`, not as performance transactions: events are robust and need no
+// tracing-sampling setup, and they still answer the question ("what are the
+// numbers on real machines?"). The trade is Sentry's native Performance UI
+// — if that's wanted later, these become transaction measurements.
+
+/// Build a measurement event: an info-level event named `name` whose
+/// `extra` carries the numeric `fields`. Pure, so the shape is testable.
+fn measurement_event(name: &str, fields: &[(&str, f64)]) -> Event<'static> {
+    let mut event = Event {
+        level: Level::Info,
+        message: Some(name.to_string()),
+        logger: Some("measurement".into()),
+        ..Default::default()
+    };
+    for (key, value) in fields {
+        event.extra.insert((*key).into(), (*value).into());
+    }
+    event
+}
+
+/// Capture a measurement, but only when a client is actually bound — no
+/// point building an event that goes nowhere.
+fn record_measurement(name: &str, fields: &[(&str, f64)]) {
+    if sentry::Hub::current().client().is_some() {
+        sentry::capture_event(measurement_event(name, fields));
+    }
+}
+
+/// Resident set size of this process, or `None` if the OS query fails.
+fn process_rss_bytes() -> Option<u64> {
+    memory_stats::memory_stats().map(|stats| stats.physical_mem as u64)
+}
+
+/// Sample resource use: the index arena bytes (the filex-controlled figure
+/// behind #2) plus total process RSS. Called on a slow timer.
+pub fn record_resource_sample(arena_bytes: u64, roots: usize) {
+    let mut fields = vec![
+        ("index.arena_bytes", arena_bytes as f64),
+        ("index.roots", roots as f64),
+    ];
+    if let Some(rss) = process_rss_bytes() {
+        fields.push(("process.rss_bytes", rss as f64));
+    }
+    record_measurement("measurement.resource", &fields);
+}
+
+/// Record a search-as-you-type latency sample. Callers should only invoke
+/// this for slow scans (above the slow-op threshold) so the volume stays
+/// low and the hot path is never burdened per keystroke.
+pub fn record_search_latency(elapsed_ms: u64, results: usize) {
+    record_measurement(
+        "measurement.search",
+        &[
+            ("search.latency_ms", elapsed_ms as f64),
+            ("search.results", results as f64),
+        ],
+    );
+}
+
+/// Record how long one root's initial index bootstrap (the whole-drive
+/// walk) took. Low volume — once per root at startup.
+pub fn record_index_bootstrap(elapsed_ms: u64, files: usize) {
+    record_measurement(
+        "measurement.bootstrap",
+        &[
+            ("index.bootstrap_ms", elapsed_ms as f64),
+            ("index.files", files as f64),
+        ],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +269,31 @@ mod tests {
         assert_eq!(exc.value.as_deref(), Some("<path> missing"));
         let frame_path = exc.stacktrace.as_ref().unwrap().frames[0].abs_path.as_deref();
         assert_eq!(frame_path, Some("<path>"));
+    }
+
+    #[test]
+    fn measurement_event_carries_named_numeric_fields() {
+        let event = measurement_event(
+            "measurement.resource",
+            &[("index.arena_bytes", 1234.0), ("index.roots", 2.0)],
+        );
+        assert_eq!(event.level, Level::Info);
+        assert_eq!(event.message.as_deref(), Some("measurement.resource"));
+        assert_eq!(
+            event.extra.get("index.arena_bytes").and_then(Value::as_f64),
+            Some(1234.0)
+        );
+        assert_eq!(
+            event.extra.get("index.roots").and_then(Value::as_f64),
+            Some(2.0)
+        );
+    }
+
+    #[test]
+    fn rss_query_returns_a_positive_value() {
+        // The running test process must have some resident memory.
+        let rss = process_rss_bytes().expect("RSS should be queryable on the test host");
+        assert!(rss > 0);
     }
 
     #[test]
