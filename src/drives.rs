@@ -43,6 +43,17 @@ pub fn list_drives() -> Vec<Drive> {
     platform::list_drives()
 }
 
+/// The roots to index on a fresh install, before the user has configured
+/// any. Windows returns every *fixed* (non-removable, non-network) drive —
+/// the Everything-style whole-machine default. macOS/Linux stay scoped to
+/// the home directory: indexing all of `/` there needs elevated/full-disk
+/// access and would pull in the OS itself, which is not an expected
+/// default. Each platform's indexer sits behind the same trait, so the
+/// rest of the app treats these roots identically.
+pub fn default_index_roots() -> Vec<PathBuf> {
+    platform::default_index_roots()
+}
+
 /// Mount points worth showing from `/proc/mounts` contents: real block
 /// devices (device path starts with `/dev/`), de-duplicated by mount
 /// point, in file order. Pure so it's testable without a real `/proc`.
@@ -108,6 +119,14 @@ mod platform {
         Some(Drive { name, path, total_bytes, free_bytes })
     }
 
+    /// Fresh-install default on Unix: the home directory. Unlike Windows
+    /// (whole fixed drives), indexing all of `/` here needs elevated or
+    /// full-disk access and includes the OS itself, so the default stays
+    /// scoped to the user.
+    pub fn default_index_roots() -> Vec<std::path::PathBuf> {
+        std::env::home_dir().into_iter().collect()
+    }
+
     /// macOS: the user-visible volumes are the mounts under `/Volumes`.
     #[cfg(target_os = "macos")]
     pub fn list_drives() -> Vec<Drive> {
@@ -145,10 +164,42 @@ mod platform {
 mod platform {
     use std::path::PathBuf;
 
-    use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetLogicalDrives};
+    use windows::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+    };
     use windows::core::HSTRING;
 
     use super::Drive;
+
+    /// `DRIVE_FIXED` from `GetDriveTypeW` — a local, non-removable disk.
+    /// Defined here rather than imported: the constant lives in the
+    /// `Win32_System_WindowsProgramming` feature we don't otherwise pull
+    /// in, and its value (3) is stable Win32 ABI.
+    const DRIVE_FIXED: u32 = 3;
+
+    /// Fresh-install default on Windows: every *fixed* drive (internal
+    /// disks), skipping removable and network drives so plugging in a USB
+    /// stick or mapping a share doesn't kick off a whole-volume re-index.
+    /// `GetDriveTypeW` classifies each letter; `DRIVE_FIXED` is the local
+    /// hard-drive case.
+    pub fn default_index_roots() -> Vec<PathBuf> {
+        let mask = unsafe { GetLogicalDrives() };
+        let mut roots = Vec::new();
+        for i in 0..26u32 {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            let letter = (b'A' + i as u8) as char;
+            let root = format!("{letter}:\\");
+            let wide = HSTRING::from(root.as_str());
+            // SAFETY: `wide` is a valid NUL-terminated wide path for the
+            // duration of the call.
+            if unsafe { GetDriveTypeW(&wide) } == DRIVE_FIXED {
+                roots.push(PathBuf::from(&root));
+            }
+        }
+        roots
+    }
 
     /// Windows: each set bit of the logical-drives mask is a letter A–Z.
     pub fn list_drives() -> Vec<Drive> {

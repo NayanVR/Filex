@@ -780,13 +780,14 @@ impl Workspace {
     /// Roots to index: from settings, defaulting to the home directory
     /// on a fresh install.
     fn configured_roots(&self, cx: &App) -> Vec<PathBuf> {
-        let mut configured = self.settings.read(cx).settings().roots.clone();
-        if configured.is_empty()
-            && let Some(home) = std::env::home_dir()
-        {
-            configured.push(home);
+        let configured = self.settings.read(cx).settings().roots.clone();
+        if configured.is_empty() {
+            // Fresh install: index the platform default (all fixed drives
+            // on Windows, the home directory on macOS/Linux).
+            filex::drives::default_index_roots()
+        } else {
+            configured
         }
-        configured
     }
 
     /// Resolve the color theme from the `theme` setting + the current OS

@@ -157,6 +157,61 @@ fn rank_of(score: Score, boost: i64) -> i64 {
     score.penalty as i64 * PENALTY_SCALE + score.name_len as i64 - boost
 }
 
+/// Rank penalty for files under an OS/system directory, applied as a
+/// negative boost. Like the frecency boost it acts *within* a match tier,
+/// never across tiers (the sort keys on [`Score::kind`] first): so a
+/// system file that is an exact match still beats a user file that only
+/// matches loosely — system files are de-prioritized among equals, not
+/// hidden. Sized at the full [`MAX_BOOST`] so it reliably sinks a system
+/// file below a user file of equal match quality, yet stays comparable to
+/// frecency so a genuinely often-opened system file isn't buried absurdly.
+const SYSTEM_PATH_PENALTY: i64 = MAX_BOOST;
+
+/// The top-level directory names (immediately under a drive letter or
+/// `/`) that hold OS/system files — the ones that clog a filename search
+/// without a user ever meaning to open them. Compared case-insensitively.
+#[cfg(target_os = "windows")]
+const SYSTEM_TOP_DIRS: &[&str] = &[
+    "Windows",
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
+    "$Recycle.Bin",
+    "System Volume Information",
+    "$WinREAgent",
+    "Recovery",
+    "PerfLogs",
+];
+#[cfg(target_os = "macos")]
+const SYSTEM_TOP_DIRS: &[&str] = &[
+    "System", "Library", "private", "usr", "bin", "sbin", "cores", "opt", "dev",
+];
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const SYSTEM_TOP_DIRS: &[&str] = &[
+    "proc", "sys", "dev", "run", "boot", "usr", "bin", "sbin", "lib", "lib64", "etc",
+    "var", "opt", "srv",
+];
+
+/// Whether `path` lives under a top-level OS/system directory. A cheap
+/// check on the first real component under the drive/root — case-
+/// insensitive because Windows paths are — run only for the overfetched
+/// candidate set whose paths the frecency stage already materializes, so
+/// it adds no measurable search latency. Pure, so it's unit-tested against
+/// fixture paths per the indexer testing rule.
+fn is_system_path(path: &Path) -> bool {
+    use std::path::Component;
+    // The first "Normal" component skips the drive prefix (`C:`) and the
+    // root separator, landing on the top-level directory name.
+    let Some(top) = path.components().find_map(|c| match c {
+        Component::Normal(name) => Some(name),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let top = top.to_string_lossy();
+    SYSTEM_TOP_DIRS.iter().any(|dir| top.eq_ignore_ascii_case(dir))
+}
+
 /// Search every index and merge by the same ranking a single index uses.
 /// Locks are taken one index at a time, read-only; a poisoned index still
 /// answers.
@@ -246,11 +301,20 @@ pub fn search_all_scoped(
                         return None;
                     }
                     let path = index.path_of(id)?;
-                    let boost = if frecency.is_empty() {
+                    let frecency_boost = if frecency.is_empty() {
                         0
                     } else {
                         boost_for(frecency.get(path.as_path()).copied().unwrap_or(0.0))
                     };
+                    // System files are indexed but de-prioritized within
+                    // their match tier, so they don't crowd out a user's
+                    // own files on a common query (#6).
+                    let boost = frecency_boost
+                        - if is_system_path(&path) {
+                            SYSTEM_PATH_PENALTY
+                        } else {
+                            0
+                        };
                     Some(MergedHit {
                         name: index.name_of(id)?.to_string(),
                         is_dir: index.is_dir(id)?,
@@ -369,6 +433,55 @@ mod tests {
 
     fn names_for(hits: &[MergedHit]) -> Vec<&str> {
         hits.iter().map(|h| h.name.as_str()).collect()
+    }
+
+    #[test]
+    fn system_paths_are_classified_by_top_level_dir() {
+        // A file directly under a user directory is never a system file,
+        // even if a *deeper* directory shares a system name.
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_system_path(Path::new(r"C:\Windows\System32\drivers\x.sys")));
+            assert!(is_system_path(Path::new(r"C:\Program Files\App\a.exe")));
+            assert!(is_system_path(Path::new(r"D:\$Recycle.Bin\x")));
+            assert!(!is_system_path(Path::new(r"C:\Users\me\Documents\notes.txt")));
+            // A user folder named "windows" nested deep is not the OS.
+            assert!(!is_system_path(Path::new(r"C:\Users\me\windows\x.txt")));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            #[cfg(target_os = "macos")]
+            assert!(is_system_path(Path::new("/System/Library/x")));
+            assert!(is_system_path(Path::new("/usr/bin/ls")));
+            assert!(!is_system_path(Path::new("/home/me/usr/notes.txt")));
+            assert!(!is_system_path(Path::new("/Users/me/Documents/notes.txt")));
+        }
+    }
+
+    #[test]
+    fn user_files_outrank_system_files_of_equal_match_quality() {
+        // Same name, same match kind — the only differentiator is the
+        // system-path penalty, so the user's file must come first (#6).
+        #[cfg(target_os = "windows")]
+        let (sys_root, user_root) = (r"C:\Windows", r"C:\Users\me");
+        #[cfg(not(target_os = "windows"))]
+        let (sys_root, user_root) = ("/usr", "/home/me");
+
+        let mut sys = VolumeIndex::new(sys_root);
+        sys.insert(ROOT, "config.txt", false).unwrap();
+        let mut usr = VolumeIndex::new(user_root);
+        usr.insert(ROOT, "config.txt", false).unwrap();
+
+        // Order the system index first so a stable sort can't be what puts
+        // the user file on top — only the penalty can.
+        let hits = search_all(&[shared(sys), shared(usr)], "config.txt", &[], 10, &none());
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits[0].path.starts_with(user_root),
+            "user file should rank first, got {:?}",
+            hits[0].path
+        );
+        assert!(hits[1].path.starts_with(sys_root));
     }
 
     #[test]

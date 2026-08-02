@@ -166,13 +166,16 @@ mod service {
 
     /// The roots to index: explicit `path_args` if given, else the shared
     /// settings.json (with the legacy roots.list as first-launch fallback)
-    /// — the same sources the UI uses.
+    /// — the same sources the UI uses. When nothing is configured, fall
+    /// back to the platform default (all fixed drives on Windows) instead
+    /// of an empty set, which is what previously made the service start and
+    /// immediately stop with "no roots to index" on a fresh install.
     fn resolve_roots(path_args: Vec<PathBuf>) -> Vec<PathBuf> {
         if !path_args.is_empty() {
             return path_args;
         }
         let legacy = manager::default_roots_file();
-        match filex::settings::default_settings_file() {
+        let configured = match filex::settings::default_settings_file() {
             Some(file) => match filex::settings::Settings::load(&file, legacy.as_deref()) {
                 Ok(settings) => settings.roots,
                 Err(err) => {
@@ -187,6 +190,11 @@ mod service {
                 .as_deref()
                 .map(manager::load_roots)
                 .unwrap_or_default(),
+        };
+        if configured.is_empty() {
+            filex::drives::default_index_roots()
+        } else {
+            configured
         }
     }
 
