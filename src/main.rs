@@ -1,3 +1,9 @@
+// On Windows, link as a GUI-subsystem binary so double-clicking filex.exe
+// doesn't allocate a console window that lingers behind the app for the
+// whole session. Release builds only — a debug run keeps its console so
+// `RUST_LOG` output and panics stay visible during development.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -142,13 +148,65 @@ fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     };
     #[cfg(target_os = "windows")]
     let mut command = {
+        use std::os::windows::process::CommandExt as _;
         // `start` is a cmd builtin; the empty string is the window title
         // slot so paths with spaces aren't misparsed as a title.
+        // CREATE_NO_WINDOW keeps this transient cmd from flashing a
+        // console every time the user opens a file.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", ""]).arg(path);
+        command
+            .args(["/C", "start", ""])
+            .arg(path)
+            .creation_flags(CREATE_NO_WINDOW);
         command
     };
     command.spawn().map(drop)
+}
+
+/// Whether this platform can show an OS "Open with…" application chooser.
+/// macOS has no CLI entry point for the picker (it needs a LaunchServices
+/// call — a future item), so the menu entry is hidden there rather than
+/// offering an action that can't work.
+fn open_with_supported() -> bool {
+    !cfg!(target_os = "macos")
+}
+
+/// Show the platform's native "Open with…" application chooser for
+/// `path`, so the user can pick a program other than the default.
+/// Detached — the chosen app owns its own lifetime.
+fn open_with_dialog(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // The Shell's classic "How do you want to open this file?" dialog.
+        // CREATE_NO_WINDOW keeps rundll32 from flashing a console.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("rundll32.exe")
+            .arg("shell32.dll,OpenAs_RunDLL")
+            .arg(path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map(drop)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `mimeopen -d` (perl-file-mimeinfo) prompts for the application;
+        // plain `xdg-open` would silently use the default instead.
+        std::process::Command::new("mimeopen")
+            .arg("-d")
+            .arg(path)
+            .spawn()
+            .map(drop)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Open with… is not yet available on macOS",
+        ))
+    }
 }
 
 /// The update affordance for this platform's UI banner. macOS copies a
@@ -722,13 +780,14 @@ impl Workspace {
     /// Roots to index: from settings, defaulting to the home directory
     /// on a fresh install.
     fn configured_roots(&self, cx: &App) -> Vec<PathBuf> {
-        let mut configured = self.settings.read(cx).settings().roots.clone();
-        if configured.is_empty()
-            && let Some(home) = std::env::home_dir()
-        {
-            configured.push(home);
+        let configured = self.settings.read(cx).settings().roots.clone();
+        if configured.is_empty() {
+            // Fresh install: index the platform default (all fixed drives
+            // on Windows, the home directory on macOS/Linux).
+            filex::drives::default_index_roots()
+        } else {
+            configured
         }
-        configured
     }
 
     /// Resolve the color theme from the `theme` setting + the current OS
@@ -847,11 +906,49 @@ impl Workspace {
         }
         this.spawn_fda_check(cx);
         this.spawn_drive_refresh(cx);
+        #[cfg(feature = "observability")]
+        this.spawn_resource_sampling(cx);
         // macOS/Linux check the manifest themselves (no service); Windows
         // learns of updates from filex-indexd instead.
         #[cfg(all(not(target_os = "windows"), feature = "updater"))]
         this.spawn_update_check(cx);
         this
+    }
+
+    /// Sample memory use on a slow timer for the observability backend: the
+    /// index arena bytes (the filex-controlled figure behind the memory
+    /// question) plus process RSS. Ready-root index handles are cloned on
+    /// the UI thread; the `approx_bytes` walk and the send run off it.
+    #[cfg(feature = "observability")]
+    fn spawn_resource_sampling(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                let handles = this.update(cx, |this, _cx| {
+                    this.roots
+                        .iter()
+                        .filter_map(|slot| slot.ready_index())
+                        .collect::<Vec<_>>()
+                });
+                let Ok(handles) = handles else {
+                    break; // workspace dropped
+                };
+                let roots = handles.len();
+                let arena_bytes = cx
+                    .background_executor()
+                    .spawn(async move {
+                        handles
+                            .iter()
+                            .map(|index| read_index(index).approx_bytes() as u64)
+                            .sum::<u64>()
+                    })
+                    .await;
+                filex::observability::record_resource_sample(arena_bytes, roots);
+            }
+        })
+        .detach();
     }
 
     /// Refresh the mounted-volume list on a slow timer (drives change
@@ -1109,13 +1206,25 @@ impl Workspace {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        start_live_index(&path, move || {
+                        #[cfg(feature = "observability")]
+                        let started = std::time::Instant::now();
+                        let result = start_live_index(&path, move || {
                             change_tx.unbounded_send(()).ok();
                         })
                         .map(|live| {
                             let files = read_index(&live.index).len();
                             (live, files)
-                        })
+                        });
+                        // Report how long this root's initial whole-drive
+                        // walk took (once per root, off the UI thread).
+                        #[cfg(feature = "observability")]
+                        if let Ok((_, files)) = &result {
+                            filex::observability::record_index_bootstrap(
+                                started.elapsed().as_millis() as u64,
+                                *files,
+                            );
+                        }
+                        result
                     }
                 })
                 .await;
@@ -1278,7 +1387,13 @@ impl Workspace {
                 // that no longer exist; drop them.
                 self.renaming = None;
                 self.pending_delete = None;
-                self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                // Only jump to the top when this is a real navigation. A
+                // same-directory refresh (after a delete, paste, or rename)
+                // must keep the user's scroll position — yanking back to
+                // row 0 after every file op was jarring.
+                if changed {
+                    self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                }
                 // A "Current Dir" search follows the folder you're in, so
                 // navigating with a scoped query live must re-scope it to
                 // the new directory. "Anywhere" is cwd-independent, so it
@@ -1436,6 +1551,16 @@ impl Workspace {
             if from_search {
                 self.clear_search(cx);
             }
+            cx.notify();
+        }
+    }
+
+    /// Show the OS "Open with…" chooser for a path (context-menu action),
+    /// letting the user pick a program other than the default.
+    fn open_with(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Err(err) = open_with_dialog(&path) {
+            self.notice =
+                Some(format!("couldn't open {} with another app: {err}", path.display()).into());
             cx.notify();
         }
     }
@@ -1766,28 +1891,43 @@ impl Workspace {
         if !self.settings.read(cx).settings().crash_reports {
             return;
         }
-        let (Some(url), Some(dir)) = (
-            filex::telemetry::endpoint(),
-            filex::telemetry::default_queue_dir(),
-        ) else {
-            return; // no endpoint configured, or no data dir
+        let Some(dir) = filex::telemetry::default_queue_dir() else {
+            return; // no data dir
         };
+        // With observability, Sentry is the transport (the durable local
+        // queue becomes its offline buffer); otherwise fall back to the raw
+        // endpoint POST so default builds keep the original behavior.
+        #[cfg(feature = "observability")]
         cx.background_executor()
             .spawn(async move {
-                let sent = filex::telemetry::drain(&dir, |report| {
-                    let Ok(body) = serde_json::to_string(report) else {
-                        return false;
-                    };
-                    ureq::post(&url)
-                        .set("Content-Type", "application/json")
-                        .send_string(&body)
-                        .is_ok()
-                });
+                let sent = filex::observability::drain_crashes_to_sentry(&dir);
                 if sent > 0 {
-                    tracing::info!("uploaded {sent} crash report(s)");
+                    tracing::info!("sent {sent} crash report(s) to Sentry");
                 }
             })
             .detach();
+        #[cfg(not(feature = "observability"))]
+        {
+            let Some(url) = filex::telemetry::endpoint() else {
+                return; // no endpoint configured
+            };
+            cx.background_executor()
+                .spawn(async move {
+                    let sent = filex::telemetry::drain(&dir, |report| {
+                        let Ok(body) = serde_json::to_string(report) else {
+                            return false;
+                        };
+                        ureq::post(&url)
+                            .set("Content-Type", "application/json")
+                            .send_string(&body)
+                            .is_ok()
+                    });
+                    if sent > 0 {
+                        tracing::info!("uploaded {sent} crash report(s)");
+                    }
+                })
+                .detach();
+        }
     }
 
     /// Drop sidecar tag keys whose file no longer exists — lazy cleanup
@@ -2049,27 +2189,54 @@ impl Workspace {
                 .flex_1();
                 body = Some(list.into_any_element());
 
+                // Select all / Deselect all: labelled by the current state
+                // so one click always flips the whole plan the other way.
+                let all_checked = !plan.ops.is_empty() && count == plan.ops.len();
+                let toggle_label = if all_checked { "Deselect all" } else { "Select all" };
                 action_bar = Some(
                     ui::magic_card::pane_actions(&theme)
+                        .justify_between()
                         .child(
-                            ui::magic_card::secondary_button(&theme, "magic-cancel", "Cancel")
-                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.clear_search(cx);
-                                })),
+                            ui::magic_card::secondary_button(
+                                &theme,
+                                "magic-select-all",
+                                toggle_label,
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                this.set_all_magic_ops(!all_checked, cx);
+                            })),
                         )
                         .child(
-                            ui::magic_card::confirm_button(
-                                &theme,
-                                "magic-confirm",
-                                verb.label(),
-                                count > 0,
-                                destructive,
-                            )
-                            .on_click(cx.listener(
-                                |this, _: &ClickEvent, _window, cx| {
-                                    this.confirm_magic(cx);
-                                },
-                            )),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    ui::magic_card::secondary_button(
+                                        &theme,
+                                        "magic-cancel",
+                                        "Cancel",
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _window, cx| {
+                                            this.clear_search(cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    ui::magic_card::confirm_button(
+                                        &theme,
+                                        "magic-confirm",
+                                        verb.label(),
+                                        count > 0,
+                                        destructive,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _window, cx| {
+                                            this.confirm_magic(cx);
+                                        },
+                                    )),
+                                ),
                         ),
                 );
             }
@@ -2164,7 +2331,7 @@ impl Workspace {
                     this.notice = Some(
                         format!(
                             "{} {} {}",
-                            verb.label().to_lowercase(),
+                            verb.past_tense(),
                             applied.len(),
                             plural_items(applied.len())
                         )
@@ -2713,7 +2880,7 @@ impl Workspace {
         };
         self.jobs.push(Job {
             id: job_id,
-            label: format!("{verb} {} items", sources.len()).into(),
+            label: format!("{verb} {} {}", sources.len(), plural_items(sources.len())).into(),
             progress: progress.clone(),
         });
         self.spawn_job_ticker(job_id, cx);
@@ -2767,7 +2934,8 @@ impl Workspace {
                     } else {
                         "moved"
                     };
-                    this.notice = Some(format!("{verb} {} items", applied.len()).into());
+                    this.notice =
+                        Some(format!("{verb} {} {}", applied.len(), plural_items(applied.len())).into());
                     this.journal.record(applied);
                 }
                 let cwd = this.cwd.clone();
@@ -3500,6 +3668,11 @@ impl Workspace {
                             elapsed_ms,
                             "slow search — scan or lock wait over budget"
                         );
+                        // Only the slow scans are sampled to Sentry — the
+                        // ones worth investigating — so search-as-you-type
+                        // never pays a per-keystroke measurement cost.
+                        #[cfg(feature = "observability")]
+                        filex::observability::record_search_latency(elapsed_ms, rows.len());
                     } else {
                         tracing::debug!(query = %text, limit, hits = rows.len(), elapsed_ms, "index scan");
                     }
@@ -3562,6 +3735,18 @@ impl Workspace {
             && let Some(checked) = state.checked.get_mut(ix)
         {
             *checked = !*checked;
+            cx.notify();
+        }
+    }
+
+    /// Check or uncheck every op in the Magic plan at once — the card's
+    /// Select all / Deselect all control, so a large batch doesn't have to
+    /// be un-ticked one row at a time.
+    fn set_all_magic_ops(&mut self, checked: bool, cx: &mut Context<Self>) {
+        if let Some(state) = self.magic.as_mut() {
+            for flag in &mut state.checked {
+                *flag = checked;
+            }
             cx.notify();
         }
     }
@@ -4751,6 +4936,20 @@ impl Workspace {
                             }))
                             .into_any_element(),
                     );
+                    // "Open With…" only applies to files, and only where the
+                    // platform can actually show a chooser (see
+                    // `open_with_supported`).
+                    if !is_dir && open_with_supported() {
+                        let p = path.clone();
+                        items.push(
+                            ui::menu::item(&theme, "menu-open-with", "Open With…", false)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                    this.close_menu(cx);
+                                    this.open_with(p.clone(), cx);
+                                }))
+                                .into_any_element(),
+                        );
+                    }
                     if from_search {
                         let p = path.clone();
                         items.push(
@@ -5411,6 +5610,20 @@ impl Render for Workspace {
 fn main() {
     let _logging_guard = filex::logging::init("filex");
     filex::telemetry::install_panic_hook("filex");
+    // Sentry (opt-in, UI process only). Consent gates the whole
+    // integration, so read the `crash_reports` setting straight from disk
+    // before the app exists; the returned guard flushes on process exit and
+    // must live for the whole run. Disabled builds never link the SDK.
+    #[cfg(feature = "observability")]
+    let _sentry_guard = {
+        let consent = filex::settings::default_settings_file()
+            .and_then(|file| {
+                let legacy = filex::index::manager::default_roots_file();
+                filex::settings::Settings::load(&file, legacy.as_deref()).ok()
+            })
+            .is_some_and(|settings| settings.crash_reports);
+        filex::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
+    };
     // A startup line at the default level, so the log file is never empty:
     // "logs are blank" then means "not writing", not "nothing happened".
     // Names the log directory in the log itself, and the slow-op warnings

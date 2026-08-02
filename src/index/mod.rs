@@ -401,6 +401,24 @@ impl VolumeIndex {
         self.len() == 0
     }
 
+    /// Approximate heap bytes held by this index — the figure behind
+    /// filex's memory footprint (the whole-volume filename arena). An
+    /// estimate, not exact accounting: it sums the entry vector, the two
+    /// name pools, and the child / native-key maps, which dominate; the
+    /// allocator's per-allocation overhead is not counted. Used only for
+    /// the observability memory sample, so an approximation is fine.
+    pub fn approx_bytes(&self) -> usize {
+        let entries = self.entries.capacity() * std::mem::size_of::<FileEntry>();
+        let names = self.name_pool.capacity() + self.name_pool_lower.capacity();
+        // Each entry is a child of exactly one directory, so the child ids
+        // total ~one EntryId per entry; add a rough per-directory Vec/map
+        // overhead on top.
+        let child_ids = self.entries.len() * std::mem::size_of::<EntryId>();
+        let child_overhead = self.children.len() * 48;
+        let native_keys = self.by_native_key.len() * 24;
+        entries + names + child_ids + child_overhead + native_keys
+    }
+
     fn intern(&mut self, name: &str) -> NameRef {
         let offset = self.name_pool.len() as u32;
         self.name_pool.extend_from_slice(name.as_bytes());
@@ -1592,6 +1610,19 @@ mod tests {
         let src = index.insert(ROOT, "src", true).unwrap();
         let main_rs = index.insert(src, "main.rs", false).unwrap();
         (index, docs, report, notes, src, main_rs)
+    }
+
+    #[test]
+    fn approx_bytes_grows_with_entries() {
+        // A rough memory estimate, but it must be non-zero and increase as
+        // the arena fills — the property the memory sample relies on.
+        let empty = VolumeIndex::new("/vol").approx_bytes();
+        let (populated, ..) = sample_index();
+        assert!(empty > 0);
+        assert!(
+            populated.approx_bytes() > empty,
+            "arena estimate should grow after inserts"
+        );
     }
 
     #[test]

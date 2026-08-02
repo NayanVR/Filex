@@ -12,6 +12,11 @@
 # Required secrets:
 #   FILEX_SIGNING_KEY  — hex Ed25519 private key from `filex-sign keygen`.
 #   TAP_GITHUB_TOKEN   — PAT with push access to the Homebrew tap repo.
+# Optional secrets:
+#   FILEX_SENTRY_DSN   — Sentry DSN (a public client key) compiled into the
+#                        UI app for opt-in observability. When unset, Sentry
+#                        is simply disabled in the shipped build. The service
+#                        binary is always built without it.
 name: Release
 
 on:
@@ -47,8 +52,19 @@ jobs:
         run: cargo install cargo-wix --locked
         env:
           RUSTFLAGS: ""
-      - name: Build release (app + service, updater on)
-        run: cargo build --release --locked
+      # The elevated service must never link the telemetry SDK, so build it
+      # (and filex-sign) with default features only; the UI app gets
+      # `observability`. Both land in target/release for cargo-wix to
+      # package. FILEX_SENTRY_DSN is compiled into the app when the secret
+      # is set, and is simply absent (Sentry stays disabled) when it isn't.
+      - name: Build release (service without telemetry; app with observability)
+        shell: bash
+        env:
+          FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin filex-indexd
+          cargo build --release --locked --features observability --bin filex
       - name: Build the MSI
         run: cargo wix --no-build -v
       - name: Build filex-sign
@@ -88,7 +104,9 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libwayland-dev libvulkan-dev
       - name: Build release
-        run: cargo build --release --locked --bin filex
+        env:
+          FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
+        run: cargo build --release --locked --features observability --bin filex
       - name: Build filex-sign
         run: cargo build --release --locked --no-default-features --bin filex-sign
       - name: Package + sign
@@ -125,7 +143,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build release
-        run: cargo build --release --locked --bin filex
+        env:
+          FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
+        run: cargo build --release --locked --features observability --bin filex
       - name: Build filex-sign
         run: cargo build --release --locked --no-default-features --bin filex-sign
       - name: Bundle .app, ad-hoc sign, package + sign

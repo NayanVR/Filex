@@ -71,6 +71,17 @@ impl Verb {
             Self::Rename => "Rename",
         }
     }
+
+    /// Past-tense verb for the completion notice ("deleted 3 items"),
+    /// where the imperative `label` would read as an unfinished command.
+    pub fn past_tense(self) -> &'static str {
+        match self {
+            Self::Delete => "deleted",
+            Self::Move => "moved",
+            Self::Copy => "copied",
+            Self::Rename => "renamed",
+        }
+    }
 }
 
 /// Which files a command targets — the search half of the command,
@@ -940,6 +951,16 @@ mod tests {
     fn parsing_is_case_insensitive_on_the_verb() {
         assert_eq!(cmd("DELETE logs older than 30 days").unwrap().verb, Verb::Delete);
         assert_eq!(cmd("Move screenshots TO Archive").unwrap().verb, Verb::Move);
+    }
+
+    #[test]
+    fn past_tense_is_used_for_completion_notices() {
+        // The completion notice reads "deleted 3 items", not the imperative
+        // "delete 3 items" that lowercasing `label` used to produce.
+        assert_eq!(Verb::Delete.past_tense(), "deleted");
+        assert_eq!(Verb::Move.past_tense(), "moved");
+        assert_eq!(Verb::Copy.past_tense(), "copied");
+        assert_eq!(Verb::Rename.past_tense(), "renamed");
     }
 
     // -- rename patterns ------------------------------------------------
