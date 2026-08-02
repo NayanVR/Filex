@@ -1841,28 +1841,43 @@ impl Workspace {
         if !self.settings.read(cx).settings().crash_reports {
             return;
         }
-        let (Some(url), Some(dir)) = (
-            filex::telemetry::endpoint(),
-            filex::telemetry::default_queue_dir(),
-        ) else {
-            return; // no endpoint configured, or no data dir
+        let Some(dir) = filex::telemetry::default_queue_dir() else {
+            return; // no data dir
         };
+        // With observability, Sentry is the transport (the durable local
+        // queue becomes its offline buffer); otherwise fall back to the raw
+        // endpoint POST so default builds keep the original behavior.
+        #[cfg(feature = "observability")]
         cx.background_executor()
             .spawn(async move {
-                let sent = filex::telemetry::drain(&dir, |report| {
-                    let Ok(body) = serde_json::to_string(report) else {
-                        return false;
-                    };
-                    ureq::post(&url)
-                        .set("Content-Type", "application/json")
-                        .send_string(&body)
-                        .is_ok()
-                });
+                let sent = filex::observability::drain_crashes_to_sentry(&dir);
                 if sent > 0 {
-                    tracing::info!("uploaded {sent} crash report(s)");
+                    tracing::info!("sent {sent} crash report(s) to Sentry");
                 }
             })
             .detach();
+        #[cfg(not(feature = "observability"))]
+        {
+            let Some(url) = filex::telemetry::endpoint() else {
+                return; // no endpoint configured
+            };
+            cx.background_executor()
+                .spawn(async move {
+                    let sent = filex::telemetry::drain(&dir, |report| {
+                        let Ok(body) = serde_json::to_string(report) else {
+                            return false;
+                        };
+                        ureq::post(&url)
+                            .set("Content-Type", "application/json")
+                            .send_string(&body)
+                            .is_ok()
+                    });
+                    if sent > 0 {
+                        tracing::info!("uploaded {sent} crash report(s)");
+                    }
+                })
+                .detach();
+        }
     }
 
     /// Drop sidecar tag keys whose file no longer exists — lazy cleanup
@@ -5540,6 +5555,20 @@ impl Render for Workspace {
 fn main() {
     let _logging_guard = filex::logging::init("filex");
     filex::telemetry::install_panic_hook("filex");
+    // Sentry (opt-in, UI process only). Consent gates the whole
+    // integration, so read the `crash_reports` setting straight from disk
+    // before the app exists; the returned guard flushes on process exit and
+    // must live for the whole run. Disabled builds never link the SDK.
+    #[cfg(feature = "observability")]
+    let _sentry_guard = {
+        let consent = filex::settings::default_settings_file()
+            .and_then(|file| {
+                let legacy = filex::index::manager::default_roots_file();
+                filex::settings::Settings::load(&file, legacy.as_deref()).ok()
+            })
+            .is_some_and(|settings| settings.crash_reports);
+        filex::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
+    };
     // A startup line at the default level, so the log file is never empty:
     // "logs are blank" then means "not writing", not "nothing happened".
     // Names the log directory in the log itself, and the slow-op warnings
