@@ -23,9 +23,21 @@ use crate::telemetry::{self, CrashReport};
 /// integration entirely — the direct parallel of `FILEX_CRASH_ENDPOINT`.
 const DSN_ENV: &str = "FILEX_SENTRY_DSN";
 
-/// The DSN from the environment, or `None` when unset/empty.
+/// The Sentry DSN, or `None` when unset/empty (which disables the whole
+/// integration).
+///
+/// Prefers the *runtime* env var (a dev override), falling back to the DSN
+/// baked in at **compile time** by CI via the same variable. The
+/// compile-time path is what makes shipped builds work: an end user has no
+/// `FILEX_SENTRY_DSN` in their environment, so the DSN must travel in the
+/// binary. A Sentry DSN is a public client key (like the embedded update
+/// public key), not a secret, so embedding it is expected. When CI hasn't
+/// set the variable, `option_env!` yields nothing and Sentry stays off.
 fn dsn() -> Option<String> {
-    std::env::var(DSN_ENV).ok().filter(|d| !d.trim().is_empty())
+    std::env::var(DSN_ENV)
+        .ok()
+        .or_else(|| option_env!("FILEX_SENTRY_DSN").map(str::to_string))
+        .filter(|dsn| !dsn.trim().is_empty())
 }
 
 /// Initialise Sentry for the UI process. Returns the guard that must be
