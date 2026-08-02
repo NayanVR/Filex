@@ -47,8 +47,19 @@ mod service {
     /// SCM, i.e. it's a console/dev run.
     const NOT_STARTED_BY_SCM: i32 = 1063;
 
+    /// Where the SCM service should write logs. LocalSystem's local data
+    /// dir is `C:\Windows\System32\config\systemprofile\AppData\Local` —
+    /// invisible to an admin looking for service logs — so point the
+    /// service at `C:\ProgramData\filex\logs` instead, which is
+    /// machine-wide and discoverable. `None` (falls back to the user dir)
+    /// only if `ProgramData` is unset, which doesn't happen on a normal
+    /// Windows install.
+    fn service_log_base() -> Option<PathBuf> {
+        std::env::var_os("ProgramData").map(PathBuf::from)
+    }
+
     pub fn main() -> Result<()> {
-        let _logging_guard = filex::logging::init("filex-indexd");
+        let _logging_guard = filex::logging::init_in("filex-indexd", service_log_base());
         filex::telemetry::install_panic_hook("filex-indexd");
         // Try to attach to the SCM (blocks until the service stops). If we
         // weren't started by the SCM, serve in the console instead.
@@ -122,8 +133,22 @@ mod service {
         #[cfg(feature = "updater")]
         spawn_update_check(update_cancel.clone());
 
-        // SCM passes the service name as argv[0]; the rest are root paths.
-        let roots = resolve_roots(arguments.into_iter().skip(1).map(PathBuf::from).collect());
+        // The SCM only hands ServiceMain the arguments from an explicit
+        // StartService call — NOT the arguments baked into the service's
+        // ImagePath. The MSI registers the service with its roots in the
+        // ImagePath (`filex-indexd.exe C:\`), so those arrive on the
+        // process command line instead. Prefer ServiceMain args (a manual
+        // `sc start filex-indexd D:\`), then the ImagePath/process args,
+        // then settings.json. Falling straight through to an empty
+        // settings.json is what made the service start and immediately
+        // stop with "no roots to index".
+        let scm_args: Vec<PathBuf> = arguments.into_iter().skip(1).map(PathBuf::from).collect();
+        let path_args = if scm_args.is_empty() {
+            env_root_args()
+        } else {
+            scm_args
+        };
+        let roots = resolve_roots(path_args);
         let result = run_indexes(roots, Some(shutdown));
         if let Err(err) = &result {
             tracing::error!("index service stopped with error: {err:#}");

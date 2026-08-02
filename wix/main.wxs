@@ -88,11 +88,39 @@
 
         </Directory>
       </Directory>
+
+      <!-- Start-menu shortcut. Without one, Windows Start search has
+           nothing to index, so typing "filex" finds nothing (the app is
+           installed but unsearchable). The shortcut targets filex.exe in
+           INSTALLFOLDER. Per-user HKCU keypath is the standard WiX pattern
+           for a non-advertised shortcut; RemoveFolder cleans up the
+           per-user Start-menu folder on uninstall. -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="FilexStartMenuFolder" Name="Filex">
+          <Component Id="FilexStartMenuShortcut" Guid="*">
+            <Shortcut
+                Id="FilexShortcut"
+                Name="Filex"
+                Description="Fast file explorer and instant filename search"
+                Target="[INSTALLFOLDER]filex.exe"
+                WorkingDirectory="INSTALLFOLDER" />
+            <RemoveFolder Id="RemoveFilexStartMenuFolder" On="uninstall" />
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Filex"
+                Name="StartMenuShortcut"
+                Type="integer"
+                Value="1"
+                KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
     </Directory>
 
     <Feature Id="Main" Title="Filex" Level="1">
       <ComponentRef Id="FilexApp" />
       <ComponentRef Id="FilexIndexd" />
+      <ComponentRef Id="FilexStartMenuShortcut" />
     </Feature>
 
   </Product>
