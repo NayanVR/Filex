@@ -1,15 +1,25 @@
-//! Opt-in Sentry integration (UI process only) — the network transport for
-//! crash/error reporting and, later, performance measurements.
+//! Sentry integration (UI process only) — the sole network transport for
+//! crash/error reporting, performance measurements, and release-health
+//! sessions. On-by-default and opt-out: the `crash_reports` setting is
+//! consent (default true) and the only thing that turns this off short of
+//! building without the `observability` feature.
 //!
 //! Everything here upholds the same privacy invariant as [`crate::telemetry`]:
 //! **no path-shaped data ever leaves the machine.** It is enforced twice —
 //! the crash reports drained here were already
 //! [`scrub`](crate::telemetry::scrub)bed at capture time, and the
-//! `before_send` / `before_breadcrumb` hooks scrub every live event as a
-//! backstop for anything the tracing layer will feed in later. Sentry is
-//! initialised only with the user's consent and only when a DSN is present
-//! in the environment; no DSN ships in the binary, so a default build
-//! phones home to nothing.
+//! `before_send` / `before_breadcrumb` hooks scrub every live event
+//! (including anything the `sentry-tracing` layer feeds in from `error!` /
+//! `warn!` logs) as a backstop. Sentry is initialised only with the user's
+//! consent and only when a DSN is present in the environment; no DSN ships
+//! in a bare build, so a build without a CI-provided DSN phones home to
+//! nothing.
+//!
+//! Panics are *not* delivered live here — Sentry's `panic` integration is
+//! deliberately disabled (see Cargo.toml). They are captured by
+//! [`crate::telemetry`]'s hook into a durable on-disk queue and drained via
+//! [`drain_crashes_to_sentry`] on the next launch, which survives aborts and
+//! SIGKILL where an in-process flush would be lost.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -20,7 +30,8 @@ use sentry::{ClientInitGuard, ClientOptions};
 use crate::telemetry::{self, CrashReport};
 
 /// Environment variable holding the Sentry DSN. Unset or empty disables the
-/// integration entirely — the direct parallel of `FILEX_CRASH_ENDPOINT`.
+/// integration entirely, so a build with no CI-provided DSN sends nothing
+/// even with consent granted.
 const DSN_ENV: &str = "FILEX_SENTRY_DSN";
 
 /// The Sentry DSN, or `None` when unset/empty (which disables the whole
@@ -54,9 +65,26 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
     }
     let dsn = dsn()?;
     // `ClientOptions` is `#[non_exhaustive]`, so build from its default and
-    // set fields (performance-transaction sampling is wired in stage 3).
+    // set fields.
     let mut options = ClientOptions::default();
     options.release = Some(Cow::Borrowed(version));
+    // Separate real-user data from developer runs (a debug build reporting
+    // to the same DSN would otherwise pollute the release-health numbers).
+    options.environment = Some(Cow::Borrowed(if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }));
+    // Release health: start a session on init and close it on guard drop, so
+    // Sentry reports crash-free session/user rates and per-release adoption —
+    // the headline insight for a desktop app. Application mode = one session
+    // per process run (not per request).
+    options.auto_session_tracking = true;
+    options.session_mode = sentry::SessionMode::Application;
+    // Attach a stack trace to error events raised via the tracing layer (not
+    // just panics), so a logged `error!` is actionable. Frame paths are
+    // redacted by `scrub_event` before send.
+    options.attach_stacktrace = true;
     // Never attach IP / username / host — the privacy invariant.
     options.send_default_pii = false;
     options.server_name = None;
@@ -70,7 +98,13 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
         Some(crumb)
     }));
     let guard = sentry::init((dsn, options));
-    sentry::configure_scope(|scope| scope.set_tag("app", app));
+    // Coarse, non-identifying facets for filtering in the Sentry UI. `os` /
+    // `arch` are compile targets, not machine identity.
+    sentry::configure_scope(|scope| {
+        scope.set_tag("app", app);
+        scope.set_tag("os", std::env::consts::OS);
+        scope.set_tag("arch", std::env::consts::ARCH);
+    });
     Some(guard)
 }
 
