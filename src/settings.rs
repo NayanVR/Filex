@@ -55,11 +55,13 @@ pub struct Settings {
     pub favorites: Vec<PathBuf>,
     /// Ids of sidebar sections the user has collapsed (e.g. "recents").
     pub collapsed_sections: Vec<String>,
-    /// Whether scrubbed crash reports are uploaded when Filex quits
-    /// unexpectedly (Phase 2c). On by default; a Settings toggle turns it
-    /// off. Reports carry only crash details — never file names, paths,
-    /// tags, or queries — and nothing is sent unless a crash endpoint is
-    /// configured.
+    /// Consent for Sentry diagnostics (Phase 2c): scrubbed crash reports plus
+    /// anonymous performance measurements and release-health sessions. On by
+    /// default (opt-out); a Settings toggle turns it off. Data carries only
+    /// crash/metric details — never file names, paths, tags, or queries — and
+    /// nothing is sent unless the build embeds a Sentry DSN. The serde key
+    /// stays `crash_reports` for settings-file back-compat even though it now
+    /// governs the whole `observability` transport.
     pub crash_reports: bool,
 }
 

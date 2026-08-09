@@ -15,13 +15,17 @@ app = ["dep:gpui", "dep:futures", "dep:image", "dep:ureq", "updater"]
 # update — a deliberate exception to the network-free service rule, gated
 # by the verify-before-install check). See docs/design-distribution.md §3.
 updater = ["dep:ureq"]
-# Opt-in observability: Sentry crash/error reporting + performance
-# measurements, UI process only. Off by default so the default lib build
-# and the elevated filex-indexd service never link a telemetry SDK (the
-# service's network-free rule). Uses the ureq transport + rustls to match
-# filex's existing HTTP stack instead of pulling in reqwest/tokio. Upholds
-# the same privacy invariant as `telemetry`: every outgoing event is
-# path-scrubbed, and nothing sends without consent + an env-provided DSN.
+# Observability: Sentry crash/error reporting + performance measurements +
+# release-health sessions, UI process only. This is the *only* telemetry
+# transport (the legacy FILEX_CRASH_ENDPOINT POST uploader was removed).
+# It is a *build-time* gate, not a consent gate: the elevated filex-indexd
+# service must never link a telemetry SDK, so it is built without this
+# feature (release CI builds the service plain and the UI with it). The
+# UI's consent is on-by-default/opt-out (the `crash_reports` setting), so
+# shipped UI builds report by default. Uses the ureq transport + rustls to
+# match filex's existing HTTP stack instead of pulling in reqwest/tokio.
+# Upholds the same privacy invariant as `telemetry`: every outgoing event
+# is path-scrubbed, and nothing sends without consent + an env-provided DSN.
 observability = ["dep:sentry", "dep:sentry-tracing", "dep:memory-stats"]
 
 [[bin]]
@@ -59,10 +63,15 @@ image = { version = "0.25", optional = true }
 ureq = { version = "2.10", optional = true }
 # Observability (UI process only, `observability` feature). Lean transport:
 # ureq + rustls, matching filex's existing HTTP stack — no reqwest/tokio.
+# NB: the "panic" integration is deliberately *omitted*. Panics are captured
+# by our own hook (`telemetry::install_panic_hook`) into a durable on-disk
+# queue that is drained to Sentry on the next launch — robust across aborts,
+# OOM, and SIGKILL where Sentry's live in-process flush would be lost.
+# Enabling "panic" here would double-report every crash (live event + drained
+# event).
 sentry = { version = "0.49", default-features = false, features = [
   "backtrace",
   "contexts",
-  "panic",
   "ureq",
   "rustls",
 ], optional = true }

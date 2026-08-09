@@ -1883,51 +1883,32 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Upload any queued crash reports at launch — only with the user's
-    /// consent (`crash_reports == Some(true)`) and a configured endpoint.
-    /// Runs off-thread; a scrubbed report is POSTed and deleted on success,
-    /// failures stay queued for next launch (Phase 2c).
+    /// Drain any queued crash reports to Sentry at launch — only with the
+    /// user's consent (`crash_reports`, on-by-default/opt-out). Runs
+    /// off-thread; each scrubbed report is captured and deleted on success,
+    /// failures stay queued for next launch (Phase 2c). Sentry is the only
+    /// transport, so without the `observability` feature this is a no-op and
+    /// the durable queue simply caps at [`filex::telemetry::QUEUE_CAP`].
     fn spawn_crash_upload(&self, cx: &mut Context<Self>) {
         if !self.settings.read(cx).settings().crash_reports {
             return;
         }
-        let Some(dir) = filex::telemetry::default_queue_dir() else {
-            return; // no data dir
-        };
-        // With observability, Sentry is the transport (the durable local
-        // queue becomes its offline buffer); otherwise fall back to the raw
-        // endpoint POST so default builds keep the original behavior.
         #[cfg(feature = "observability")]
-        cx.background_executor()
-            .spawn(async move {
-                let sent = filex::observability::drain_crashes_to_sentry(&dir);
-                if sent > 0 {
-                    tracing::info!("sent {sent} crash report(s) to Sentry");
-                }
-            })
-            .detach();
-        #[cfg(not(feature = "observability"))]
         {
-            let Some(url) = filex::telemetry::endpoint() else {
-                return; // no endpoint configured
+            let Some(dir) = filex::telemetry::default_queue_dir() else {
+                return; // no data dir
             };
             cx.background_executor()
                 .spawn(async move {
-                    let sent = filex::telemetry::drain(&dir, |report| {
-                        let Ok(body) = serde_json::to_string(report) else {
-                            return false;
-                        };
-                        ureq::post(&url)
-                            .set("Content-Type", "application/json")
-                            .send_string(&body)
-                            .is_ok()
-                    });
+                    let sent = filex::observability::drain_crashes_to_sentry(&dir);
                     if sent > 0 {
-                        tracing::info!("uploaded {sent} crash report(s)");
+                        tracing::info!("sent {sent} crash report(s) to Sentry");
                     }
                 })
                 .detach();
         }
+        #[cfg(not(feature = "observability"))]
+        let _ = cx;
     }
 
     /// Drop sidecar tag keys whose file no longer exists — lazy cleanup
@@ -4050,8 +4031,8 @@ impl Workspace {
                 ui::settings_pane::toggle_row(
                     &theme,
                     "crash-reports",
-                    "Send crash reports",
-                    "Scrubbed crash details only — never file names, paths, or queries",
+                    "Share anonymous diagnostics",
+                    "Scrubbed crashes + performance only — never file names, paths, or queries",
                     settings.crash_reports,
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -5610,10 +5591,13 @@ impl Render for Workspace {
 fn main() {
     let _logging_guard = filex::logging::init("filex");
     filex::telemetry::install_panic_hook("filex");
-    // Sentry (opt-in, UI process only). Consent gates the whole
-    // integration, so read the `crash_reports` setting straight from disk
-    // before the app exists; the returned guard flushes on process exit and
-    // must live for the whole run. Disabled builds never link the SDK.
+    // Sentry (UI process only; on-by-default, opt-out). The `crash_reports`
+    // setting is consent — default true, cleared from the Settings pane —
+    // and gates the whole integration, so read it straight from disk before
+    // the app exists; the returned guard flushes pending events (and closes
+    // the release-health session) on process exit and must live for the
+    // whole run. Builds without the `observability` feature never link the
+    // SDK (the elevated `filex-indexd` service is built that way).
     #[cfg(feature = "observability")]
     let _sentry_guard = {
         let consent = filex::settings::default_settings_file()

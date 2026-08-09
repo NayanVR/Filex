@@ -1,12 +1,17 @@
-//! Crash reporting (Phase 2c — see `docs/design-telemetry.md`).
+//! Crash capture core (Phase 2c — see `docs/design-telemetry.md`).
 //!
 //! A panic is captured into a [`CrashReport`], **scrubbed** of any
 //! path-shaped data (the privacy backstop — filenames are private), and
 //! written to a local queue directory. A later launch, *only with the
-//! user's consent*, uploads the queued reports. This module is the pure
-//! core — the report model, the [`scrub`] redactor, and the queue
-//! read/write/prune — with no panic hook, no UI, and no network, so it is
-//! unit-tested in isolation.
+//! user's consent*, drains the queued reports to Sentry (see
+//! [`crate::observability`]). This module is the pure, SDK-free core — the
+//! report model, the [`scrub`] redactor, the panic-hook capture, and the
+//! queue read/write/prune/drain — with no telemetry SDK, no UI, and no
+//! network of its own, so it is unit-tested in isolation and can also be
+//! linked into the elevated `filex-indexd` service (which must not link a
+//! telemetry SDK). The transport is supplied by the caller: the durable
+//! queue is Sentry's offline buffer, not an independent uploader (the
+//! legacy `FILEX_CRASH_ENDPOINT` POST path was removed).
 
 use std::path::{Path, PathBuf};
 
@@ -185,13 +190,6 @@ fn is_report_file(path: &Path) -> bool {
 pub fn load(path: &Path) -> Result<CrashReport> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
-}
-
-/// The upload endpoint from the `FILEX_CRASH_ENDPOINT` env var; `None`
-/// when unset or empty, which disables uploading entirely (no endpoint
-/// ships by default — see `docs/design-telemetry.md`).
-pub fn endpoint() -> Option<String> {
-    std::env::var("FILEX_CRASH_ENDPOINT").ok().filter(|url| !url.trim().is_empty())
 }
 
 /// Send every queued report through `send`, deleting each on success; a

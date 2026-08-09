@@ -1,9 +1,42 @@
 # Design: Telemetry — crash reporting (Phase 2c)
 
-Status: **design, settled 2026-07-25.** Implements the "Panic-hook crash
-logs + user-initiated report sharing" layer of `docs/roadmap.md` Phase 2c.
-The remote-metrics layer (search-latency/index-size aggregates) stays
-deferred per the roadmap and is out of scope here.
+Status: **design, settled 2026-07-25; transport superseded 2026-08-08.**
+Implements the "Panic-hook crash logs + user-initiated report sharing" layer
+of `docs/roadmap.md` Phase 2c.
+
+> **Revision 2026-08-08 — Sentry is now the sole transport.** The
+> custom `FILEX_CRASH_ENDPOINT` POST uploader described in "Transport" below
+> was **removed**. Everything else in this doc still holds — the capture,
+> the `scrub` backstop, the durable on-disk queue, the `CrashReport` shape,
+> on-by-default/opt-out consent (`crash_reports`). What changed:
+>
+> - **Transport = the `observability` feature (Sentry).** The durable queue
+>   is now Sentry's *offline buffer*: panics are captured to disk by our own
+>   hook and **drained to Sentry on the next launch**
+>   (`observability::drain_crashes_to_sentry`). Sentry's own `panic`
+>   integration is deliberately disabled so crashes aren't double-reported;
+>   the disk queue is authoritative because it survives aborts/SIGKILL where
+>   a live in-process flush is lost.
+> - **Gating is now DSN + consent** (not endpoint + consent). Nothing sends
+>   unless the build embeds a Sentry DSN (`FILEX_SENTRY_DSN`, baked by CI —
+>   a public client key) *and* `crash_reports` is on. No DSN ⇒ local-only.
+> - **Scope widened beyond crashes.** With Sentry in place the same consent
+>   also covers anonymous **performance measurements** (search latency,
+>   index bootstrap, resource use) and **release-health sessions**
+>   (crash-free rate, adoption) — all still path-scrubbed, none carrying
+>   queries/paths/tags. The Settings toggle is relabelled "Share anonymous
+>   diagnostics" to match; the serde key stays `crash_reports`.
+> - **Still not linked into `filex-indexd`.** Sentry is UI-process only; the
+>   elevated service is built without the `observability` feature and links
+>   no telemetry SDK. See `docs/design-distribution.md` for how the two
+>   Windows binaries are built with different feature sets.
+>
+> The "Not Sentry" decision in "Confirmed decisions" below is the *original*
+> 2026-07-25 stance and is what this revision reverses.
+
+The remote-metrics layer (search-latency/index-size aggregates) is, as of
+this revision, no longer deferred — it rides on Sentry performance events
+above rather than a separate metrics pipeline.
 
 ## Goal & scope
 
