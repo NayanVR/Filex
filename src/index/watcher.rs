@@ -228,6 +228,16 @@ fn native_upsert(
     is_dir: bool,
 ) -> Result<()> {
     let parent = index.entry_by_native_key(parent_key);
+    // A top-level OS/system dir (parent is the volume root): never insert it
+    // when exclusion is on, so its whole subtree stays out — every child's
+    // parent FRN then resolves to nothing and is dropped below.
+    if index.exclude_system_dirs()
+        && is_dir
+        && parent == Some(ROOT)
+        && super::is_system_top(name)
+    {
+        return Ok(());
+    }
     let existing = index.entry_by_native_key(key);
     match (existing, parent) {
         // A move out of the indexed subtree: the entry leaves the index.
@@ -272,6 +282,12 @@ fn relative_to_root(index: &VolumeIndex, path: &Path) -> Option<PathBuf> {
 }
 
 fn upsert(index: &mut VolumeIndex, path: &Path, is_dir: bool, meta: &MetaSource) -> Result<()> {
+    // Excluded OS/system dir (C:\Windows, …): a create/modify event here is
+    // a no-op, so the subtree the bootstrap skipped can't creep back in via
+    // `ensure_dirs` vivifying a parent chain.
+    if index.excludes_path(path) {
+        return Ok(());
+    }
     let Some(rel) = relative_to_root(index, path) else {
         return Ok(()); // outside the indexed root
     };
@@ -355,6 +371,9 @@ fn remove(index: &mut VolumeIndex, path: &Path) -> Result<()> {
 /// believes and re-walk. Correctness-first; incremental diffing can come
 /// later if rescans show up in profiles.
 fn rescan(index: &mut VolumeIndex, path: &Path, meta: &MetaSource) -> Result<()> {
+    if index.excludes_path(path) {
+        return Ok(()); // excluded OS/system subtree: nothing to reconcile
+    }
     let Some(rel) = relative_to_root(index, path) else {
         return Ok(());
     };
@@ -634,6 +653,23 @@ mod tests {
 
         assert_eq!(index.search("new.txt", 10).len(), 1);
         assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    fn upsert_under_excluded_system_dir_is_a_noop() {
+        // Regression: a live create/modify event under an excluded top dir
+        // (C:\Windows, …) must not creep back in via `ensure_dirs`.
+        let sys = crate::index::SYSTEM_TOP_DIRS[0];
+        let (_dir, mut index) = indexed_tempdir();
+        index.set_exclude_system_dirs(true);
+        let before = index.len();
+
+        let path = root(&index).join(sys).join("System32/evil.dll");
+        apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
+
+        assert_eq!(index.len(), before, "excluded subtree must not be inserted");
+        assert!(index.search("evil", 10).is_empty());
+        assert!(index.resolve(Path::new(sys)).is_none(), "top dir not vivified");
     }
 
     #[test]

@@ -1199,6 +1199,9 @@ impl Workspace {
     /// Index one root on the background executor, then keep listening for
     /// its writer's change notifications. The UI thread never blocks.
     fn spawn_root(&self, path: PathBuf, cx: &mut Context<Self>) {
+        // Exclude OS/system folders (C:\Windows, …) unless the user opted to
+        // index them. Read on the UI thread before crossing to the executor.
+        let exclude_system_dirs = !self.settings.read(cx).settings().index_system_files;
         cx.spawn(async move |this, cx| {
             let (change_tx, mut change_rx) = futures::channel::mpsc::unbounded::<()>();
             let result = cx
@@ -1208,7 +1211,7 @@ impl Workspace {
                     async move {
                         #[cfg(feature = "observability")]
                         let started = std::time::Instant::now();
-                        let result = start_live_index(&path, move || {
+                        let result = start_live_index(&path, exclude_system_dirs, move || {
                             change_tx.unbounded_send(()).ok();
                         })
                         .map(|live| {
@@ -3980,6 +3983,20 @@ impl Workspace {
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.settings.update(cx, |store, cx| {
                         store.update(cx, |s| s.show_hidden_files = !s.show_hidden_files);
+                    });
+                })),
+            )
+            .child(
+                ui::settings_pane::toggle_row(
+                    &theme,
+                    "index-system-files",
+                    "Index system folders",
+                    "Include C:\\Windows, Program Files, and the like in search. Off saves memory; takes effect on next rebuild. Folders stay browsable either way.",
+                    settings.index_system_files,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.index_system_files = !s.index_system_files);
                     });
                 })),
             )

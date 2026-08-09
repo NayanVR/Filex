@@ -553,7 +553,7 @@ mod imp {
     /// millions of files, versus minutes of directory walking. The journal
     /// position is captured *before* enumeration so events raced by the
     /// enumeration replay through the watcher (idempotently) afterwards.
-    pub fn usn_bootstrap(root: &Path) -> Result<UsnBootstrap> {
+    pub fn usn_bootstrap(root: &Path, exclude_system: bool) -> Result<UsnBootstrap> {
         let Some(drive) = volume_root_drive(root) else {
             bail!("USN bootstrap requires a volume root, got {}", root.display());
         };
@@ -605,7 +605,8 @@ mod imp {
             }
         }
 
-        let (index, orphans) = crate::index::usn::build_index_from_mft(root, root_frn, &records);
+        let (index, orphans) =
+            crate::index::usn::build_index_from_mft(root, root_frn, &records, exclude_system);
         if orphans > 0 {
             tracing::warn!("MFT enumeration produced {orphans} unreachable records (skipped)");
         }
@@ -1000,7 +1001,7 @@ mod tests {
         #[ignore = "full-volume MFT enumeration; run explicitly on Windows"]
         fn usn_bootstrap_enumerates_the_volume() {
             let root = Path::new(r"C:\").canonicalize().unwrap();
-            let boot = usn_bootstrap(&root).expect("usn_bootstrap (needs Administrator)");
+            let boot = usn_bootstrap(&root, false).expect("usn_bootstrap (needs Administrator)");
             assert!(boot.index.len() > 1000, "suspiciously small volume index");
             // Windows itself must be findable on any Windows install.
             assert!(!boot.index.search("notepad", 100).is_empty());

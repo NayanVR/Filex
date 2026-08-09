@@ -198,6 +198,17 @@ mod service {
         }
     }
 
+    /// Whether to exclude OS/system folders (`C:\Windows`, …) from the
+    /// index — mirrors the UI's `index_system_files` setting. Defaults to
+    /// excluding them (the memory-saving default) when no settings file is
+    /// present or readable.
+    fn exclude_system_dirs() -> bool {
+        filex::settings::default_settings_file()
+            .and_then(|file| filex::settings::Settings::load(&file, None).ok())
+            .map(|settings| !settings.index_system_files)
+            .unwrap_or(true)
+    }
+
     /// Bootstrap every root and serve the pipe until `shutdown` is set (or,
     /// in console mode with `None`, until the process is killed). The
     /// LiveIndexes are dropped on return, which saves their snapshots — the
@@ -211,6 +222,7 @@ mod service {
         }
 
         let stopping = || shutdown.as_ref().is_some_and(|s| s.load(Ordering::Relaxed));
+        let exclude_system = exclude_system_dirs();
 
         let mut live_indexes = Vec::new();
         let mut host_roots = Vec::new();
@@ -219,7 +231,7 @@ mod service {
                 break; // asked to stop before bootstrapping the rest
             }
             tracing::info!("indexing {}", root.display());
-            match start_live_index_cancellable(&root, || {}, shutdown.clone()) {
+            match start_live_index_cancellable(&root, exclude_system, || {}, shutdown.clone()) {
                 Ok(live) => {
                     host_roots.push((root, live.index.clone()));
                     live_indexes.push(live);

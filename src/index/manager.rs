@@ -167,31 +167,6 @@ fn rank_of(score: Score, boost: i64) -> i64 {
 /// frecency so a genuinely often-opened system file isn't buried absurdly.
 const SYSTEM_PATH_PENALTY: i64 = MAX_BOOST;
 
-/// The top-level directory names (immediately under a drive letter or
-/// `/`) that hold OS/system files — the ones that clog a filename search
-/// without a user ever meaning to open them. Compared case-insensitively.
-#[cfg(target_os = "windows")]
-const SYSTEM_TOP_DIRS: &[&str] = &[
-    "Windows",
-    "Program Files",
-    "Program Files (x86)",
-    "ProgramData",
-    "$Recycle.Bin",
-    "System Volume Information",
-    "$WinREAgent",
-    "Recovery",
-    "PerfLogs",
-];
-#[cfg(target_os = "macos")]
-const SYSTEM_TOP_DIRS: &[&str] = &[
-    "System", "Library", "private", "usr", "bin", "sbin", "cores", "opt", "dev",
-];
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const SYSTEM_TOP_DIRS: &[&str] = &[
-    "proc", "sys", "dev", "run", "boot", "usr", "bin", "sbin", "lib", "lib64", "etc",
-    "var", "opt", "srv",
-];
-
 /// Whether `path` lives under a top-level OS/system directory. A cheap
 /// check on the first real component under the drive/root — case-
 /// insensitive because Windows paths are — run only for the overfetched
@@ -208,8 +183,7 @@ fn is_system_path(path: &Path) -> bool {
     }) else {
         return false;
     };
-    let top = top.to_string_lossy();
-    SYSTEM_TOP_DIRS.iter().any(|dir| top.eq_ignore_ascii_case(dir))
+    super::is_system_top(&top.to_string_lossy())
 }
 
 /// Search every index and merge by the same ranking a single index uses.

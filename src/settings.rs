@@ -34,6 +34,12 @@ pub struct Settings {
     /// Indexed roots (absolute paths). Replaces the legacy roots.list.
     pub roots: Vec<PathBuf>,
     pub show_hidden_files: bool,
+    /// Index OS/system folders (`C:\Windows`, `Program Files`, …). Off by
+    /// default: on Windows these dominate the whole-machine index and no one
+    /// searches them, so excluding them is a large memory win. They stay
+    /// browsable regardless (browse reads the live directory, not the
+    /// index). A change takes full effect on the next index rebuild.
+    pub index_system_files: bool,
     pub sort: SortSettings,
     pub confirm_delete: bool,
     pub delete_to_trash: bool,
@@ -91,6 +97,7 @@ impl Default for Settings {
             version: CURRENT_VERSION,
             roots: Vec::new(),
             show_hidden_files: false,
+            index_system_files: false,
             sort: SortSettings::default(),
             confirm_delete: true,
             delete_to_trash: true,
@@ -182,6 +189,7 @@ mod tests {
         assert_eq!(settings.version, CURRENT_VERSION);
         assert!(settings.roots.is_empty());
         assert!(!settings.show_hidden_files);
+        assert!(!settings.index_system_files); // OS folders excluded by default
         assert_eq!(settings.sort.by, SortBy::Name);
         assert!(settings.sort.ascending);
         assert!(settings.sort.directories_first);

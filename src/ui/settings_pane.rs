@@ -44,6 +44,11 @@ pub fn card_header(theme: &Theme, text: impl Into<SharedString>, close: AnyEleme
 /// The label + explanation stack shared by every settings row.
 fn row_label(theme: &Theme, label: impl Into<SharedString>, description: impl Into<SharedString>) -> Div {
     div()
+        // Take the row's free space and allow shrinking below content width
+        // (`min_w(0)`) so a long description wraps here instead of
+        // overflowing the row and the modal.
+        .flex_1()
+        .min_w(px(0.))
         .flex()
         .flex_col()
         .child(div().text_sm().text_color(theme.text).child(label.into()))

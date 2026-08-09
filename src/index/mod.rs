@@ -41,6 +41,58 @@ pub struct EntryId(u32);
 
 pub const ROOT: EntryId = EntryId(0);
 
+/// Top-level directory names (immediately under a drive letter or `/`) that
+/// hold OS/system files a user never means to search — `C:\Windows`,
+/// `Program Files`, and friends. On Windows these dominate the C: drive and
+/// bloat the whole-machine index; excluding them (the default) is a large
+/// memory win with no real loss, since browsing uses a live directory read,
+/// not the index, so those folders stay navigable by hand. Compared
+/// case-insensitively (Windows paths are). Shared by [`is_system_top`]
+/// (index-time exclusion) and `manager::is_system_path` (search ranking).
+#[cfg(target_os = "windows")]
+pub const SYSTEM_TOP_DIRS: &[&str] = &[
+    "Windows",
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
+    "$Recycle.Bin",
+    "System Volume Information",
+    "$WinREAgent",
+    "Recovery",
+    "PerfLogs",
+];
+#[cfg(target_os = "macos")]
+pub const SYSTEM_TOP_DIRS: &[&str] = &[
+    "System", "Library", "private", "usr", "bin", "sbin", "cores", "opt", "dev",
+];
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub const SYSTEM_TOP_DIRS: &[&str] = &[
+    "proc", "sys", "dev", "run", "boot", "usr", "bin", "sbin", "lib", "lib64", "etc",
+    "var", "opt", "srv",
+];
+
+/// Whether `name` is one of the [`SYSTEM_TOP_DIRS`] (case-insensitive).
+pub fn is_system_top(name: &str) -> bool {
+    SYSTEM_TOP_DIRS.iter().any(|dir| name.eq_ignore_ascii_case(dir))
+}
+
+/// Whether `path`'s first component *under `root`* is an excluded system
+/// dir — i.e. `path` is `root/Windows`, `root/Windows/...`, etc. Everything
+/// below such a dir is excluded transitively, so a single first-component
+/// check covers a whole subtree. Callers gate this on the exclusion flag
+/// before calling; this is the pure path test.
+pub(crate) fn path_under_system_top(root: &Path, path: &Path) -> bool {
+    use std::path::Component;
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .and_then(|c| match c {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .is_some_and(is_system_top)
+}
+
 /// Per-scan controls threaded through the parallel search.
 ///
 /// Bundled into one struct rather than two parameters because they ride
@@ -342,6 +394,12 @@ pub struct VolumeIndex {
     /// [`VolumeIndex::needs_compaction`]); recomputed as the tombstone
     /// count when loading a snapshot.
     dead_debt: usize,
+    /// Skip [`SYSTEM_TOP_DIRS`] (e.g. `C:\Windows`) at index time. Set from
+    /// the user's "Index Windows system folders" setting before bootstrap
+    /// and re-applied after a snapshot load, so bootstrap, live deltas, and
+    /// resumed snapshots all agree. Not persisted — the setting is the
+    /// source of truth and is re-applied on every start.
+    exclude_system_dirs: bool,
 }
 
 impl VolumeIndex {
@@ -362,6 +420,7 @@ impl VolumeIndex {
             by_native_key: HashMap::new(),
             generation: 0,
             dead_debt: 0,
+            exclude_system_dirs: false,
         };
         // Root points at itself; its name is empty (path comes from root_path).
         let name = index.intern("");
@@ -382,6 +441,25 @@ impl VolumeIndex {
 
     pub fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    /// Whether [`SYSTEM_TOP_DIRS`] are excluded from this index. See the
+    /// `exclude_system_dirs` field.
+    pub fn exclude_system_dirs(&self) -> bool {
+        self.exclude_system_dirs
+    }
+
+    /// Set the system-dir exclusion policy. Affects future inserts (live
+    /// deltas, subtree rewalks); already-indexed entries are untouched, so a
+    /// change only fully takes effect on the next bootstrap.
+    pub fn set_exclude_system_dirs(&mut self, exclude: bool) {
+        self.exclude_system_dirs = exclude;
+    }
+
+    /// Whether `path` falls under an excluded system dir *and* exclusion is
+    /// on for this index. The one check the walk and live-delta paths share.
+    pub(crate) fn excludes_path(&self, path: &Path) -> bool {
+        self.exclude_system_dirs && path_under_system_top(&self.root_path, path)
     }
 
     pub fn generation(&self) -> u64 {
@@ -1280,9 +1358,10 @@ impl Drop for LiveIndex {
 /// location in the platform data directory.
 pub fn start_live_index(
     root: &Path,
+    exclude_system_dirs: bool,
     on_change: impl Fn() + Send + 'static,
 ) -> Result<LiveIndex> {
-    start_live_index_cancellable(root, on_change, None)
+    start_live_index_cancellable(root, exclude_system_dirs, on_change, None)
 }
 
 /// [`start_live_index`] whose (walk) bootstrap can be cancelled by setting
@@ -1291,11 +1370,12 @@ pub fn start_live_index(
 /// or USN-fast-path start has no long walk to cancel.
 pub fn start_live_index_cancellable(
     root: &Path,
+    exclude_system_dirs: bool,
     on_change: impl Fn() + Send + 'static,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<LiveIndex> {
     let snapshot_path = persist::default_snapshot_path(root);
-    start_live_index_inner(root, snapshot_path, on_change, cancel)
+    start_live_index_inner(root, snapshot_path, exclude_system_dirs, on_change, cancel)
 }
 
 /// Bootstrap an index for `root` and attach the platform's live watcher
@@ -1318,14 +1398,16 @@ pub fn start_live_index_cancellable(
 pub fn start_live_index_with_snapshot(
     root: &Path,
     snapshot_path: Option<PathBuf>,
+    exclude_system_dirs: bool,
     on_change: impl Fn() + Send + 'static,
 ) -> Result<LiveIndex> {
-    start_live_index_inner(root, snapshot_path, on_change, None)
+    start_live_index_inner(root, snapshot_path, exclude_system_dirs, on_change, None)
 }
 
 fn start_live_index_inner(
     root: &Path,
     snapshot_path: Option<PathBuf>,
+    exclude_system_dirs: bool,
     on_change: impl Fn() + Send + 'static,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<LiveIndex> {
@@ -1343,7 +1425,7 @@ fn start_live_index_inner(
             }
         }
     });
-    platform_start(canonical, snapshot_path, loaded, on_change, cancel)
+    platform_start(canonical, snapshot_path, loaded, exclude_system_dirs, on_change, cancel)
 }
 
 /// Assemble the writer/persistence tail shared by every platform start.
@@ -1415,6 +1497,7 @@ fn platform_start(
     canonical: PathBuf,
     snapshot_path: Option<PathBuf>,
     loaded: Option<persist::Snapshot>,
+    exclude_system_dirs: bool,
     on_change: impl Fn() + Send + 'static,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<LiveIndex> {
@@ -1446,14 +1529,18 @@ fn platform_start(
     };
 
     let replaying = cfg!(target_os = "macos") && fs_watcher.is_some() && resume_from.is_some();
-    let (index, needs_rescan) = match loaded {
+    let (mut index, needs_rescan) = match loaded {
         Some(snapshot) => (snapshot.index, !replaying),
         None => {
             use walker::IndexSource as _;
-            let source = walker::FsWalkSource::default();
+            let source =
+                walker::FsWalkSource { skip_hidden: false, skip_system_dirs: exclude_system_dirs };
             (source.bootstrap_cancellable(&canonical, cancel.as_deref())?, false)
         }
     };
+    // A loaded snapshot carries no exclusion flag (not persisted); re-apply
+    // the current setting so live deltas honor it after a resume.
+    index.set_exclude_system_dirs(exclude_system_dirs);
 
     let source = match &fs_watcher {
         #[cfg(target_os = "macos")]
@@ -1479,6 +1566,7 @@ fn platform_start(
     canonical: PathBuf,
     snapshot_path: Option<PathBuf>,
     loaded: Option<persist::Snapshot>,
+    exclude_system_dirs: bool,
     on_change: impl Fn() + Send + 'static,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<LiveIndex> {
@@ -1513,7 +1601,8 @@ fn platform_start(
                             journal_id: watcher.journal_id(),
                             next_usn: watcher.next_usn_handle(),
                         };
-                        let index = loaded.take().expect("checked above").index;
+                        let mut index = loaded.take().expect("checked above").index;
+                        index.set_exclude_system_dirs(exclude_system_dirs);
                         return assemble_live_index(
                             canonical,
                             snapshot_path,
@@ -1532,7 +1621,7 @@ fn platform_start(
         }
 
         // Tier 2: fresh MFT-enumeration bootstrap.
-        match windows::usn_bootstrap(&canonical) {
+        match windows::usn_bootstrap(&canonical, exclude_system_dirs) {
             Ok(boot) => {
                 let (watcher, source) = match windows::UsnJournalWatcher::spawn(
                     &canonical,
@@ -1579,14 +1668,16 @@ fn platform_start(
             None
         }
     };
-    let (index, needs_rescan) = match loaded {
+    let (mut index, needs_rescan) = match loaded {
         Some(snapshot) => (snapshot.index, true),
         None => {
             use walker::IndexSource as _;
-            let source = walker::FsWalkSource::default();
+            let source =
+                walker::FsWalkSource { skip_hidden: false, skip_system_dirs: exclude_system_dirs };
             (source.bootstrap_cancellable(&canonical, cancel.as_deref())?, false)
         }
     };
+    index.set_exclude_system_dirs(exclude_system_dirs);
     let source = match &fs_watcher {
         Some(_) => CheckpointSource::Reconcile,
         None => CheckpointSource::Untracked,
@@ -2122,7 +2213,7 @@ mod tests {
         // First run: bootstrap walk, then clean shutdown -> snapshot.
         {
             let live =
-                start_live_index_with_snapshot(dir.path(), snap.clone(), || {}).unwrap();
+                start_live_index_with_snapshot(dir.path(), snap.clone(), false, || {}).unwrap();
             let index = live.index.load();
             assert_eq!(index.search("keep", 10).len(), 1);
             drop(index);
@@ -2136,7 +2227,7 @@ mod tests {
         // Second run: loads the snapshot (instant search on stale data),
         // then converges via replay or rescan.
         let (notify_tx, notify_rx) = mpsc::channel();
-        let live = start_live_index_with_snapshot(dir.path(), snap, move || {
+        let live = start_live_index_with_snapshot(dir.path(), snap, false, move || {
             notify_tx.send(()).ok();
         })
         .unwrap();
@@ -2169,7 +2260,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (notify_tx, notify_rx) = std::sync::mpsc::channel();
         // No snapshot path: tests must not touch the real user data dir.
-        let live = start_live_index_with_snapshot(dir.path(), None, move || {
+        let live = start_live_index_with_snapshot(dir.path(), None, false, move || {
             notify_tx.send(()).ok();
         })
         .unwrap();

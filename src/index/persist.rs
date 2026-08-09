@@ -283,6 +283,8 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
         by_native_key,
         generation: 0,
         dead_debt,
+        // Not persisted; the caller re-applies the current setting after load.
+        exclude_system_dirs: false,
     };
     Ok(Snapshot { index, checkpoint })
 }

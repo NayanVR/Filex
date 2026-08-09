@@ -34,11 +34,15 @@ pub struct FsWalkSource {
     /// Skip entries whose name starts with a dot (default: false — an index
     /// should see everything; filtering is a query-time concern).
     pub skip_hidden: bool,
+    /// Skip top-level OS/system dirs (`C:\Windows`, …) — see
+    /// [`super::SYSTEM_TOP_DIRS`]. Default true: the whole-machine index
+    /// would otherwise be dominated by files no one searches.
+    pub skip_system_dirs: bool,
 }
 
 impl Default for FsWalkSource {
     fn default() -> Self {
-        Self { skip_hidden: false }
+        Self { skip_hidden: false, skip_system_dirs: true }
     }
 }
 
@@ -54,6 +58,7 @@ impl IndexSource for FsWalkSource {
             .canonicalize()
             .with_context(|| format!("canonicalizing index root {}", root.display()))?;
         let mut index = VolumeIndex::new(&root);
+        index.set_exclude_system_dirs(self.skip_system_dirs);
         index_subtree(&mut index, ROOT, &root, self.skip_hidden, cancel)?;
         // A cancelled walk leaves a partial index; discard it rather than
         // persist an incomplete tree as if it were complete.
@@ -108,8 +113,17 @@ pub fn index_subtree(
         };
         let parent_path = dirent.parent_path();
         let Some(&parent) = dir_ids.get(parent_path) else {
-            continue; // parent was skipped (unreadable / non-UTF-8)
+            continue; // parent was skipped (unreadable / non-UTF-8 / excluded)
         };
+        // Top-level OS/system dir (C:\Windows, …): skip it, and its whole
+        // subtree follows since it's never entered into `dir_ids`.
+        // ponytail: jwalk still *reads* the excluded subtree from disk here
+        // (no index cost, but wasted I/O on the unelevated walk fallback);
+        // prune with jwalk's process_read_dir if bootstrap time regresses.
+        // The elevated Windows path (USN/MFT) skips it at build time instead.
+        if index.excludes_path(&dirent.path()) {
+            continue;
+        }
         // Symlinks (even to directories) are indexed as leaves.
         let is_dir = dirent.file_type().is_dir();
         let id = index.insert(parent, name, is_dir)?;
@@ -200,12 +214,38 @@ mod tests {
     }
 
     #[test]
+    fn skip_system_dirs_excludes_top_level_os_dirs() {
+        // The current platform's first excluded top dir (e.g. "System" on
+        // macOS); "user" matches no platform's system list.
+        let sys = crate::index::SYSTEM_TOP_DIRS[0];
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(sys).join("deep")).unwrap();
+        fs::write(dir.path().join(sys).join("deep/lib.so"), b"x").unwrap();
+        fs::write(dir.path().join("user-file.txt"), b"x").unwrap();
+
+        // Default (skip_system_dirs = true): the whole system subtree is out.
+        let index = FsWalkSource::default().bootstrap(dir.path()).unwrap();
+        assert_eq!(index.len(), 1, "only user-file.txt");
+        assert!(index.search("lib", 10).is_empty());
+        assert_eq!(index.search("user-file", 10).len(), 1);
+
+        // Opt back in: everything indexed again.
+        let index = FsWalkSource { skip_hidden: false, skip_system_dirs: false }
+            .bootstrap(dir.path())
+            .unwrap();
+        assert_eq!(index.len(), 4); // sys, deep, lib.so, user-file.txt
+        assert_eq!(index.search("lib", 10).len(), 1);
+    }
+
+    #[test]
     fn skip_hidden_excludes_dotfiles() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".hidden"), b"x").unwrap();
         fs::write(dir.path().join("visible.txt"), b"x").unwrap();
 
-        let index = FsWalkSource { skip_hidden: true }.bootstrap(dir.path()).unwrap();
+        let index = FsWalkSource { skip_hidden: true, skip_system_dirs: false }
+            .bootstrap(dir.path())
+            .unwrap();
         assert_eq!(index.len(), 1);
         assert!(index.search("hidden", 10).is_empty());
 

@@ -153,33 +153,57 @@ pub fn build_index_from_mft(
     root_path: &Path,
     root_frn: u64,
     records: &[MftEntry],
+    exclude_system: bool,
 ) -> (VolumeIndex, usize) {
     let mut index = VolumeIndex::new_with_root_key(root_path, root_frn);
+    index.set_exclude_system_dirs(exclude_system);
     // First name wins for hard links (duplicate FRNs), so insert-if-absent.
     let mut by_frn: HashMap<u64, &MftEntry> = HashMap::with_capacity(records.len());
     for record in records {
         by_frn.entry(record.frn).or_insert(record);
     }
     let mut orphans = 0usize;
+    // FRNs of top-level OS/system dirs (C:\Windows, …) to exclude. Small
+    // (~one per SYSTEM_TOP_DIRS entry); descendants short-circuit against it
+    // on the way up, so each excluded record costs one bounded parent walk.
+    let mut excluded_frns: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
     let mut chain: Vec<&MftEntry> = Vec::new();
     for record in records {
         // Walk up until we hit something already indexed (or give up).
         chain.clear();
         let mut current = record.frn;
+        let mut excluded = false;
         let reachable = loop {
+            if exclude_system && excluded_frns.contains(&current) {
+                excluded = true; // under an already-known excluded top dir
+                break false;
+            }
             if index.entry_by_native_key(current).is_some() {
                 break true;
             }
             let Some(rec) = by_frn.get(&current) else {
                 break false; // parent chain leaves the record set: orphan
             };
+            // A top-level system dir sits directly under the volume root.
+            if exclude_system
+                && rec.is_dir
+                && rec.parent_frn == root_frn
+                && super::is_system_top(&rec.name)
+            {
+                excluded_frns.insert(rec.frn);
+                excluded = true;
+                break false;
+            }
             chain.push(rec);
             current = rec.parent_frn;
             if chain.len() > MAX_PATH_DEPTH {
                 break false; // cycle in corrupt input
             }
         };
+        if excluded {
+            continue; // silently dropped — not an orphan
+        }
         if !reachable {
             orphans += 1;
             continue;
@@ -311,7 +335,7 @@ mod tests {
             mft(10, ROOT_FRN, "top", true),
             mft(40, ROOT_FRN, "root-file.rs", false),
         ];
-        let (index, orphans) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records);
+        let (index, orphans) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records, false);
 
         assert_eq!(orphans, 0);
         assert_eq!(index.len(), 4);
@@ -333,7 +357,7 @@ mod tests {
             mft(50, 40, "outside.dll", false),
             mft(40, 41, "system", true),
         ];
-        let (index, orphans) = build_index_from_mft(Path::new(r"C:\data"), ROOT_FRN, &records);
+        let (index, orphans) = build_index_from_mft(Path::new(r"C:\data"), ROOT_FRN, &records, false);
 
         assert_eq!(index.len(), 1);
         assert_eq!(orphans, 3);
@@ -342,12 +366,40 @@ mod tests {
     }
 
     #[test]
+    fn excludes_system_top_dir_subtree_when_asked() {
+        // Use the current platform's first excluded dir so is_system_top
+        // matches; "Users" is a system dir on none of them.
+        let sys = crate::index::SYSTEM_TOP_DIRS[0];
+        let records = vec![
+            mft(10, ROOT_FRN, sys, true),          // e.g. C:\Windows
+            mft(20, 10, "System32", true),         //   \System32
+            mft(30, 20, "kernel32.dll", false),    //     \kernel32.dll
+            mft(40, ROOT_FRN, "Users", true),      // a user dir, kept
+            mft(50, 40, "notes.txt", false),
+        ];
+
+        // Exclusion on: the whole system subtree is gone, not counted as
+        // orphans; the user subtree survives.
+        let (index, orphans) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records, true);
+        assert_eq!(orphans, 0);
+        assert_eq!(index.len(), 2, "only Users + notes.txt");
+        assert!(index.search("kernel32", 10).is_empty());
+        assert!(index.search(&sys.to_lowercase(), 10).is_empty());
+        assert_eq!(index.search("notes", 10).len(), 1);
+
+        // Exclusion off: everything indexed (the pre-existing behavior).
+        let (index, _) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records, false);
+        assert_eq!(index.len(), 5);
+        assert_eq!(index.search("kernel32", 10).len(), 1);
+    }
+
+    #[test]
     fn hard_links_keep_first_name_without_failing() {
         let records = vec![
             mft(10, ROOT_FRN, "original.txt", false),
             mft(10, ROOT_FRN, "hardlink.txt", false), // same FRN
         ];
-        let (index, _) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records);
+        let (index, _) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records, false);
         assert_eq!(index.len(), 1);
         assert_eq!(index.search("original", 10).len(), 1);
     }
@@ -358,7 +410,7 @@ mod tests {
             mft(10, 11, "a", true),
             mft(11, 10, "b", true), // cycle
         ];
-        let (index, orphans) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records);
+        let (index, orphans) = build_index_from_mft(Path::new(r"C:\"), ROOT_FRN, &records, false);
         assert_eq!(index.len(), 0);
         assert_eq!(orphans, 2);
     }
