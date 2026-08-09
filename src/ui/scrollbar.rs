@@ -252,7 +252,15 @@ impl Element for Scrollbar {
         let active = inner.dragging || inner.hovered;
         let width = if active { HOVER_WIDTH } else { IDLE_WIDTH };
 
-        let track_top = f32::from(bounds.origin.y) + PAD;
+        // GPUI hands decorations a *content-space* origin: as the list
+        // scrolls down, `bounds.origin.y` is pushed up above the viewport by
+        // the scroll offset (see gpui `uniform_list.rs`, where `bounds` is
+        // shadowed with `padded_bounds.origin + scroll_offset.y` right before
+        // `prepaint_at`). Adding `scroll_top` back recovers the fixed viewport
+        // top so the bar stays pinned instead of scrolling off the top edge.
+        let viewport_top = f32::from(bounds.origin.y) + self.scroll_top;
+
+        let track_top = viewport_top + PAD;
         let track_height = (viewport - 2. * PAD).max(0.);
         let geo = thumb_geometry(viewport, self.content, self.scroll_top, track_height);
         let (thumb_height, travel, thumb_offset) = (geo.height, geo.travel, geo.offset);
@@ -269,7 +277,7 @@ impl Element for Scrollbar {
         let track_bounds = Bounds {
             origin: point(
                 px(f32::from(bounds.origin.x) + f32::from(bounds.size.width) - TRACK_WIDTH),
-                bounds.origin.y,
+                px(viewport_top),
             ),
             size: size(px(TRACK_WIDTH), bounds.size.height),
         };
