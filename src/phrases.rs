@@ -26,8 +26,7 @@
 
 use crate::listing::FileKind;
 use crate::search_filter::{
-    Bound, Filter, SECS_PER_DAY as DAY, civil_from_days, days_from_civil, parse_bytes,
-    start_of_day,
+    Bound, Filter, SECS_PER_DAY as DAY, civil_from_days, days_from_civil, parse_bytes, start_of_day,
 };
 
 /// One recognized phrase and what it means.
@@ -51,7 +50,10 @@ pub struct Expansion {
 impl Expansion {
     /// Every filter across all phrases, flattened.
     pub fn filters(&self) -> Vec<Filter> {
-        self.phrases.iter().flat_map(|p| p.filters.iter().cloned()).collect()
+        self.phrases
+            .iter()
+            .flat_map(|p| p.filters.iter().cloned())
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -66,8 +68,10 @@ impl Expansion {
 /// handles single `key:value` words.
 pub fn without_phrase(raw: &str, source: &str) -> String {
     let words: Vec<&str> = raw.split_whitespace().collect();
-    let target: Vec<String> =
-        source.split_whitespace().map(|w| w.to_ascii_lowercase()).collect();
+    let target: Vec<String> = source
+        .split_whitespace()
+        .map(|w| w.to_ascii_lowercase())
+        .collect();
     if target.is_empty() {
         return raw.trim().to_string();
     }
@@ -198,7 +202,10 @@ fn expand_inner(raw: &str, now: i64, lone_word_is_filename: bool) -> Expansion {
                 while text.last().is_some_and(|w| is_filler(w)) {
                     text.pop();
                 }
-                phrases.push(Phrase { source: words[i..i + len].join(" "), filters });
+                phrases.push(Phrase {
+                    source: words[i..i + len].join(" "),
+                    filters,
+                });
                 i += len;
                 // ...and filler immediately after it ("photos *from*
                 // meeting"): adjacency on either side is what makes a
@@ -219,8 +226,14 @@ fn expand_inner(raw: &str, now: i64, lone_word_is_filename: bool) -> Expansion {
                 // during yesterday" would mean the near-opposite of what
                 // was typed. The whole failed attempt stays literal text.
                 let failed_comparative = is_comparative_lead(words[i])
-                    && words.get(i + 1).is_some_and(|w| w.eq_ignore_ascii_case("than"));
-                let span = if failed_comparative { 3.min(words.len() - i) } else { 1 };
+                    && words
+                        .get(i + 1)
+                        .is_some_and(|w| w.eq_ignore_ascii_case("than"));
+                let span = if failed_comparative {
+                    3.min(words.len() - i)
+                } else {
+                    1
+                };
                 text.extend_from_slice(&words[i..i + span]);
                 i += span;
             }
@@ -234,7 +247,10 @@ fn expand_inner(raw: &str, now: i64, lone_word_is_filename: bool) -> Expansion {
         }
     }
 
-    Expansion { text: text.join(" "), phrases }
+    Expansion {
+        text: text.join(" "),
+        phrases,
+    }
 }
 
 fn is_filler(word: &str) -> bool {
@@ -399,7 +415,11 @@ fn time_phrase(phrase: &str, now: i64) -> Option<Bound<i64>> {
         let month = month as i64 + 1;
         let (year, current_month, _) = civil_from_days(today.div_euclid(DAY));
         // If that month hasn't arrived yet this year, they mean last year.
-        let year = if month > current_month { year - 1 } else { year };
+        let year = if month > current_month {
+            year - 1
+        } else {
+            year
+        };
         return Some(month_range(year, month));
     }
 
@@ -438,7 +458,11 @@ mod tests {
     }
 
     fn sources(raw: &str) -> Vec<String> {
-        expand_at(raw).phrases.into_iter().map(|p| p.source).collect()
+        expand_at(raw)
+            .phrases
+            .into_iter()
+            .map(|p| p.source)
+            .collect()
     }
 
     /// The single `modified:` bound a query expanded to — most queries
@@ -449,14 +473,22 @@ mod tests {
             _ => None,
         });
         let bound = found.next().expect("expected a modified filter");
-        assert!(found.next().is_none(), "expected exactly one modified filter");
+        assert!(
+            found.next().is_none(),
+            "expected exactly one modified filter"
+        );
         bound
     }
 
     /// The inclusive calendar day range of a `Bound::Range`.
     fn range_days(bound: Bound<i64>) -> ((i64, i64, i64), (i64, i64, i64)) {
-        let Bound::Range(lo, hi) = bound else { panic!("expected a range, got {bound:?}") };
-        (civil_from_days(lo.div_euclid(DAY)), civil_from_days(hi.div_euclid(DAY)))
+        let Bound::Range(lo, hi) = bound else {
+            panic!("expected a range, got {bound:?}")
+        };
+        (
+            civil_from_days(lo.div_euclid(DAY)),
+            civil_from_days(hi.div_euclid(DAY)),
+        )
     }
 
     #[test]
@@ -467,9 +499,15 @@ mod tests {
 
     #[test]
     fn kind_words_expand_when_the_query_has_more_to_it() {
-        assert_eq!(filters("photos from last week")[0], Filter::Kind(FileKind::Image));
+        assert_eq!(
+            filters("photos from last week")[0],
+            Filter::Kind(FileKind::Image)
+        );
         assert_eq!(filters("holiday videos")[0], Filter::Kind(FileKind::Video));
-        assert_eq!(filters("work documents")[0], Filter::Kind(FileKind::Document));
+        assert_eq!(
+            filters("work documents")[0],
+            Filter::Kind(FileKind::Document)
+        );
     }
 
     #[test]
@@ -522,7 +560,11 @@ mod tests {
     #[test]
     fn source_text_is_exactly_what_to_remove_to_undo() {
         let expansion = expand_at("photos from last week");
-        let sources: Vec<&str> = expansion.phrases.iter().map(|p| p.source.as_str()).collect();
+        let sources: Vec<&str> = expansion
+            .phrases
+            .iter()
+            .map(|p| p.source.as_str())
+            .collect();
         assert_eq!(sources, ["photos", "last week"]);
     }
 
@@ -530,19 +572,28 @@ mod tests {
     fn today_and_yesterday_bound_the_right_days() {
         let today = start_of_day(NOW);
         assert_eq!(modified("photos today"), Bound::Ge(today));
-        assert_eq!(modified("photos yesterday"), Bound::Range(today - DAY, today - 1));
+        assert_eq!(
+            modified("photos yesterday"),
+            Bound::Range(today - DAY, today - 1)
+        );
     }
 
     #[test]
     fn named_month_resolves_to_the_most_recent_occurrence() {
         // June 2026 has already happened at NOW (2026-07-26).
-        assert_eq!(range_days(modified("photos in june")), ((2026, 6, 1), (2026, 6, 30)));
+        assert_eq!(
+            range_days(modified("photos in june")),
+            ((2026, 6, 1), (2026, 6, 30))
+        );
     }
 
     #[test]
     fn a_month_still_to_come_this_year_means_last_year() {
         // December 2026 hasn't happened yet at NOW.
-        assert_eq!(range_days(modified("photos in december")), ((2025, 12, 1), (2025, 12, 31)));
+        assert_eq!(
+            range_days(modified("photos in december")),
+            ((2025, 12, 1), (2025, 12, 31))
+        );
     }
 
     #[test]
@@ -556,7 +607,10 @@ mod tests {
 
     #[test]
     fn from_works_as_a_date_preposition_too() {
-        assert_eq!(range_days(modified("photos from june")), ((2026, 6, 1), (2026, 6, 30)));
+        assert_eq!(
+            range_days(modified("photos from june")),
+            ((2026, 6, 1), (2026, 6, 30))
+        );
     }
 
     #[test]
@@ -599,31 +653,55 @@ mod tests {
     fn size_words_expand() {
         assert_eq!(
             filters("big videos"),
-            vec![Filter::Size(Bound::Gt(100 * 1024 * 1024)), Filter::Kind(FileKind::Video)]
+            vec![
+                Filter::Size(Bound::Gt(100 * 1024 * 1024)),
+                Filter::Kind(FileKind::Video)
+            ]
         );
     }
 
     #[test]
     fn comparative_age_phrases_bound_mtime() {
         // "older" means modified *before* the threshold.
-        assert_eq!(modified("screenshots older than 30 days"), Bound::Lt(NOW - 30 * DAY));
-        assert_eq!(modified("photos newer than 2 weeks"), Bound::Gt(NOW - 14 * DAY));
-        assert_eq!(modified("videos older than 1 year"), Bound::Lt(NOW - 365 * DAY));
-        assert_eq!(modified("logs older than 6 hours"), Bound::Lt(NOW - 6 * 3_600));
+        assert_eq!(
+            modified("screenshots older than 30 days"),
+            Bound::Lt(NOW - 30 * DAY)
+        );
+        assert_eq!(
+            modified("photos newer than 2 weeks"),
+            Bound::Gt(NOW - 14 * DAY)
+        );
+        assert_eq!(
+            modified("videos older than 1 year"),
+            Bound::Lt(NOW - 365 * DAY)
+        );
+        assert_eq!(
+            modified("logs older than 6 hours"),
+            Bound::Lt(NOW - 6 * 3_600)
+        );
     }
 
     #[test]
     fn comparative_size_phrases_bound_size() {
         assert_eq!(
             filters("videos bigger than 100mb"),
-            vec![Filter::Kind(FileKind::Video), Filter::Size(Bound::Gt(100 * (1 << 20)))]
+            vec![
+                Filter::Kind(FileKind::Video),
+                Filter::Size(Bound::Gt(100 * (1 << 20)))
+            ]
         );
         assert_eq!(
             filters("photos smaller than 500kb"),
-            vec![Filter::Kind(FileKind::Image), Filter::Size(Bound::Lt(500 * (1 << 10)))]
+            vec![
+                Filter::Kind(FileKind::Image),
+                Filter::Size(Bound::Lt(500 * (1 << 10)))
+            ]
         );
         // "larger" is the same comparator as "bigger".
-        assert_eq!(filters("larger than 1gb"), vec![Filter::Size(Bound::Gt(1 << 30))]);
+        assert_eq!(
+            filters("larger than 1gb"),
+            vec![Filter::Size(Bound::Gt(1 << 30))]
+        );
     }
 
     #[test]
@@ -634,10 +712,7 @@ mod tests {
         // Singular and plural units agree too.
         assert_eq!(duration_secs("1 day"), Some(DAY));
         // ...and so do spaced and unspaced sizes.
-        assert_eq!(
-            filters("bigger than 10 mb"),
-            filters("bigger than 10mb"),
-        );
+        assert_eq!(filters("bigger than 10 mb"), filters("bigger than 10mb"),);
     }
 
     #[test]
@@ -667,10 +742,10 @@ mod tests {
         // The four-word phrase has to round-trip through the chip UI's
         // remove path like every shorter one.
         let expansion = expand_at("screenshots older than 30 days");
-        assert_eq!(sources("screenshots older than 30 days"), [
-            "screenshots",
-            "older than 30 days"
-        ]);
+        assert_eq!(
+            sources("screenshots older than 30 days"),
+            ["screenshots", "older than 30 days"]
+        );
         let mut query = "screenshots older than 30 days".to_string();
         for phrase in expansion.phrases {
             query = without_phrase(&query, &phrase.source);
@@ -703,7 +778,10 @@ mod tests {
 
     #[test]
     fn matching_is_case_insensitive() {
-        assert_eq!(filters("Photos From Last Week")[0], Filter::Kind(FileKind::Image));
+        assert_eq!(
+            filters("Photos From Last Week")[0],
+            Filter::Kind(FileKind::Image)
+        );
     }
 
     #[test]
@@ -728,24 +806,39 @@ mod tests {
         // text, or the search asks for files *named* "modified".
         let expansion = expand_at("pdfs modified this week");
         assert_eq!(expansion.text, "");
-        assert_eq!(expansion.filters(), vec![
-            Filter::Ext("pdf".into()),
-            Filter::Modified(Bound::Ge(NOW - 7 * DAY)),
-        ]);
+        assert_eq!(
+            expansion.filters(),
+            vec![
+                Filter::Ext("pdf".into()),
+                Filter::Modified(Bound::Ge(NOW - 7 * DAY)),
+            ]
+        );
         // With nothing matching around it, it stays a searchable word.
         assert_eq!(expand_at("modified config").text, "modified config");
     }
 
     #[test]
     fn without_phrase_removes_single_and_multi_word_sources() {
-        assert_eq!(without_phrase("photos from last week", "last week"), "photos from");
-        assert_eq!(without_phrase("photos from last week", "photos"), "from last week");
-        assert_eq!(without_phrase("Photos From Last Week", "last week"), "Photos From");
+        assert_eq!(
+            without_phrase("photos from last week", "last week"),
+            "photos from"
+        );
+        assert_eq!(
+            without_phrase("photos from last week", "photos"),
+            "from last week"
+        );
+        assert_eq!(
+            without_phrase("Photos From Last Week", "last week"),
+            "Photos From"
+        );
     }
 
     #[test]
     fn without_phrase_leaves_a_query_it_cannot_find_untouched() {
-        assert_eq!(without_phrase("invoice notes", "last week"), "invoice notes");
+        assert_eq!(
+            without_phrase("invoice notes", "last week"),
+            "invoice notes"
+        );
         assert_eq!(without_phrase("invoice", ""), "invoice");
     }
 
@@ -756,9 +849,15 @@ mod tests {
 
     #[test]
     fn labels_are_canonical_for_kinds_and_verbatim_for_dates() {
-        assert_eq!(label_for(&Filter::Kind(FileKind::Image), "photos"), "kind:image");
+        assert_eq!(
+            label_for(&Filter::Kind(FileKind::Image), "photos"),
+            "kind:image"
+        );
         assert_eq!(label_for(&Filter::Ext("pdf".into()), "pdfs"), "ext:pdf");
-        assert_eq!(label_for(&Filter::Modified(Bound::Ge(0)), "last week"), "last week");
+        assert_eq!(
+            label_for(&Filter::Modified(Bound::Ge(0)), "last week"),
+            "last week"
+        );
         assert_eq!(label_for(&Filter::Size(Bound::Gt(0)), "big"), "big");
     }
 

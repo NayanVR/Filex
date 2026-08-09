@@ -102,10 +102,16 @@ impl std::fmt::Display for UpdateError {
             UpdateError::BadHex(field) => write!(f, "manifest field `{field}` is not valid hex"),
             UpdateError::InvalidPublicKey => write!(f, "embedded public key is invalid"),
             UpdateError::InvalidSignatureLength(n) => {
-                write!(f, "signature is {n} bytes, expected {ED25519_SIGNATURE_LEN}")
+                write!(
+                    f,
+                    "signature is {n} bytes, expected {ED25519_SIGNATURE_LEN}"
+                )
             }
             UpdateError::SignatureVerification => {
-                write!(f, "signature verification failed — payload is not authentic")
+                write!(
+                    f,
+                    "signature verification failed — payload is not authentic"
+                )
             }
             UpdateError::InvalidPrivateKey => write!(f, "signing private key is invalid"),
             UpdateError::Entropy => write!(f, "OS randomness unavailable for keypair generation"),
@@ -184,10 +190,7 @@ pub fn generate_keypair() -> Result<(String, String), UpdateError> {
 /// Ed25519 signature over its bytes, from a hex-encoded private key. The
 /// exact counterpart to [`Manifest::verify_payload`] — living in the same
 /// module guarantees the wire format can't drift. Used by `filex-sign`.
-pub fn sign_artifact(
-    private_key_hex: &str,
-    data: &[u8],
-) -> Result<(String, String), UpdateError> {
+pub fn sign_artifact(private_key_hex: &str, data: &[u8]) -> Result<(String, String), UpdateError> {
     use ed25519_dalek::{Signer, SigningKey};
     let seed = hex_decode(private_key_hex, "private_key")?;
     let array: [u8; 32] = seed
@@ -231,7 +234,9 @@ fn hex_decode(s: &str, field: &'static str) -> Result<Vec<u8>, UpdateError> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let hi = (bytes[i] as char).to_digit(16).ok_or(UpdateError::BadHex(field))?;
+        let hi = (bytes[i] as char)
+            .to_digit(16)
+            .ok_or(UpdateError::BadHex(field))?;
         let lo = (bytes[i + 1] as char)
             .to_digit(16)
             .ok_or(UpdateError::BadHex(field))?;
@@ -562,12 +567,14 @@ pub fn banner_content(status: &UpdateStatus) -> Option<BannerContent> {
                     format!("Filex {version} is available"),
                     Some(format!("Copy “{cmd}”")),
                 ),
-                UpdateAffordance::OpenUrl(_) => {
-                    (format!("Filex {version} is available"), Some("Get update".to_string()))
-                }
-                UpdateAffordance::Restart => {
-                    (format!("Filex {version} is ready"), Some("Restart".to_string()))
-                }
+                UpdateAffordance::OpenUrl(_) => (
+                    format!("Filex {version} is available"),
+                    Some("Get update".to_string()),
+                ),
+                UpdateAffordance::Restart => (
+                    format!("Filex {version} is ready"),
+                    Some("Restart".to_string()),
+                ),
             };
             Some(BannerContent {
                 message,
@@ -615,8 +622,14 @@ mod tests {
 
     #[test]
     fn hex_decode_rejects_odd_length_and_non_hex() {
-        assert!(matches!(hex_decode("abc", "x"), Err(UpdateError::BadHex("x"))));
-        assert!(matches!(hex_decode("zz", "x"), Err(UpdateError::BadHex("x"))));
+        assert!(matches!(
+            hex_decode("abc", "x"),
+            Err(UpdateError::BadHex("x"))
+        ));
+        assert!(matches!(
+            hex_decode("zz", "x"),
+            Err(UpdateError::BadHex("x"))
+        ));
     }
 
     #[test]
@@ -661,10 +674,16 @@ mod tests {
     fn is_newer_than_rejects_bad_semver() {
         let (sk, _) = test_key();
         let m = valid_manifest(&sk, "not-a-version", b"x");
-        assert!(matches!(m.is_newer_than("1.0.0"), Err(UpdateError::Version(_))));
+        assert!(matches!(
+            m.is_newer_than("1.0.0"),
+            Err(UpdateError::Version(_))
+        ));
 
         let good = valid_manifest(&sk, "1.0.0", b"x");
-        assert!(matches!(good.is_newer_than("garbage"), Err(UpdateError::Version(_))));
+        assert!(matches!(
+            good.is_newer_than("garbage"),
+            Err(UpdateError::Version(_))
+        ));
     }
 
     #[test]
@@ -809,12 +828,7 @@ mod tests {
         let m = valid_manifest(&sk, "1.0.0", signed);
         let cancel = CancelFlag::new();
 
-        let result = download_and_verify(
-            |_url, _c| Ok(b"malware".to_vec()),
-            &m,
-            &pk,
-            &cancel,
-        );
+        let result = download_and_verify(|_url, _c| Ok(b"malware".to_vec()), &m, &pk, &cancel);
         assert!(matches!(result, Err(DownloadError::Verify(_))));
     }
 
@@ -925,9 +939,14 @@ mod tests {
         let json = manifest_json(&sk, "9.9.9", &artifact);
         let cancel = CancelFlag::new();
 
-        let action =
-            check_for_update(router(json, artifact.clone()), MANIFEST_URL, "1.0.0", &pk, &cancel)
-                .unwrap();
+        let action = check_for_update(
+            router(json, artifact.clone()),
+            MANIFEST_URL,
+            "1.0.0",
+            &pk,
+            &cancel,
+        )
+        .unwrap();
         match action {
             UpdateAction::Apply { version, payload } => {
                 assert_eq!(version, "9.9.9");
@@ -1054,7 +1073,10 @@ mod tests {
         };
         let content = banner_content(&status).unwrap();
         assert_eq!(content.message, "Filex 1.4.0 is available");
-        assert_eq!(content.action_label.as_deref(), Some("Copy “brew upgrade filex”"));
+        assert_eq!(
+            content.action_label.as_deref(),
+            Some("Copy “brew upgrade filex”")
+        );
     }
 
     #[test]
@@ -1067,7 +1089,9 @@ mod tests {
         assert_eq!(content.message, "Filex 2.0.0 is ready");
         assert_eq!(content.action_label.as_deref(), Some("Restart"));
 
-        let downloading = UpdateStatus::Downloading { version: "2.0.0".into() };
+        let downloading = UpdateStatus::Downloading {
+            version: "2.0.0".into(),
+        };
         let content = banner_content(&downloading).unwrap();
         assert_eq!(content.message, "Downloading Filex 2.0.0…");
         assert_eq!(content.action_label, None);

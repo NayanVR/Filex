@@ -116,7 +116,12 @@ mod platform {
 
     fn drive_at(path: std::path::PathBuf, name: String) -> Option<Drive> {
         let (total_bytes, free_bytes) = capacity(&path)?;
-        Some(Drive { name, path, total_bytes, free_bytes })
+        Some(Drive {
+            name,
+            path,
+            total_bytes,
+            free_bytes,
+        })
     }
 
     /// Fresh-install default on Unix: the home directory. Unlike Windows
@@ -238,12 +243,27 @@ mod tests {
 
     #[test]
     fn used_fraction_is_clamped_and_safe() {
-        let d = Drive { name: "x".into(), path: "/".into(), total_bytes: 0, free_bytes: 0 };
+        let d = Drive {
+            name: "x".into(),
+            path: "/".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+        };
         assert_eq!(d.used_fraction(), 0.0); // no divide-by-zero
-        let d = Drive { name: "x".into(), path: "/".into(), total_bytes: 100, free_bytes: 25 };
+        let d = Drive {
+            name: "x".into(),
+            path: "/".into(),
+            total_bytes: 100,
+            free_bytes: 25,
+        };
         assert!((d.used_fraction() - 0.75).abs() < 1e-6);
         // Free somehow exceeding total must not underflow.
-        let d = Drive { name: "x".into(), path: "/".into(), total_bytes: 100, free_bytes: 200 };
+        let d = Drive {
+            name: "x".into(),
+            path: "/".into(),
+            total_bytes: 100,
+            free_bytes: 200,
+        };
         assert_eq!(d.used_fraction(), 0.0);
     }
 

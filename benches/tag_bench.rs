@@ -28,7 +28,11 @@ fn synthetic_store() -> (tempfile::TempDir, SidecarTags) {
 
     let mut map: BTreeMap<PathBuf, Vec<Tag>> = BTreeMap::new();
     for i in 0..ENTRIES {
-        let path = format!("/home/u/project-{:04}/{}-{i}.txt", i % 2_000, STEMS[i % STEMS.len()]);
+        let path = format!(
+            "/home/u/project-{:04}/{}-{i}.txt",
+            i % 2_000,
+            STEMS[i % STEMS.len()]
+        );
         let mut tags = vec![Tag::colored("Blue", TagColor::Blue)];
         if i % 10 == 0 {
             tags.push(Tag::new("Work"));
@@ -52,9 +56,7 @@ fn bench_tag_filter(c: &mut Criterion) {
     });
     // Two-tag AND: full scan, few matches.
     group.bench_function("and_work_rare", |b| {
-        b.iter(|| {
-            black_box(store.paths_with_all_tags(black_box(&["work".into(), "rare".into()])))
-        })
+        b.iter(|| black_box(store.paths_with_all_tags(black_box(&["work".into(), "rare".into()]))))
     });
     // Rare tag: full scan, one match — the intersect's floor cost.
     group.bench_function("rare_tag", |b| {

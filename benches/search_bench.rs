@@ -15,7 +15,15 @@ const FILES_PER_DIR: usize = 100;
 
 fn synthetic_index() -> VolumeIndex {
     const STEMS: [&str; 10] = [
-        "report", "invoice", "photo", "backup", "notes", "main", "config", "readme", "data",
+        "report",
+        "invoice",
+        "photo",
+        "backup",
+        "notes",
+        "main",
+        "config",
+        "readme",
+        "data",
         "screenshot",
     ];
     const EXTS: [&str; 5] = ["txt", "rs", "pdf", "png", "tar.gz"];
@@ -113,7 +121,15 @@ fn bench_app_keystroke_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("app_keystroke_200k");
     // Broad prefix: far more literal hits than any gate, shut either way.
     group.bench_function("broad_prefix_re", |b| {
-        b.iter(|| black_box(manager::search_all(&indexes, black_box("re"), &[], 500, &none)))
+        b.iter(|| {
+            black_box(manager::search_all(
+                &indexes,
+                black_box("re"),
+                &[],
+                500,
+                &none,
+            ))
+        })
     });
     // THE case the fix moves. `invoice_010` has ~100 literal hits in this
     // corpus: comfortably above FUZZY_GATE, so the result list is useful
@@ -122,14 +138,26 @@ fn bench_app_keystroke_path(c: &mut Criterion) {
     // this window are the overwhelming majority of what anyone types.
     group.bench_function("useful_result_list_500", |b| {
         b.iter(|| {
-            black_box(manager::search_all(&indexes, black_box("invoice_010"), &[], 500, &none))
+            black_box(manager::search_all(
+                &indexes,
+                black_box("invoice_010"),
+                &[],
+                500,
+                &none,
+            ))
         })
     });
     // Same query on the Magic command path, where the limit is
     // MAX_PLAN_OPS + 1 and the overfetch is therefore wider still.
     group.bench_function("useful_result_list_magic_1001", |b| {
         b.iter(|| {
-            black_box(manager::search_all(&indexes, black_box("invoice_010"), &[], 1001, &none))
+            black_box(manager::search_all(
+                &indexes,
+                black_box("invoice_010"),
+                &[],
+                1001,
+                &none,
+            ))
         })
     });
     // Below the gate (~10 literal hits): the fuzzy pass runs here under
@@ -137,13 +165,27 @@ fn bench_app_keystroke_path(c: &mut Criterion) {
     // and the number that says what it costs.
     group.bench_function("sparse_result_fuzzy_runs", |b| {
         b.iter(|| {
-            black_box(manager::search_all(&indexes, black_box("invoice_0100_0"), &[], 500, &none))
+            black_box(manager::search_all(
+                &indexes,
+                black_box("invoice_0100_0"),
+                &[],
+                500,
+                &none,
+            ))
         })
     });
     // Nothing matches literally at all — the case decision 2 was written
     // for, and still exactly as fast as it was.
     group.bench_function("empty_result_fuzzy_runs", |b| {
-        b.iter(|| black_box(manager::search_all(&indexes, black_box("zqxjw"), &[], 500, &none)))
+        b.iter(|| {
+            black_box(manager::search_all(
+                &indexes,
+                black_box("zqxjw"),
+                &[],
+                500,
+                &none,
+            ))
+        })
     });
     group.finish();
 }
@@ -162,19 +204,45 @@ fn bench_frecency_rerank(c: &mut Criterion) {
     // A realistic visit history: recents::CAP entries, some of which are
     // hits for the query below.
     let table: HashMap<PathBuf, f32> = (0..filex::recents::CAP)
-        .map(|i| (PathBuf::from(format!("/bench/project-{i:04}/report_{i:04}_000.pdf")), 4.0))
+        .map(|i| {
+            (
+                PathBuf::from(format!("/bench/project-{i:04}/report_{i:04}_000.pdf")),
+                4.0,
+            )
+        })
         .collect();
     let indexes = vec![SharedIndex::new(index)];
 
     let mut group = c.benchmark_group("frecency_rerank");
     group.bench_function("search_all_no_frecency", |b| {
-        b.iter(|| black_box(manager::search_all(&indexes, black_box("report"), &[], 50, &HashMap::new())))
+        b.iter(|| {
+            black_box(manager::search_all(
+                &indexes,
+                black_box("report"),
+                &[],
+                50,
+                &HashMap::new(),
+            ))
+        })
     });
     group.bench_function("search_all_with_frecency", |b| {
-        b.iter(|| black_box(manager::search_all(&indexes, black_box("report"), &[], 50, &table)))
+        b.iter(|| {
+            black_box(manager::search_all(
+                &indexes,
+                black_box("report"),
+                &[],
+                50,
+                &table,
+            ))
+        })
     });
     group.finish();
 }
 
-criterion_group!(benches, bench_search, bench_frecency_rerank, bench_app_keystroke_path);
+criterion_group!(
+    benches,
+    bench_search,
+    bench_frecency_rerank,
+    bench_app_keystroke_path
+);
 criterion_main!(benches);

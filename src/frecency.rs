@@ -78,7 +78,10 @@ mod tests {
     #[test]
     fn many_half_lives_approach_zero() {
         let decayed = decay(1.0, (HALF_LIFE_DAYS as i64) * DAY * 10);
-        assert!(decayed < 0.001, "{decayed} should be ~0 after 10 half-lives");
+        assert!(
+            decayed < 0.001,
+            "{decayed} should be ~0 after 10 half-lives"
+        );
     }
 
     #[test]
@@ -101,7 +104,10 @@ mod tests {
         }
         let daily = score(daily, last, 7 * DAY);
 
-        assert!(daily > stale, "daily {daily} should outrank stale burst {stale}");
+        assert!(
+            daily > stale,
+            "daily {daily} should outrank stale burst {stale}"
+        );
     }
 
     #[test]

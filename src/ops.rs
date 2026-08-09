@@ -99,8 +99,10 @@ impl FileOp {
             Self::Move { from, .. } => Self::Move { from, to: dest },
             Self::Copy { from, .. } => Self::Copy { from, to: dest },
             Self::Rename { path, .. } => {
-                let new_name =
-                    dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let new_name = dest
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 Self::Rename { path, new_name }
             }
             op @ Self::Delete { .. } => op,
@@ -112,8 +114,13 @@ impl FileOp {
 /// (Finder's convention). Counts up from 2; multi-part extensions
 /// split at the last dot ("x.tar.gz" → "x.tar 2.gz"), same as Finder.
 pub fn next_free_name(dest: &Path) -> Result<PathBuf> {
-    let parent = dest.parent().context("destination has no parent directory")?;
-    let stem = dest.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let parent = dest
+        .parent()
+        .context("destination has no parent directory")?;
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let ext = dest.extension().map(|e| e.to_string_lossy().into_owned());
     for n in 2..10_000u32 {
         let name = match &ext {
@@ -131,18 +138,31 @@ pub fn next_free_name(dest: &Path) -> Result<PathBuf> {
 /// A completed operation, carrying what undo needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppliedOp {
-    Moved { from: PathBuf, to: PathBuf },
+    Moved {
+        from: PathBuf,
+        to: PathBuf,
+    },
     /// Undo removes the copy at `to`; the original at `from` is never
     /// touched. `from` is retained so the tag index can copy the source's
     /// tags onto the new copy (see [`SidecarTags::apply_applied`]).
     ///
     /// [`SidecarTags::apply_applied`]: crate::tags::SidecarTags::apply_applied
-    Copied { from: PathBuf, to: PathBuf },
-    Renamed { from: PathBuf, to: PathBuf },
+    Copied {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+    },
     /// `removed_tags` carries the sidecar tags dropped when the item was
     /// trashed, so an undo can reinstate them. [`apply`] leaves it empty —
     /// it never touches tags; the tag layer fills it after the delete.
-    Deleted { original: PathBuf, restore: TrashRestore, removed_tags: Vec<Tag> },
+    Deleted {
+        original: PathBuf,
+        restore: TrashRestore,
+        removed_tags: Vec<Tag>,
+    },
 }
 
 /// What undo needs to bring a trashed item back — shaped by what each
@@ -199,7 +219,10 @@ pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<Applied
         FileOp::Move { from, to } => {
             ensure_target_free(to)?;
             move_path(from, to, progress)?;
-            Ok(AppliedOp::Moved { from: from.clone(), to: to.clone() })
+            Ok(AppliedOp::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            })
         }
         FileOp::Copy { from, to } => {
             ensure_target_free(to)?;
@@ -208,18 +231,27 @@ pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<Applied
                 remove_any(to);
                 return Err(err);
             }
-            Ok(AppliedOp::Copied { from: from.clone(), to: to.clone() })
+            Ok(AppliedOp::Copied {
+                from: from.clone(),
+                to: to.clone(),
+            })
         }
         FileOp::Rename { path, new_name } => {
             let to = rename_target(path, new_name)?;
             ensure_target_free(&to)?;
-            std::fs::rename(path, &to)
-                .with_context(|| format!("renaming {}", path.display()))?;
-            Ok(AppliedOp::Renamed { from: path.clone(), to })
+            std::fs::rename(path, &to).with_context(|| format!("renaming {}", path.display()))?;
+            Ok(AppliedOp::Renamed {
+                from: path.clone(),
+                to,
+            })
         }
         FileOp::Delete { path } => {
             let restore = trash_backend::delete_to_trash(path)?;
-            Ok(AppliedOp::Deleted { original: path.clone(), restore, removed_tags: Vec::new() })
+            Ok(AppliedOp::Deleted {
+                original: path.clone(),
+                restore,
+                removed_tags: Vec::new(),
+            })
         }
     }
 }
@@ -257,12 +289,11 @@ pub fn undo(applied: &AppliedOp) -> Result<()> {
         }
         AppliedOp::Renamed { from, to } => {
             ensure_target_free(from)?;
-            std::fs::rename(to, from)
-                .with_context(|| format!("renaming {} back", to.display()))
+            std::fs::rename(to, from).with_context(|| format!("renaming {} back", to.display()))
         }
-        AppliedOp::Deleted { original, restore, .. } => {
-            trash_backend::restore_from_trash(restore, original)
-        }
+        AppliedOp::Deleted {
+            original, restore, ..
+        } => trash_backend::restore_from_trash(restore, original),
     }
 }
 
@@ -383,8 +414,7 @@ fn copy_recursively(from: &Path, to: &Path, progress: &OpProgress) -> Result<()>
     if progress.canceled() {
         return Err(anyhow::Error::new(OpCanceled));
     }
-    let meta =
-        std::fs::metadata(from).with_context(|| format!("inspecting {}", from.display()))?;
+    let meta = std::fs::metadata(from).with_context(|| format!("inspecting {}", from.display()))?;
     if meta.is_dir() {
         std::fs::create_dir(to).with_context(|| format!("creating {}", to.display()))?;
         for dirent in
@@ -414,11 +444,14 @@ fn copy_file_chunked(from: &Path, to: &Path, progress: &OpProgress) -> Result<()
         if progress.canceled() {
             return Err(anyhow::Error::new(OpCanceled));
         }
-        let read = src.read(&mut buf).with_context(|| format!("reading {}", from.display()))?;
+        let read = src
+            .read(&mut buf)
+            .with_context(|| format!("reading {}", from.display()))?;
         if read == 0 {
             break;
         }
-        dst.write_all(&buf[..read]).with_context(|| format!("writing {}", to.display()))?;
+        dst.write_all(&buf[..read])
+            .with_context(|| format!("writing {}", to.display()))?;
         progress.copied.fetch_add(read as u64, Ordering::Relaxed);
     }
     // `fs::copy` preserves permissions; the chunked path must too.
@@ -439,7 +472,10 @@ fn remove_any(path: &Path) {
         Ok(_) => std::fs::remove_file(path),
     };
     if let Err(err) = result {
-        tracing::warn!("couldn't clean up partial copy at {}: {err}", path.display());
+        tracing::warn!(
+            "couldn't clean up partial copy at {}: {err}",
+            path.display()
+        );
     }
 }
 
@@ -457,16 +493,17 @@ mod trash_backend {
     pub fn delete_to_trash(path: &Path) -> Result<TrashRestore> {
         let Some(path_str) = path.to_str() else {
             // Mirrors the index's documented non-UTF-8 stance.
-            bail!("{} has a non-UTF-8 name; trashing it isn't supported yet", path.display());
+            bail!(
+                "{} has a non-UTF-8 name; trashing it isn't supported yet",
+                path.display()
+            );
         };
         let manager = NSFileManager::defaultManager();
         let url = NSURL::fileURLWithPath(&NSString::from_str(path_str));
         let mut resulting = None;
         manager
             .trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting))
-            .map_err(|err| {
-                anyhow::anyhow!("moving {} to the Trash: {err}", path.display())
-            })?;
+            .map_err(|err| anyhow::anyhow!("moving {} to the Trash: {err}", path.display()))?;
         Ok(resulting
             .and_then(|url| url.path())
             .map(|s| TrashRestore::TrashedAt(PathBuf::from(s.to_string())))
@@ -477,9 +514,8 @@ mod trash_backend {
         match restore {
             TrashRestore::TrashedAt(trashed) => {
                 ensure_target_free(original)?;
-                std::fs::rename(trashed, original).with_context(|| {
-                    format!("restoring {} from the Trash", original.display())
-                })
+                std::fs::rename(trashed, original)
+                    .with_context(|| format!("restoring {} from the Trash", original.display()))
             }
             TrashRestore::Item { .. } => {
                 bail!("this restore handle is from another platform's trash")
@@ -503,8 +539,7 @@ mod trash_backend {
     use super::*;
 
     pub fn delete_to_trash(path: &Path) -> Result<TrashRestore> {
-        trash::delete(path)
-            .with_context(|| format!("moving {} to the trash", path.display()))?;
+        trash::delete(path).with_context(|| format!("moving {} to the trash", path.display()))?;
         let newest_match = trash::os_limited::list().ok().and_then(|items| {
             items
                 .into_iter()
@@ -523,7 +558,12 @@ mod trash_backend {
 
     pub fn restore_from_trash(restore: &TrashRestore, original: &Path) -> Result<()> {
         match restore {
-            TrashRestore::Item { id, name, original_parent, time_deleted } => {
+            TrashRestore::Item {
+                id,
+                name,
+                original_parent,
+                time_deleted,
+            } => {
                 ensure_target_free(original)?;
                 let item = trash::TrashItem {
                     id: id.clone(),
@@ -531,9 +571,8 @@ mod trash_backend {
                     original_parent: original_parent.clone(),
                     time_deleted: *time_deleted,
                 };
-                trash::os_limited::restore_all([item]).with_context(|| {
-                    format!("restoring {} from the trash", original.display())
-                })
+                trash::os_limited::restore_all([item])
+                    .with_context(|| format!("restoring {} from the trash", original.display()))
             }
             TrashRestore::TrashedAt(_) => {
                 bail!("this restore handle is from another platform's trash")
@@ -561,7 +600,11 @@ mod tests {
         let to = dir.path().join("b.txt");
         write(&from, "hello");
 
-        let applied = apply(&FileOp::Move { from: from.clone(), to: to.clone() }).unwrap();
+        let applied = apply(&FileOp::Move {
+            from: from.clone(),
+            to: to.clone(),
+        })
+        .unwrap();
         assert!(!from.exists() && to.exists());
 
         undo(&applied).unwrap();
@@ -577,7 +620,11 @@ mod tests {
         write(&from, "a");
         write(&to, "b");
 
-        let err = apply(&FileOp::Move { from, to: to.clone() }).unwrap_err();
+        let err = apply(&FileOp::Move {
+            from,
+            to: to.clone(),
+        })
+        .unwrap_err();
         assert!(err.to_string().contains("already exists"));
         assert_eq!(fs::read_to_string(&to).unwrap(), "b");
     }
@@ -591,8 +638,15 @@ mod tests {
         write(&src.join("nested/deep.txt"), "deep");
         let dst = dir.path().join("dst");
 
-        let applied = apply(&FileOp::Copy { from: src.clone(), to: dst.clone() }).unwrap();
-        assert_eq!(fs::read_to_string(dst.join("nested/deep.txt")).unwrap(), "deep");
+        let applied = apply(&FileOp::Copy {
+            from: src.clone(),
+            to: dst.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dst.join("nested/deep.txt")).unwrap(),
+            "deep"
+        );
 
         undo(&applied).unwrap();
         assert!(!dst.exists());
@@ -605,12 +659,18 @@ mod tests {
         let path = dir.path().join("old.txt");
         write(&path, "x");
 
-        let applied =
-            apply(&FileOp::Rename { path: path.clone(), new_name: "new.txt".into() }).unwrap();
-        assert_eq!(applied, AppliedOp::Renamed {
-            from: path.clone(),
-            to: dir.path().join("new.txt")
-        });
+        let applied = apply(&FileOp::Rename {
+            path: path.clone(),
+            new_name: "new.txt".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            applied,
+            AppliedOp::Renamed {
+                from: path.clone(),
+                to: dir.path().join("new.txt")
+            }
+        );
         assert!(dir.path().join("new.txt").exists());
 
         undo(&applied).unwrap();
@@ -625,12 +685,18 @@ mod tests {
         write(&dir.path().join("b.txt"), "b");
 
         for bad in ["", "x/y", "x\\y", ".", ".."] {
-            let err = apply(&FileOp::Rename { path: path.clone(), new_name: bad.into() })
-                .unwrap_err();
+            let err = apply(&FileOp::Rename {
+                path: path.clone(),
+                new_name: bad.into(),
+            })
+            .unwrap_err();
             assert!(!err.to_string().is_empty(), "{bad:?} should be rejected");
         }
-        let err = apply(&FileOp::Rename { path: path.clone(), new_name: "b.txt".into() })
-            .unwrap_err();
+        let err = apply(&FileOp::Rename {
+            path: path.clone(),
+            new_name: "b.txt".into(),
+        })
+        .unwrap_err();
         assert!(err.to_string().contains("already exists"));
         assert!(path.exists());
     }
@@ -641,7 +707,11 @@ mod tests {
         let from = dir.path().join("a.txt");
         let to = dir.path().join("b.txt");
         write(&from, "moved");
-        let applied = apply(&FileOp::Move { from: from.clone(), to }).unwrap();
+        let applied = apply(&FileOp::Move {
+            from: from.clone(),
+            to,
+        })
+        .unwrap();
         write(&from, "squatter");
 
         let err = undo(&applied).unwrap_err();
@@ -660,7 +730,10 @@ mod tests {
 
         assert_eq!(progress.fraction(), None, "no total before the copy starts");
         apply_with_progress(
-            &FileOp::Copy { from: src, to: dir.path().join("dst") },
+            &FileOp::Copy {
+                from: src,
+                to: dir.path().join("dst"),
+            },
             &progress,
         )
         .unwrap();
@@ -680,7 +753,10 @@ mod tests {
         progress.request_cancel();
 
         let err = apply_with_progress(
-            &FileOp::Copy { from: src.clone(), to: dst.clone() },
+            &FileOp::Copy {
+                from: src.clone(),
+                to: dst.clone(),
+            },
             &progress,
         )
         .unwrap_err();
@@ -700,23 +776,35 @@ mod tests {
         // Extensionless names and dotfiles.
         let bare = dir.path().join("Makefile");
         write(&bare, "");
-        assert_eq!(next_free_name(&bare).unwrap(), dir.path().join("Makefile 2"));
+        assert_eq!(
+            next_free_name(&bare).unwrap(),
+            dir.path().join("Makefile 2")
+        );
     }
 
     #[test]
     fn destination_and_retarget_line_up() {
-        let op = FileOp::Copy { from: "/a/x.txt".into(), to: "/b/x.txt".into() };
+        let op = FileOp::Copy {
+            from: "/a/x.txt".into(),
+            to: "/b/x.txt".into(),
+        };
         assert_eq!(op.destination(), Some(PathBuf::from("/b/x.txt")));
         let retargeted = op.with_destination("/b/x 2.txt".into());
         assert_eq!(retargeted.destination(), Some(PathBuf::from("/b/x 2.txt")));
 
-        let rename = FileOp::Rename { path: "/a/x.txt".into(), new_name: "y.txt".into() };
+        let rename = FileOp::Rename {
+            path: "/a/x.txt".into(),
+            new_name: "y.txt".into(),
+        };
         assert_eq!(rename.destination(), Some(PathBuf::from("/a/y.txt")));
         let retargeted = rename.with_destination("/a/y 2.txt".into());
-        assert_eq!(retargeted, FileOp::Rename {
-            path: "/a/x.txt".into(),
-            new_name: "y 2.txt".into()
-        });
+        assert_eq!(
+            retargeted,
+            FileOp::Rename {
+                path: "/a/x.txt".into(),
+                new_name: "y 2.txt".into()
+            }
+        );
     }
 
     /// Exercises the real OS trash. Environments without a usable
@@ -729,7 +817,9 @@ mod tests {
         let victim = dir.path().join("filex-trash-roundtrip.txt");
         write(&victim, "bye");
 
-        let applied = match apply(&FileOp::Delete { path: victim.clone() }) {
+        let applied = match apply(&FileOp::Delete {
+            path: victim.clone(),
+        }) {
             Ok(applied) => applied,
             Err(err) => {
                 eprintln!("skipping trash test (no usable trash here): {err:#}");
@@ -737,7 +827,13 @@ mod tests {
             }
         };
         assert!(!victim.exists(), "delete left the file in place");
-        if matches!(&applied, AppliedOp::Deleted { restore: TrashRestore::Unknown, .. }) {
+        if matches!(
+            &applied,
+            AppliedOp::Deleted {
+                restore: TrashRestore::Unknown,
+                ..
+            }
+        ) {
             eprintln!("skipping restore assertion (trash didn't identify the item)");
             return;
         }
@@ -748,7 +844,10 @@ mod tests {
     }
 
     fn one(name: &str) -> Vec<AppliedOp> {
-        vec![AppliedOp::Copied { from: PathBuf::from("src"), to: PathBuf::from(name) }]
+        vec![AppliedOp::Copied {
+            from: PathBuf::from("src"),
+            to: PathBuf::from(name),
+        }]
     }
 
     #[test]
@@ -768,7 +867,9 @@ mod tests {
         let mut count = 1;
         while let Some(batch) = journal.pop() {
             count += 1;
-            let [AppliedOp::Copied { to, .. }] = &batch[..] else { panic!() };
+            let [AppliedOp::Copied { to, .. }] = &batch[..] else {
+                panic!()
+            };
             assert_ne!(to, &PathBuf::from("f9"), "f0..f9 should have been evicted");
         }
         assert_eq!(count, JOURNAL_CAP);
@@ -777,11 +878,16 @@ mod tests {
     #[test]
     fn journal_records_a_multi_op_batch_as_one_unit() {
         let mut journal = Journal::default();
-        let batch =
-            vec![
-                AppliedOp::Copied { from: "s".into(), to: "a".into() },
-                AppliedOp::Copied { from: "s".into(), to: "b".into() },
-            ];
+        let batch = vec![
+            AppliedOp::Copied {
+                from: "s".into(),
+                to: "a".into(),
+            },
+            AppliedOp::Copied {
+                from: "s".into(),
+                to: "b".into(),
+            },
+        ];
         journal.record(batch.clone());
         // One user action = one pop, carrying both ops.
         assert_eq!(journal.pop(), Some(batch));

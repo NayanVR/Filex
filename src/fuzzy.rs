@@ -151,8 +151,10 @@ mod tests {
 
     /// Rank several names against one needle, best first.
     fn ranked<'a>(needle: &str, names: &[&'a str]) -> Vec<&'a str> {
-        let mut scored: Vec<(u16, &str)> =
-            names.iter().filter_map(|n| penalty(n, needle).map(|p| (p, *n))).collect();
+        let mut scored: Vec<(u16, &str)> = names
+            .iter()
+            .filter_map(|n| penalty(n, needle).map(|p| (p, *n)))
+            .collect();
         scored.sort();
         scored.into_iter().map(|(_, n)| n).collect()
     }
@@ -227,12 +229,18 @@ mod tests {
 
     #[test]
     fn earlier_matches_beat_later_ones() {
-        assert_eq!(ranked("abc", &["zzzzabc", "abczzzz"]), ["abczzzz", "zzzzabc"]);
+        assert_eq!(
+            ranked("abc", &["zzzzabc", "abczzzz"]),
+            ["abczzzz", "zzzzabc"]
+        );
     }
 
     #[test]
     fn shorter_names_win_an_otherwise_equal_match() {
-        assert_eq!(ranked("abc", &["abc_long_tail.txt", "abc.txt"]), ["abc.txt", "abc_long_tail.txt"]);
+        assert_eq!(
+            ranked("abc", &["abc_long_tail.txt", "abc.txt"]),
+            ["abc.txt", "abc_long_tail.txt"]
+        );
     }
 
     #[test]

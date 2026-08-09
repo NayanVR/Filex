@@ -18,14 +18,19 @@ use super::theme::Theme;
 
 /// Heading row: what the command was understood to mean, in plain words.
 pub fn heading(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().flex().items_center().gap_2().child(
-        div().text_sm().text_color(theme.text).child(text.into()),
-    )
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().text_sm().text_color(theme.text).child(text.into()))
 }
 
 /// The sub-line under the heading — match counts, skips, warnings.
 pub fn subtitle(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().text_xs().text_color(theme.text_dim).child(text.into())
+    div()
+        .text_xs()
+        .text_color(theme.text_dim)
+        .child(text.into())
 }
 
 /// A refusal: the command parsed but produced no runnable plan. Says
@@ -62,12 +67,23 @@ pub fn op_row(
         .flex()
         .items_baseline()
         .gap_2()
-        .child(div().flex_none().text_xs().text_color(theme.text).whitespace_nowrap().child(name.into()))
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .child(div().w_full().text_xs().text_color(theme.text_dim).truncate().child(location.into())),
+                .flex_none()
+                .text_xs()
+                .text_color(theme.text)
+                .whitespace_nowrap()
+                .child(name.into()),
+        )
+        .child(
+            div().flex_1().min_w_0().child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_color(theme.text_dim)
+                    .truncate()
+                    .child(location.into()),
+            ),
         );
     div()
         .id(id)
@@ -83,10 +99,14 @@ pub fn op_row(
         .child(checkbox(theme, checked))
         .child(source)
         .children(dest.map(|target| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(div().w_full().text_xs().text_color(theme.text_dim).truncate().child(target))
+            div().flex_1().min_w_0().child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_color(theme.text_dim)
+                    .truncate()
+                    .child(target),
+            )
         }))
 }
 
@@ -102,9 +122,9 @@ fn checkbox(theme: &Theme, checked: bool) -> Div {
         .items_center()
         .justify_center();
     if checked {
-        base.border_color(theme.accent).bg(theme.accent).child(
-            div().text_color(theme.on_accent).text_xs().child("✓"),
-        )
+        base.border_color(theme.accent)
+            .bg(theme.accent)
+            .child(div().text_color(theme.on_accent).text_xs().child("✓"))
     } else {
         base.border_color(theme.border)
     }
@@ -120,12 +140,28 @@ pub fn confirm_button(
     enabled: bool,
     destructive: bool,
 ) -> Stateful<Div> {
-    let fill = if destructive { theme.warn } else { theme.accent };
-    let base = div().id(id).px_3().py_1().rounded_md().text_sm().child(label.into());
-    if enabled {
-        base.cursor_pointer().bg(fill).text_color(theme.on_accent).hover(|s| s.opacity(0.9))
+    let fill = if destructive {
+        theme.warn
     } else {
-        base.border_1().border_color(theme.border).text_color(theme.text_dim).opacity(0.6)
+        theme.accent
+    };
+    let base = div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .text_sm()
+        .child(label.into());
+    if enabled {
+        base.cursor_pointer()
+            .bg(fill)
+            .text_color(theme.on_accent)
+            .hover(|s| s.opacity(0.9))
+    } else {
+        base.border_1()
+            .border_color(theme.border)
+            .text_color(theme.text_dim)
+            .opacity(0.6)
     }
 }
 

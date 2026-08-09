@@ -78,12 +78,21 @@ fn capture_panic(app: &'static str, info: &std::panic::PanicHookInfo) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0),
-        thread: std::thread::current().name().unwrap_or("unnamed").to_string(),
+        thread: std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string(),
         message: scrub(&payload_message(info.payload())),
-        location: info.location().map(|l| scrub(&format!("{}:{}", l.file(), l.line()))),
+        location: info
+            .location()
+            .map(|l| scrub(&format!("{}:{}", l.file(), l.line()))),
         backtrace: scrub(&std::backtrace::Backtrace::force_capture().to_string()),
     };
-    tracing::error!("panic in {app}: {} (at {:?})", report.message, report.location);
+    tracing::error!(
+        "panic in {app}: {} (at {:?})",
+        report.message,
+        report.location
+    );
     if let Some(dir) = default_queue_dir() {
         let _ = enqueue(&dir, &report, QUEUE_CAP);
     }
@@ -234,7 +243,10 @@ mod tests {
     fn scrub_redacts_home_and_paths_but_keeps_symbols() {
         let home = Some(Path::new("/Users/alice"));
         // Home dir → ~.
-        assert_eq!(scrub_with_home("failed at /Users/alice/Secret", home), "failed at ~/Secret");
+        assert_eq!(
+            scrub_with_home("failed at /Users/alice/Secret", home),
+            "failed at ~/Secret"
+        );
         // Absolute paths (Unix + Windows) → <path>; symbols survive.
         assert_eq!(
             scrub_with_home("panic in filex::index at /home/bob/report.pdf", None),
@@ -245,7 +257,10 @@ mod tests {
             "read <path> failed"
         );
         // Single-segment roots and non-paths are untouched.
-        assert_eq!(scrub_with_home("using /etc and value 42", None), "using /etc and value 42");
+        assert_eq!(
+            scrub_with_home("using /etc and value 42", None),
+            "using /etc and value 42"
+        );
     }
 
     #[test]
@@ -290,8 +305,11 @@ mod tests {
         // Five older reports, same 20-digit padding enqueue uses (small
         // values sort before the real nanos file added below).
         for i in 1..=5u128 {
-            std::fs::write(q.join(format!("crash-{i:020}.json")), serde_json::to_vec(&sample()).unwrap())
-                .unwrap();
+            std::fs::write(
+                q.join(format!("crash-{i:020}.json")),
+                serde_json::to_vec(&sample()).unwrap(),
+            )
+            .unwrap();
         }
         // enqueue adds the newest (nanos) file, then prunes to cap 3.
         enqueue(&q, &sample(), 3).unwrap();
@@ -314,7 +332,10 @@ mod tests {
         // `panic!("literal")` payloads are `&str`; formatted ones `String`.
         let s: &str = "boom";
         assert_eq!(payload_message(&s), "boom");
-        assert_eq!(payload_message(&String::from("formatted 42")), "formatted 42");
+        assert_eq!(
+            payload_message(&String::from("formatted 42")),
+            "formatted 42"
+        );
         assert_eq!(payload_message(&5u32), "non-string panic payload");
     }
 

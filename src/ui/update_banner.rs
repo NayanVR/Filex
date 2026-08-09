@@ -27,7 +27,11 @@ pub fn update_banner(theme: &Theme) -> Div {
 /// The message label; takes the remaining width so the buttons sit at the
 /// right edge.
 pub fn message(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().flex_1().overflow_hidden().text_color(theme.text).child(text.into())
+    div()
+        .flex_1()
+        .overflow_hidden()
+        .text_color(theme.text)
+        .child(text.into())
 }
 
 /// The primary action pill (Copy / Get update / Restart). Accent fill with

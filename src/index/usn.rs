@@ -87,8 +87,7 @@ pub fn parse_usn_output(buf: &[u8]) -> (u64, Vec<UsnRecord>) {
 
     while offset + RECORD_HEADER_LEN <= buf.len() {
         let rec = &buf[offset..];
-        let record_length =
-            u32::from_le_bytes(rec[0..4].try_into().expect("4 bytes")) as usize;
+        let record_length = u32::from_le_bytes(rec[0..4].try_into().expect("4 bytes")) as usize;
         if record_length < RECORD_HEADER_LEN || offset + record_length > buf.len() {
             break;
         }
@@ -256,7 +255,14 @@ mod tests {
     use std::path::PathBuf;
 
     /// Encode a USN_RECORD_V2 the way the kernel lays it out.
-    fn encode_record(frn: u64, parent: u64, usn: i64, reason: u32, attrs: u32, name: &str) -> Vec<u8> {
+    fn encode_record(
+        frn: u64,
+        parent: u64,
+        usn: i64,
+        reason: u32,
+        attrs: u32,
+        name: &str,
+    ) -> Vec<u8> {
         let name_utf16: Vec<u16> = name.encode_utf16().collect();
         let name_bytes = name_utf16.len() * 2;
         let record_len = (RECORD_HEADER_LEN + name_bytes + 7) & !7; // 8-aligned
@@ -282,7 +288,14 @@ mod tests {
     #[test]
     fn parses_continuation_and_packed_records() {
         let mut buf = 777u64.to_le_bytes().to_vec();
-        buf.extend(encode_record(10, ROOT_FRN, 100, USN_REASON_FILE_CREATE, 0, "a.txt"));
+        buf.extend(encode_record(
+            10,
+            ROOT_FRN,
+            100,
+            USN_REASON_FILE_CREATE,
+            0,
+            "a.txt",
+        ));
         buf.extend(encode_record(
             11,
             ROOT_FRN,
@@ -308,7 +321,14 @@ mod tests {
         let mut v3 = encode_record(10, ROOT_FRN, 100, USN_REASON_FILE_CREATE, 0, "refs");
         v3[4..6].copy_from_slice(&3u16.to_le_bytes());
         buf.extend(v3);
-        buf.extend(encode_record(11, ROOT_FRN, 101, USN_REASON_FILE_CREATE, 0, "keep.txt"));
+        buf.extend(encode_record(
+            11,
+            ROOT_FRN,
+            101,
+            USN_REASON_FILE_CREATE,
+            0,
+            "keep.txt",
+        ));
 
         let (_, records) = parse_usn_output(&buf);
         assert_eq!(records.len(), 1);
@@ -323,7 +343,12 @@ mod tests {
     }
 
     fn mft(frn: u64, parent: u64, name: &str, is_dir: bool) -> MftEntry {
-        MftEntry { frn, parent_frn: parent, name: name.into(), is_dir }
+        MftEntry {
+            frn,
+            parent_frn: parent,
+            name: name.into(),
+            is_dir,
+        }
     }
 
     #[test]
@@ -342,9 +367,15 @@ mod tests {
         let hit = &index.search("deep", 10)[0];
         assert_eq!(
             index.path_of(hit.id).unwrap(),
-            PathBuf::from(r"C:\").join("top").join("sub").join("deep.txt")
+            PathBuf::from(r"C:\")
+                .join("top")
+                .join("sub")
+                .join("deep.txt")
         );
-        assert_eq!(index.entry_by_native_key(20), index.resolve(&PathBuf::from("top").join("sub")));
+        assert_eq!(
+            index.entry_by_native_key(20),
+            index.resolve(&PathBuf::from("top").join("sub"))
+        );
     }
 
     #[test]
@@ -357,7 +388,8 @@ mod tests {
             mft(50, 40, "outside.dll", false),
             mft(40, 41, "system", true),
         ];
-        let (index, orphans) = build_index_from_mft(Path::new(r"C:\data"), ROOT_FRN, &records, false);
+        let (index, orphans) =
+            build_index_from_mft(Path::new(r"C:\data"), ROOT_FRN, &records, false);
 
         assert_eq!(index.len(), 1);
         assert_eq!(orphans, 3);
@@ -371,10 +403,10 @@ mod tests {
         // matches; "Users" is a system dir on none of them.
         let sys = crate::index::SYSTEM_TOP_DIRS[0];
         let records = vec![
-            mft(10, ROOT_FRN, sys, true),          // e.g. C:\Windows
-            mft(20, 10, "System32", true),         //   \System32
-            mft(30, 20, "kernel32.dll", false),    //     \kernel32.dll
-            mft(40, ROOT_FRN, "Users", true),      // a user dir, kept
+            mft(10, ROOT_FRN, sys, true),       // e.g. C:\Windows
+            mft(20, 10, "System32", true),      //   \System32
+            mft(30, 20, "kernel32.dll", false), //     \kernel32.dll
+            mft(40, ROOT_FRN, "Users", true),   // a user dir, kept
             mft(50, 40, "notes.txt", false),
         ];
 
@@ -416,7 +448,14 @@ mod tests {
     }
 
     fn record(frn: u64, parent: u64, reason: u32, attrs: u32, name: &str) -> UsnRecord {
-        UsnRecord { frn, parent_frn: parent, usn: 0, reason, attributes: attrs, name: name.into() }
+        UsnRecord {
+            frn,
+            parent_frn: parent,
+            usn: 0,
+            reason,
+            attributes: attrs,
+            name: name.into(),
+        }
     }
 
     #[test]
@@ -434,13 +473,8 @@ mod tests {
     #[test]
     fn journal_create_and_rename_new_upsert_at_parent() {
         for reason in [USN_REASON_FILE_CREATE, USN_REASON_RENAME_NEW_NAME] {
-            let delta = journal_record_to_delta(&record(
-                10,
-                20,
-                reason,
-                FILE_ATTRIBUTE_DIRECTORY,
-                "moved",
-            ));
+            let delta =
+                journal_record_to_delta(&record(10, 20, reason, FILE_ATTRIBUTE_DIRECTORY, "moved"));
             assert_eq!(
                 delta,
                 Some(FsDelta::NativeUpsert {
@@ -484,6 +518,9 @@ mod tests {
             None
         );
         // A bare CLOSE with no data/name reason is nothing to do.
-        assert_eq!(journal_record_to_delta(&record(10, 20, 0x8000_0000, 0, "closed")), None);
+        assert_eq!(
+            journal_record_to_delta(&record(10, 20, 0x8000_0000, 0, "closed")),
+            None
+        );
     }
 }

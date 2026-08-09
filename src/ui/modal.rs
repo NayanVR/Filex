@@ -45,7 +45,10 @@ pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
 }
 
 pub fn message(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().text_xs().text_color(theme.text_dim).child(text.into())
+    div()
+        .text_xs()
+        .text_color(theme.text_dim)
+        .child(text.into())
 }
 
 /// Right-aligned button row.
@@ -70,7 +73,9 @@ pub fn button(
         .text_sm()
         .child(label.into());
     if primary {
-        base.bg(theme.accent).text_color(theme.on_accent).hover(|s| s.opacity(0.9))
+        base.bg(theme.accent)
+            .text_color(theme.on_accent)
+            .hover(|s| s.opacity(0.9))
     } else {
         let hover = theme.hover;
         base.border_1()

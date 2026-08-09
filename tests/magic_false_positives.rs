@@ -28,7 +28,9 @@ fn queries_for(name: &str) -> Vec<String> {
         .split(|c: char| c == '-' || c == '_' || c == '.' || c == ' ')
         .filter(|w| !w.is_empty())
         .collect();
-    (1..=normalized.len()).map(|n| normalized[..n].join(" ")).collect()
+    (1..=normalized.len())
+        .map(|n| normalized[..n].join(" "))
+        .collect()
 }
 
 #[test]
@@ -95,10 +97,16 @@ fn measure_structured_evidence_gate() {
         }
     }
 
-    let kept: Vec<&str> =
-        COMMANDS.iter().copied().filter(|c| has_structured_evidence(&parse(c))).collect();
-    let lost: Vec<&str> =
-        COMMANDS.iter().copied().filter(|c| !has_structured_evidence(&parse(c))).collect();
+    let kept: Vec<&str> = COMMANDS
+        .iter()
+        .copied()
+        .filter(|c| has_structured_evidence(&parse(c)))
+        .collect();
+    let lost: Vec<&str> = COMMANDS
+        .iter()
+        .copied()
+        .filter(|c| !has_structured_evidence(&parse(c)))
+        .collect();
 
     eprintln!("\n=== structured-evidence gate ===");
     eprintln!("false positives before gate : {fired}");
@@ -106,7 +114,11 @@ fn measure_structured_evidence_gate() {
     for survivor in survivors.iter().take(10) {
         eprintln!("    SURVIVED: {survivor}");
     }
-    eprintln!("real commands kept          : {}/{}", kept.len(), COMMANDS.len());
+    eprintln!(
+        "real commands kept          : {}/{}",
+        kept.len(),
+        COMMANDS.len()
+    );
     eprintln!("real commands lost          : {}", lost.len());
     for command in &lost {
         eprintln!("    LOST: {command}");
@@ -180,7 +192,10 @@ fn filename_evidence_separates_commands_from_lookalikes() {
 
     let mut wrongly_suppressed = Vec::new();
     for command in COMMANDS {
-        assert!(filex::magic::parse(command, NOW).is_some(), "{command:?} should parse");
+        assert!(
+            filex::magic::parse(command, NOW).is_some(),
+            "{command:?} should parse"
+        );
         if matches_a_real_filename(command, &corpus) {
             wrongly_suppressed.push(*command);
         }
@@ -188,7 +203,10 @@ fn filename_evidence_separates_commands_from_lookalikes() {
 
     eprintln!("\n=== filename evidence as the delete gate ===");
     eprintln!("real commands tested            : {}", COMMANDS.len());
-    eprintln!("wrongly suppressed by the rule  : {}", wrongly_suppressed.len());
+    eprintln!(
+        "wrongly suppressed by the rule  : {}",
+        wrongly_suppressed.len()
+    );
     for command in &wrongly_suppressed {
         eprintln!("  MISSED: {command}");
     }

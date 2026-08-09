@@ -50,7 +50,11 @@ pub fn collapsible_header(
     collapsed: bool,
 ) -> Stateful<Div> {
     let (hover, text) = (theme.hover, theme.text);
-    let chevron = if collapsed { "icons/chevron-right.svg" } else { "icons/chevron-down.svg" };
+    let chevron = if collapsed {
+        "icons/chevron-right.svg"
+    } else {
+        "icons/chevron-down.svg"
+    };
     div()
         .id(id)
         .flex()
@@ -108,7 +112,11 @@ pub fn capacity_bar(theme: &Theme, fraction: f32) -> Div {
 /// down through flex the way a `uniform_list` row does. Pair it with a
 /// tooltip on the row for the full text.
 pub fn sidebar_label(label: impl Into<SharedString>) -> Div {
-    div().flex_none().w(px(LABEL_WIDTH)).truncate().child(label.into())
+    div()
+        .flex_none()
+        .w(px(LABEL_WIDTH))
+        .truncate()
+        .child(label.into())
 }
 
 /// The common sidebar row: inset, rounded, hover-highlighted.

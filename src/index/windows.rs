@@ -67,7 +67,10 @@ pub fn parse_notify_buffer(buf: &[u8]) -> Vec<FileNotifyEvent> {
             // path component-wise so fixtures behave identically on
             // non-Windows hosts (where `\` is not a separator).
             let relative_path: PathBuf = name.split('\\').collect();
-            events.push(FileNotifyEvent { action, relative_path });
+            events.push(FileNotifyEvent {
+                action,
+                relative_path,
+            });
         }
 
         if next == 0 {
@@ -118,21 +121,25 @@ mod imp {
         CloseHandle, ERROR_HANDLE_EOF, ERROR_NOTIFY_ENUM_DIR, GENERIC_READ, HANDLE,
     };
     use windows::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME,
-        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        GetFileInformationByHandle, OPEN_EXISTING, ReadDirectoryChangesW,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
+        FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        OPEN_EXISTING, ReadDirectoryChangesW,
     };
-    use windows::Win32::System::IO::{CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED};
-    use windows::Win32::System::Threading::CreateEventW;
+    use windows::Win32::System::IO::{
+        CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED,
+    };
     use windows::Win32::System::Ioctl::{
         FSCTL_ENUM_USN_DATA, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, MFT_ENUM_DATA_V0,
         READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
     };
+    use windows::Win32::System::Threading::CreateEventW;
     use windows::core::HSTRING;
 
-    use crate::index::usn::{JOURNAL_REASON_MASK, MftEntry, journal_record_to_delta, parse_usn_output};
     use crate::index::VolumeIndex;
+    use crate::index::usn::{
+        JOURNAL_REASON_MASK, MftEntry, journal_record_to_delta, parse_usn_output,
+    };
 
     /// Sendable wrapper: HANDLEs are agile; this one is only used for
     /// ReadDirectoryChangesW on the reader thread and CancelIoEx/CloseHandle
@@ -174,16 +181,21 @@ mod imp {
 
             let handle = std::sync::Arc::new(DirHandle(raw));
             let (armed_tx, armed_rx) = std::sync::mpsc::channel();
-            let thread = std::thread::Builder::new().name("filex-rdcw".into()).spawn({
-                let handle = handle.clone();
-                let root = root.to_path_buf();
-                move || reader_loop(&handle, &root, &deltas, &armed_tx)
-            })?;
+            let thread = std::thread::Builder::new()
+                .name("filex-rdcw".into())
+                .spawn({
+                    let handle = handle.clone();
+                    let root = root.to_path_buf();
+                    move || reader_loop(&handle, &root, &deltas, &armed_tx)
+                })?;
 
             armed_rx
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .context("change-notification reader failed to arm (see log)")?;
-            Ok(Self { handle, thread: Some(thread) })
+            Ok(Self {
+                handle,
+                thread: Some(thread),
+            })
         }
     }
 
@@ -257,28 +269,28 @@ mod imp {
 
             let mut bytes_returned = 0u32;
             // SAFETY: waits for the exact I/O issued above.
-            let result = unsafe {
-                GetOverlappedResult(handle.0, &overlapped, &mut bytes_returned, true)
-            };
+            let result =
+                unsafe { GetOverlappedResult(handle.0, &overlapped, &mut bytes_returned, true) };
             let batch = match result {
                 Err(err) if err.code() == ERROR_NOTIFY_ENUM_DIR.to_hresult() => {
                     // Too many changes for the OS to enumerate: rescan.
-                    vec![FsDelta::Rescan { path: root.to_path_buf() }]
+                    vec![FsDelta::Rescan {
+                        path: root.to_path_buf(),
+                    }]
                 }
                 Err(err) => {
                     // Cancellation (drop) is expected; anything else must
                     // be visible — a silent break means silent staleness.
                     if err.code() != ERROR_OPERATION_ABORTED.to_hresult() {
-                        tracing::warn!(
-                            "change notification on {} failed: {err}",
-                            root.display()
-                        );
+                        tracing::warn!("change notification on {} failed: {err}", root.display());
                     }
                     break;
                 }
                 Ok(()) if bytes_returned == 0 => {
                     // Our buffer overflowed; changes were dropped.
-                    vec![FsDelta::Rescan { path: root.to_path_buf() }]
+                    vec![FsDelta::Rescan {
+                        path: root.to_path_buf(),
+                    }]
                 }
                 Ok(()) => {
                     // SAFETY: the kernel wrote bytes_returned bytes.
@@ -381,18 +393,20 @@ mod imp {
             // File, whose Drop closes it when the connection ends.
             let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
             let host = host.clone();
-            std::thread::Builder::new().name("filex-ipc".into()).spawn(move || {
-                let reader = match stream.try_clone() {
-                    Ok(reader) => reader,
-                    Err(err) => {
-                        tracing::warn!("pipe clone failed: {err}");
-                        return;
+            std::thread::Builder::new()
+                .name("filex-ipc".into())
+                .spawn(move || {
+                    let reader = match stream.try_clone() {
+                        Ok(reader) => reader,
+                        Err(err) => {
+                            tracing::warn!("pipe clone failed: {err}");
+                            return;
+                        }
+                    };
+                    if let Err(err) = crate::index::ipc::serve_connection(reader, stream, &*host) {
+                        tracing::warn!("ipc connection ended with error: {err:#}");
                     }
-                };
-                if let Err(err) = crate::index::ipc::serve_connection(reader, stream, &*host) {
-                    tracing::warn!("ipc connection ended with error: {err:#}");
-                }
-            })?;
+                })?;
         }
         Ok(())
     }
@@ -415,7 +429,11 @@ mod imp {
             if attempt > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            match std::fs::File::options().read(true).write(true).open(pipe_name) {
+            match std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(pipe_name)
+            {
                 Ok(file) => return Ok(file),
                 Err(err) => last_err = Some(err),
             }
@@ -555,7 +573,10 @@ mod imp {
     /// enumeration replay through the watcher (idempotently) afterwards.
     pub fn usn_bootstrap(root: &Path, exclude_system: bool) -> Result<UsnBootstrap> {
         let Some(drive) = volume_root_drive(root) else {
-            bail!("USN bootstrap requires a volume root, got {}", root.display());
+            bail!(
+                "USN bootstrap requires a volume root, got {}",
+                root.display()
+            );
         };
         let journal = query_usn_journal(root)?;
         let root_frn = frn_of_directory(root)?;
@@ -642,14 +663,22 @@ mod imp {
             let handle = Arc::new(open_volume(drive)?);
             let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let next_usn = Arc::new(AtomicU64::new(start_usn as u64));
-            let thread = std::thread::Builder::new().name("filex-usn-journal".into()).spawn({
-                let handle = handle.clone();
-                let shutdown = shutdown.clone();
-                let next_usn = next_usn.clone();
-                let root = root.to_path_buf();
-                move || journal_loop(&handle, &root, journal_id, &next_usn, &deltas, &shutdown)
-            })?;
-            Ok(Self { handle, shutdown, thread: Some(thread), journal_id, next_usn })
+            let thread = std::thread::Builder::new()
+                .name("filex-usn-journal".into())
+                .spawn({
+                    let handle = handle.clone();
+                    let shutdown = shutdown.clone();
+                    let next_usn = next_usn.clone();
+                    let root = root.to_path_buf();
+                    move || journal_loop(&handle, &root, journal_id, &next_usn, &deltas, &shutdown)
+                })?;
+            Ok(Self {
+                handle,
+                shutdown,
+                thread: Some(thread),
+                journal_id,
+                next_usn,
+            })
         }
 
         pub fn journal_id(&self) -> u64 {
@@ -666,7 +695,8 @@ mod imp {
 
     impl Drop for UsnJournalWatcher {
         fn drop(&mut self) {
-            self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.shutdown
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             // Best-effort nudge; the loop exits on its own within one
             // read timeout even if the cancel is ignored.
             // SAFETY: cancelling I/O on our own handle.
@@ -734,7 +764,9 @@ mod imp {
                     if err.code() != ERROR_OPERATION_ABORTED.to_hresult() {
                         tracing::warn!("USN journal read failed ({err}); rescanning");
                         deltas
-                            .send(vec![FsDelta::Rescan { path: root.to_path_buf() }])
+                            .send(vec![FsDelta::Rescan {
+                                path: root.to_path_buf(),
+                            }])
                             .ok();
                     }
                     break;
@@ -757,7 +789,11 @@ mod tests {
             // Records are DWORD-aligned; the kernel pads NextEntryOffset.
             let record_len = 12 + name_bytes;
             let padded = (record_len + 3) & !3;
-            let next = if i + 1 == records.len() { 0 } else { padded as u32 };
+            let next = if i + 1 == records.len() {
+                0
+            } else {
+                padded as u32
+            };
 
             buf.extend_from_slice(&next.to_ne_bytes());
             buf.extend_from_slice(&action.to_ne_bytes());
@@ -809,7 +845,10 @@ mod tests {
         };
         assert_eq!(
             event_to_delta(root, &added, Some(false)),
-            Some(FsDelta::Upsert { path: root.join("a.txt"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: root.join("a.txt"),
+                is_dir: false
+            })
         );
 
         let renamed = FileNotifyEvent {
@@ -818,12 +857,17 @@ mod tests {
         };
         assert_eq!(
             event_to_delta(root, &renamed, Some(true)),
-            Some(FsDelta::Upsert { path: root.join("dir"), is_dir: true })
+            Some(FsDelta::Upsert {
+                path: root.join("dir"),
+                is_dir: true
+            })
         );
         // Vanished before we could stat it: safe to treat as removal.
         assert_eq!(
             event_to_delta(root, &added, None),
-            Some(FsDelta::Remove { path: root.join("a.txt") })
+            Some(FsDelta::Remove {
+                path: root.join("a.txt")
+            })
         );
     }
 
@@ -831,10 +875,15 @@ mod tests {
     fn maps_removed_and_renamed_old_as_removes() {
         let root = Path::new("/root");
         for action in [FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_OLD_NAME] {
-            let event = FileNotifyEvent { action, relative_path: PathBuf::from("gone.txt") };
+            let event = FileNotifyEvent {
+                action,
+                relative_path: PathBuf::from("gone.txt"),
+            };
             assert_eq!(
                 event_to_delta(root, &event, None),
-                Some(FsDelta::Remove { path: root.join("gone.txt") })
+                Some(FsDelta::Remove {
+                    path: root.join("gone.txt")
+                })
             );
         }
     }
@@ -843,7 +892,10 @@ mod tests {
     fn modified_and_unknown_actions_map_to_nothing() {
         let root = Path::new("/root");
         for action in [FILE_ACTION_MODIFIED, 99] {
-            let event = FileNotifyEvent { action, relative_path: PathBuf::from("x") };
+            let event = FileNotifyEvent {
+                action,
+                relative_path: PathBuf::from("x"),
+            };
             assert_eq!(event_to_delta(root, &event, Some(false)), None);
         }
     }
@@ -953,9 +1005,11 @@ mod tests {
             let target = temp.join(&name);
             fs::write(&target, b"x").unwrap();
 
-            let seen = wait_for(&rx, Duration::from_secs(20), |d| {
-                matches!(d, FsDelta::NativeUpsert { name: n, is_dir: false, .. } if *n == name)
-            });
+            let seen = wait_for(
+                &rx,
+                Duration::from_secs(20),
+                |d| matches!(d, FsDelta::NativeUpsert { name: n, is_dir: false, .. } if *n == name),
+            );
             fs::remove_file(&target).ok();
             assert!(seen, "no NativeUpsert from the USN journal for {name}");
         }

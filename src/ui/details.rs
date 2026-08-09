@@ -68,7 +68,12 @@ pub fn meta_row(
         .items_start()
         .gap_4()
         .text_xs()
-        .child(div().flex_none().text_color(theme.text_dim).child(label.into()))
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme.text_dim)
+                .child(label.into()),
+        )
         .child(
             div()
                 .flex_1()
@@ -86,7 +91,11 @@ pub fn divider(theme: &Theme) -> Div {
 
 /// A dim section label (e.g. the "Tags" heading above the chips).
 pub fn section_label(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().flex_none().text_xs().text_color(theme.text_dim).child(text.into())
+    div()
+        .flex_none()
+        .text_xs()
+        .text_color(theme.text_dim)
+        .child(text.into())
 }
 
 /// Solid RGB dot color for each Finder tag color. Kept vivid and
@@ -111,7 +120,11 @@ pub fn tag_dot_color(theme: &Theme, color: Option<TagColor>) -> Rgba {
 
 /// A small filled circle — the color dot inside chips and swatches.
 fn dot(color: Rgba, diameter: f32) -> Div {
-    div().flex_none().size(px(diameter)).rounded_full().bg(color)
+    div()
+        .flex_none()
+        .size(px(diameter))
+        .rounded_full()
+        .bg(color)
 }
 
 /// A tag chip: a rounded pill with a color dot and the tag name, tinted

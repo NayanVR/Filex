@@ -61,7 +61,11 @@ pub fn header_cell(
     let hover = theme.hover;
     let text = theme.text;
     let chevron = active.map(|ascending| {
-        let path = if ascending { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" };
+        let path = if ascending {
+            "icons/chevron-up.svg"
+        } else {
+            "icons/chevron-down.svg"
+        };
         icon::ui_icon(path, text).size(px(12.))
     });
     div()

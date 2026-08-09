@@ -92,7 +92,11 @@ impl Selection {
             self.select_one(ix);
             return;
         };
-        let (lo, hi) = if anchor <= ix { (anchor, ix) } else { (ix, anchor) };
+        let (lo, hi) = if anchor <= ix {
+            (anchor, ix)
+        } else {
+            (ix, anchor)
+        };
         self.indices = (lo..=hi).collect();
         self.lead = Some(ix);
     }

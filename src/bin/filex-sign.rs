@@ -85,10 +85,14 @@ fn sign(args: impl Iterator<Item = String>) -> Result<(), String> {
         signature,
         minimum_version: None,
     };
-    let json =
-        serde_json::to_string_pretty(&manifest).map_err(|e| format!("serializing manifest: {e}"))?;
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("serializing manifest: {e}"))?;
     std::fs::write(&output, json).map_err(|e| format!("writing {output}: {e}"))?;
-    eprintln!("wrote {output} for {} ({} bytes)", manifest.version, data.len());
+    eprintln!(
+        "wrote {output} for {} ({} bytes)",
+        manifest.version,
+        data.len()
+    );
     Ok(())
 }
 

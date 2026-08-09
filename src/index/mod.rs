@@ -67,13 +67,15 @@ pub const SYSTEM_TOP_DIRS: &[&str] = &[
 ];
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub const SYSTEM_TOP_DIRS: &[&str] = &[
-    "proc", "sys", "dev", "run", "boot", "usr", "bin", "sbin", "lib", "lib64", "etc",
-    "var", "opt", "srv",
+    "proc", "sys", "dev", "run", "boot", "usr", "bin", "sbin", "lib", "lib64", "etc", "var", "opt",
+    "srv",
 ];
 
 /// Whether `name` is one of the [`SYSTEM_TOP_DIRS`] (case-insensitive).
 pub fn is_system_top(name: &str) -> bool {
-    SYSTEM_TOP_DIRS.iter().any(|dir| name.eq_ignore_ascii_case(dir))
+    SYSTEM_TOP_DIRS
+        .iter()
+        .any(|dir| name.eq_ignore_ascii_case(dir))
 }
 
 /// Whether `path`'s first component *under `root`* is an excluded system
@@ -111,14 +113,20 @@ pub struct ScanCtl<'a> {
 impl<'a> ScanCtl<'a> {
     /// Cancellable, unscoped — the shape every pre-scope caller wants.
     pub fn new(cancel: &'a AtomicBool) -> Self {
-        Self { cancel, scope: None }
+        Self {
+            cancel,
+            scope: None,
+        }
     }
 }
 
 /// A never-cancelled, unscoped control, for the plain public search
 /// entry points and tests.
 pub(crate) fn plain_scan() -> ScanCtl<'static> {
-    ScanCtl { cancel: &NEVER_CANCEL, scope: None }
+    ScanCtl {
+        cancel: &NEVER_CANCEL,
+        scope: None,
+    }
 }
 
 /// Maximum parent-chain length tolerated when materializing a path,
@@ -228,7 +236,11 @@ const PACKED_NAME_LEN_MAX: u16 = 0x0FFF;
 impl Score {
     /// A literal (non-fuzzy) hit, which carries no quality penalty.
     fn literal(kind: MatchKind, name_len: u16) -> Self {
-        Self { kind, penalty: 0, name_len }
+        Self {
+            kind,
+            penalty: 0,
+            name_len,
+        }
     }
 
     /// Pack into one `u32` whose natural ordering *is* the ranking
@@ -291,11 +303,7 @@ fn mask_covers(name: &[u8], needle_mask: &[u64; 4]) -> bool {
 /// `haystack`, or `None` if there is none. One SIMD find plus a byte
 /// compare — this runs per live entry on every keystroke, so it stays
 /// allocation-free.
-fn literal_kind(
-    finder: &memmem::Finder<'_>,
-    haystack: &[u8],
-    needle: &[u8],
-) -> Option<MatchKind> {
+fn literal_kind(finder: &memmem::Finder<'_>, haystack: &[u8], needle: &[u8]) -> Option<MatchKind> {
     let pos = finder.find(haystack)?;
     Some(if pos == 0 {
         if haystack.len() == needle.len() {
@@ -332,7 +340,10 @@ struct TopK {
 
 impl TopK {
     fn new(limit: usize) -> Self {
-        Self { limit, heap: std::collections::BinaryHeap::with_capacity(limit + 1) }
+        Self {
+            limit,
+            heap: std::collections::BinaryHeap::with_capacity(limit + 1),
+        }
     }
 
     fn push(mut self, item: (u32, u32)) -> Self {
@@ -624,10 +635,16 @@ impl VolumeIndex {
     /// names the same entry (`expected_name`) — guards against the id
     /// remap a compaction performs between the off-lock stat and this
     /// apply. Returns whether it was applied.
-    pub fn backfill_meta(&mut self, id: EntryId, expected_name: &str, size: u64, mtime: i64) -> bool {
-        let matches = self
-            .entry(id)
-            .is_some_and(|e| !e.is_tombstone() && self.name_bytes(e.name) == expected_name.as_bytes());
+    pub fn backfill_meta(
+        &mut self,
+        id: EntryId,
+        expected_name: &str,
+        size: u64,
+        mtime: i64,
+    ) -> bool {
+        let matches = self.entry(id).is_some_and(|e| {
+            !e.is_tombstone() && self.name_bytes(e.name) == expected_name.as_bytes()
+        });
         if matches {
             self.set_meta(id, size, mtime);
         }
@@ -766,9 +783,8 @@ impl VolumeIndex {
     /// Find the live child of `parent` with the given name (exact match).
     pub fn resolve_child(&self, parent: EntryId, name: &str) -> Option<EntryId> {
         self.children.get(&parent)?.iter().copied().find(|&c| {
-            self.entry(c).is_some_and(|e| {
-                !e.is_tombstone() && self.name_bytes(e.name) == name.as_bytes()
-            })
+            self.entry(c)
+                .is_some_and(|e| !e.is_tombstone() && self.name_bytes(e.name) == name.as_bytes())
         })
     }
 
@@ -805,7 +821,9 @@ impl VolumeIndex {
         let mut stack: Vec<(EntryId, EntryId)> = vec![(ROOT, ROOT)];
         while let Some((old_parent, new_parent)) = stack.pop() {
             for old_child in self.children_of(old_parent) {
-                let Some(name) = self.name_of(old_child) else { continue };
+                let Some(name) = self.name_of(old_child) else {
+                    continue;
+                };
                 let is_dir = self.is_dir(old_child).unwrap_or(false);
                 let key = self.native_key_of(old_child).unwrap_or(0);
                 let Ok(new_child) = fresh.insert_with_key(new_parent, name, is_dir, key) else {
@@ -847,12 +865,7 @@ impl VolumeIndex {
     /// directory's subtree — the "Current Dir" scope — checked only after
     /// the cheap name match so unmatched entries never pay for the
     /// parent-chain walk.
-    pub fn search_cancellable(
-        &self,
-        query: &str,
-        limit: usize,
-        ctl: &ScanCtl,
-    ) -> Vec<SearchHit> {
+    pub fn search_cancellable(&self, query: &str, limit: usize, ctl: &ScanCtl) -> Vec<SearchHit> {
         if query.is_empty() || limit == 0 {
             return Vec::new();
         }
@@ -915,7 +928,10 @@ impl VolumeIndex {
         };
         top.into_sorted()
             .into_iter()
-            .map(|(bits, id)| SearchHit { id: EntryId(id), score: Score::unpack(bits) })
+            .map(|(bits, id)| SearchHit {
+                id: EntryId(id),
+                score: Score::unpack(bits),
+            })
             .collect()
     }
 
@@ -974,8 +990,11 @@ impl VolumeIndex {
                 {
                     return None;
                 }
-                let score =
-                    Score { kind: MatchKind::Fuzzy, penalty, name_len: entry.name_lower.len };
+                let score = Score {
+                    kind: MatchKind::Fuzzy,
+                    penalty,
+                    name_len: entry.name_lower.len,
+                };
                 Some((score.pack(), ix as u32))
             })
             .fold(|| TopK::new(limit), TopK::push)
@@ -1072,14 +1091,15 @@ impl VolumeIndex {
             .reduce(|| TopK::new(limit), TopK::merge);
 
         match (&needle, &finder) {
-            (Some(needle), Some(finder)) => {
-                self.finish(top, needle, finder, filters, limit, ctl)
-            }
+            (Some(needle), Some(finder)) => self.finish(top, needle, finder, filters, limit, ctl),
             // Filter-only: there is no needle to fuzzy-match against.
             _ => top
                 .into_sorted()
                 .into_iter()
-                .map(|(bits, id)| SearchHit { id: EntryId(id), score: Score::unpack(bits) })
+                .map(|(bits, id)| SearchHit {
+                    id: EntryId(id),
+                    score: Score::unpack(bits),
+                })
                 .collect(),
         }
     }
@@ -1151,35 +1171,41 @@ impl SnapshotSaver {
         deltas: std::sync::mpsc::Sender<Vec<watcher::FsDelta>>,
     ) -> Result<Self> {
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread = std::thread::Builder::new().name("filex-snapshot".into()).spawn({
-            let shutdown = shutdown.clone();
-            move || {
-                use std::sync::atomic::Ordering;
-                let tick = std::time::Duration::from_millis(500);
-                let mut elapsed = std::time::Duration::ZERO;
-                while !shutdown.load(Ordering::Relaxed) {
-                    std::thread::sleep(tick);
-                    elapsed += tick;
-                    if elapsed < interval {
-                        continue;
-                    }
-                    elapsed = std::time::Duration::ZERO;
-                    let marker = watcher::FsDelta::PersistNow {
-                        checkpoint: persistence.checkpoint(),
-                    };
-                    if deltas.send(vec![marker]).is_err() {
-                        break; // writer gone: shutting down
+        let thread = std::thread::Builder::new()
+            .name("filex-snapshot".into())
+            .spawn({
+                let shutdown = shutdown.clone();
+                move || {
+                    use std::sync::atomic::Ordering;
+                    let tick = std::time::Duration::from_millis(500);
+                    let mut elapsed = std::time::Duration::ZERO;
+                    while !shutdown.load(Ordering::Relaxed) {
+                        std::thread::sleep(tick);
+                        elapsed += tick;
+                        if elapsed < interval {
+                            continue;
+                        }
+                        elapsed = std::time::Duration::ZERO;
+                        let marker = watcher::FsDelta::PersistNow {
+                            checkpoint: persistence.checkpoint(),
+                        };
+                        if deltas.send(vec![marker]).is_err() {
+                            break; // writer gone: shutting down
+                        }
                     }
                 }
-            }
-        })?;
-        Ok(Self { shutdown, thread: Some(thread) })
+            })?;
+        Ok(Self {
+            shutdown,
+            thread: Some(thread),
+        })
     }
 }
 
 impl Drop for SnapshotSaver {
     fn drop(&mut self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             thread.join().ok(); // wakes within one tick
         }
@@ -1204,17 +1230,23 @@ struct MetaBackfiller {
 impl MetaBackfiller {
     fn spawn(index: watcher::SharedIndex) -> Result<Self> {
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread = std::thread::Builder::new().name("filex-meta-backfill".into()).spawn({
-            let shutdown = shutdown.clone();
-            move || backfill_loop(&index, &shutdown)
-        })?;
-        Ok(Self { shutdown, thread: Some(thread) })
+        let thread = std::thread::Builder::new()
+            .name("filex-meta-backfill".into())
+            .spawn({
+                let shutdown = shutdown.clone();
+                move || backfill_loop(&index, &shutdown)
+            })?;
+        Ok(Self {
+            shutdown,
+            thread: Some(thread),
+        })
     }
 }
 
 impl Drop for MetaBackfiller {
     fn drop(&mut self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             thread.join().ok();
         }
@@ -1232,10 +1264,7 @@ fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
 
 /// The backfill worker loop (see [`MetaBackfiller`]). Sleeps in short
 /// ticks so `shutdown` is observed promptly.
-fn backfill_loop(
-    index: &watcher::SharedIndex,
-    shutdown: &std::sync::atomic::AtomicBool,
-) {
+fn backfill_loop(index: &watcher::SharedIndex, shutdown: &std::sync::atomic::AtomicBool) {
     use std::sync::atomic::Ordering;
     let tick = std::time::Duration::from_millis(500);
     while !shutdown.load(Ordering::Relaxed) {
@@ -1289,12 +1318,13 @@ impl Persistence {
                 last_event_id: id.load(std::sync::atomic::Ordering::Relaxed),
             },
             #[cfg(target_os = "windows")]
-            CheckpointSource::UsnPos { journal_id, next_usn } => {
-                persist::Checkpoint::UsnJournal {
-                    journal_id: *journal_id,
-                    next_usn: next_usn.load(std::sync::atomic::Ordering::Relaxed),
-                }
-            }
+            CheckpointSource::UsnPos {
+                journal_id,
+                next_usn,
+            } => persist::Checkpoint::UsnJournal {
+                journal_id: *journal_id,
+                next_usn: next_usn.load(std::sync::atomic::Ordering::Relaxed),
+            },
             #[cfg(not(target_os = "macos"))]
             CheckpointSource::Reconcile => persist::Checkpoint::WalkedAt {
                 unix_seconds: std::time::SystemTime::now()
@@ -1328,7 +1358,9 @@ impl LiveIndex {
     pub fn coverage_degraded(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            self.watcher.as_ref().is_some_and(linux::LinuxWatcher::is_degraded)
+            self.watcher
+                .as_ref()
+                .is_some_and(linux::LinuxWatcher::is_degraded)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1425,7 +1457,14 @@ fn start_live_index_inner(
             }
         }
     });
-    platform_start(canonical, snapshot_path, loaded, exclude_system_dirs, on_change, cancel)
+    platform_start(
+        canonical,
+        snapshot_path,
+        loaded,
+        exclude_system_dirs,
+        on_change,
+        cancel,
+    )
 }
 
 /// Assemble the writer/persistence tail shared by every platform start.
@@ -1454,17 +1493,18 @@ fn assemble_live_index(
     let save_hook: Option<watcher::SaveHook> = persistence.as_ref().map(|p| {
         let path = p.path.clone();
         let last_generation = std::sync::atomic::AtomicU64::new(u64::MAX);
-        Box::new(move |index: &VolumeIndex, checkpoint: persist::Checkpoint| {
-            use std::sync::atomic::Ordering;
-            if last_generation.swap(index.generation(), Ordering::Relaxed)
-                == index.generation()
-            {
-                return; // unchanged since the last periodic save
-            }
-            if let Err(err) = persist::save(index, checkpoint, &path) {
-                tracing::error!("periodic snapshot save failed: {err:#}");
-            }
-        }) as watcher::SaveHook
+        Box::new(
+            move |index: &VolumeIndex, checkpoint: persist::Checkpoint| {
+                use std::sync::atomic::Ordering;
+                if last_generation.swap(index.generation(), Ordering::Relaxed) == index.generation()
+                {
+                    return; // unchanged since the last periodic save
+                }
+                if let Err(err) = persist::save(index, checkpoint, &path) {
+                    tracing::error!("periodic snapshot save failed: {err:#}");
+                }
+            },
+        ) as watcher::SaveHook
     });
     let saver = match &persistence {
         Some(p) => Some(SnapshotSaver::spawn(
@@ -1533,9 +1573,14 @@ fn platform_start(
         Some(snapshot) => (snapshot.index, !replaying),
         None => {
             use walker::IndexSource as _;
-            let source =
-                walker::FsWalkSource { skip_hidden: false, skip_system_dirs: exclude_system_dirs };
-            (source.bootstrap_cancellable(&canonical, cancel.as_deref())?, false)
+            let source = walker::FsWalkSource {
+                skip_hidden: false,
+                skip_system_dirs: exclude_system_dirs,
+            };
+            (
+                source.bootstrap_cancellable(&canonical, cancel.as_deref())?,
+                false,
+            )
         }
     };
     // A loaded snapshot carries no exclusion flag (not persisted); re-apply
@@ -1550,7 +1595,14 @@ fn platform_start(
         None => CheckpointSource::Untracked,
     };
     assemble_live_index(
-        canonical, snapshot_path, fs_watcher, index, needs_rescan, source, delta_tx, delta_rx,
+        canonical,
+        snapshot_path,
+        fs_watcher,
+        index,
+        needs_rescan,
+        source,
+        delta_tx,
+        delta_rx,
         on_change,
     )
 }
@@ -1576,7 +1628,10 @@ fn platform_start(
     if windows::volume_root_drive(&canonical).is_some() {
         // Tier 1: journal replay from the persisted checkpoint.
         if let Some(snapshot) = loaded.as_ref()
-            && let persist::Checkpoint::UsnJournal { journal_id, next_usn } = snapshot.checkpoint
+            && let persist::Checkpoint::UsnJournal {
+                journal_id,
+                next_usn,
+            } = snapshot.checkpoint
         {
             let valid = match windows::query_usn_journal(&canonical) {
                 Ok(info) => {
@@ -1672,9 +1727,14 @@ fn platform_start(
         Some(snapshot) => (snapshot.index, true),
         None => {
             use walker::IndexSource as _;
-            let source =
-                walker::FsWalkSource { skip_hidden: false, skip_system_dirs: exclude_system_dirs };
-            (source.bootstrap_cancellable(&canonical, cancel.as_deref())?, false)
+            let source = walker::FsWalkSource {
+                skip_hidden: false,
+                skip_system_dirs: exclude_system_dirs,
+            };
+            (
+                source.bootstrap_cancellable(&canonical, cancel.as_deref())?,
+                false,
+            )
         }
     };
     index.set_exclude_system_dirs(exclude_system_dirs);
@@ -1683,7 +1743,14 @@ fn platform_start(
         None => CheckpointSource::Untracked,
     };
     assemble_live_index(
-        canonical, snapshot_path, fs_watcher, index, needs_rescan, source, delta_tx, delta_rx,
+        canonical,
+        snapshot_path,
+        fs_watcher,
+        index,
+        needs_rescan,
+        source,
+        delta_tx,
+        delta_rx,
         on_change,
     )
 }
@@ -1748,7 +1815,11 @@ mod tests {
         let (mut index, _docs, report, notes, ..) = sample_index();
 
         // Before backfill, size:/modified: match nothing (meta unknown).
-        assert!(index.search_filtered("", &[Filter::Size(Bound::Gt(0))], 100).is_empty());
+        assert!(
+            index
+                .search_filtered("", &[Filter::Size(Bound::Gt(0))], 100)
+                .is_empty()
+        );
 
         index.set_meta(report, 5000, 1_000); // Report.pdf: 5 KB, old
         index.set_meta(notes, 10, 9_000); // notes.txt: tiny, newer
@@ -1756,13 +1827,18 @@ mod tests {
         // size:>1kb ⇒ only Report.pdf.
         let big = index.search_filtered("", &[Filter::Size(Bound::Gt(1024))], 100);
         assert_eq!(
-            big.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            big.iter()
+                .filter_map(|h| index.name_of(h.id))
+                .collect::<Vec<_>>(),
             vec!["Report.pdf"]
         );
         // modified:>5000s ⇒ only notes.txt.
         let recent = index.search_filtered("", &[Filter::Modified(Bound::Gt(5_000))], 100);
         assert_eq!(
-            recent.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            recent
+                .iter()
+                .filter_map(|h| index.name_of(h.id))
+                .collect::<Vec<_>>(),
             vec!["notes.txt"]
         );
     }
@@ -1781,9 +1857,13 @@ mod tests {
         assert_eq!(index.unpopulated_batch(100).len(), before - 1);
         assert_eq!(
             index
-                .search_filtered("", &[crate::search_filter::Filter::Size(
-                    crate::search_filter::Bound::Ge(50),
-                )], 10)
+                .search_filtered(
+                    "",
+                    &[crate::search_filter::Filter::Size(
+                        crate::search_filter::Bound::Ge(50),
+                    )],
+                    10
+                )
                 .iter()
                 .filter_map(|h| index.name_of(h.id))
                 .collect::<Vec<_>>(),
@@ -1798,9 +1878,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("big.bin"), vec![0u8; 5000]).unwrap();
         std::fs::write(dir.path().join("small.txt"), b"hi").unwrap();
-        let index = walker::FsWalkSource::default().bootstrap(dir.path()).unwrap();
+        let index = walker::FsWalkSource::default()
+            .bootstrap(dir.path())
+            .unwrap();
         // Before backfill nothing has size metadata.
-        assert!(index.search_filtered("", &[Filter::Size(Bound::Ge(5000))], 10).is_empty());
+        assert!(
+            index
+                .search_filtered("", &[Filter::Size(Bound::Ge(5000))], 10)
+                .is_empty()
+        );
 
         let shared = watcher::SharedIndex::new(index);
         let backfiller = MetaBackfiller::spawn(shared.clone()).unwrap();
@@ -1865,12 +1951,36 @@ mod tests {
     #[test]
     fn packed_score_round_trips_and_preserves_ranking_order() {
         let scores = [
-            Score { kind: MatchKind::Exact, penalty: 0, name_len: 4 },
-            Score { kind: MatchKind::Prefix, penalty: 0, name_len: 0 },
-            Score { kind: MatchKind::WordBoundary, penalty: 0, name_len: 9 },
-            Score { kind: MatchKind::Substring, penalty: 0, name_len: 1 },
-            Score { kind: MatchKind::Fuzzy, penalty: 3, name_len: 2 },
-            Score { kind: MatchKind::Fuzzy, penalty: u16::MAX, name_len: 0 },
+            Score {
+                kind: MatchKind::Exact,
+                penalty: 0,
+                name_len: 4,
+            },
+            Score {
+                kind: MatchKind::Prefix,
+                penalty: 0,
+                name_len: 0,
+            },
+            Score {
+                kind: MatchKind::WordBoundary,
+                penalty: 0,
+                name_len: 9,
+            },
+            Score {
+                kind: MatchKind::Substring,
+                penalty: 0,
+                name_len: 1,
+            },
+            Score {
+                kind: MatchKind::Fuzzy,
+                penalty: 3,
+                name_len: 2,
+            },
+            Score {
+                kind: MatchKind::Fuzzy,
+                penalty: u16::MAX,
+                name_len: 0,
+            },
         ];
         for score in scores {
             assert_eq!(Score::unpack(score.pack()), score, "round trip");
@@ -1890,7 +2000,11 @@ mod tests {
 
     #[test]
     fn packed_score_clamps_an_absurd_name_length() {
-        let score = Score { kind: MatchKind::Exact, penalty: 0, name_len: u16::MAX };
+        let score = Score {
+            kind: MatchKind::Exact,
+            penalty: 0,
+            name_len: u16::MAX,
+        };
         // Clamped, not wrapped — a long name must not alias into the
         // penalty field and score as a better match.
         let unpacked = Score::unpack(score.pack());
@@ -1908,13 +2022,19 @@ mod tests {
         // results anyway, so returning them is pure waste.
         let mut index = VolumeIndex::new("/vol");
         for i in 0..1000 {
-            index.insert(ROOT, &format!("report_{i:04}.txt"), false).unwrap();
+            index
+                .insert(ROOT, &format!("report_{i:04}.txt"), false)
+                .unwrap();
         }
         let flag = AtomicBool::new(true);
         let cancelled = ScanCtl::new(&flag);
 
         // Both scan paths (no-filter and filtered) honour the flag.
-        assert!(index.search_cancellable("report", 500, &cancelled).is_empty());
+        assert!(
+            index
+                .search_cancellable("report", 500, &cancelled)
+                .is_empty()
+        );
         assert!(
             index
                 .search_filtered_cancellable(
@@ -1947,11 +2067,17 @@ mod tests {
         index.insert(elsewhere, "report.txt", false).unwrap();
 
         let flag = AtomicBool::new(false);
-        let scoped = ScanCtl { cancel: &flag, scope: Some(inside) };
+        let scoped = ScanCtl {
+            cancel: &flag,
+            scope: Some(inside),
+        };
 
         let hits = index.search_cancellable("report", 500, &scoped);
         assert_eq!(hits.len(), 1, "only the report under `project`");
-        assert_eq!(index.path_of(hits[0].id).unwrap(), PathBuf::from("/vol/project/report.txt"));
+        assert_eq!(
+            index.path_of(hits[0].id).unwrap(),
+            PathBuf::from("/vol/project/report.txt")
+        );
 
         // Unscoped finds both.
         assert_eq!(index.search("report", 500).len(), 2);
@@ -1960,7 +2086,9 @@ mod tests {
     #[test]
     fn search_falls_back_to_fuzzy_when_nothing_matches_literally() {
         let mut index = VolumeIndex::new("/vol");
-        let acronym = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        let acronym = index
+            .insert(ROOT, "Design System Review.pdf", false)
+            .unwrap();
         index.insert(ROOT, "unrelated.txt", false).unwrap();
 
         let hits = index.search("dsr", 10);
@@ -1977,7 +2105,7 @@ mod tests {
         let cases: &[(&str, &str)] = &[
             ("Design System Review.pdf", "dsr"),
             ("MyCamelCaseFile.rs", "mccf"),
-            ("UPPER_snake.TXT", "usnake"),  // mixed case survives folding
+            ("UPPER_snake.TXT", "usnake"), // mixed case survives folding
             ("a-b-c-d.log", "abcd"),
         ];
         for (name, needle) in cases {
@@ -1994,16 +2122,27 @@ mod tests {
     #[test]
     fn byte_mask_prefilter_covers_and_rejects_correctly() {
         let needle = byte_mask(b"abc");
-        assert!(mask_covers(b"xaybzc", &needle), "all three present (scattered)");
-        assert!(mask_covers(b"cba", &needle), "order irrelevant to the prefilter");
+        assert!(
+            mask_covers(b"xaybzc", &needle),
+            "all three present (scattered)"
+        );
+        assert!(
+            mask_covers(b"cba", &needle),
+            "order irrelevant to the prefilter"
+        );
         assert!(!mask_covers(b"ab", &needle), "missing 'c' -> rejected");
-        assert!(mask_covers(b"anything", &byte_mask(b"")), "empty needle covers all");
+        assert!(
+            mask_covers(b"anything", &byte_mask(b"")),
+            "empty needle covers all"
+        );
     }
 
     #[test]
     fn fuzzy_hits_rank_below_every_literal_hit() {
         let mut index = VolumeIndex::new("/vol");
-        let fuzzy = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        let fuzzy = index
+            .insert(ROOT, "Design System Review.pdf", false)
+            .unwrap();
         let literal = index.insert(ROOT, "zzz_dsr_zzz.txt", false).unwrap();
 
         let ids: Vec<EntryId> = index.search("dsr", 10).into_iter().map(|h| h.id).collect();
@@ -2027,7 +2166,9 @@ mod tests {
         for i in 0..FUZZY_GATE {
             index.insert(ROOT, &format!("dsr_{i}.txt"), false).unwrap();
         }
-        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        index
+            .insert(ROOT, "Design System Review.pdf", false)
+            .unwrap();
 
         // Room for far more hits than exist — the shape `search_all` asks
         // for once OVERFETCH has multiplied the display limit.
@@ -2050,7 +2191,9 @@ mod tests {
         for i in 0..FUZZY_GATE - 1 {
             index.insert(ROOT, &format!("dsr_{i}.txt"), false).unwrap();
         }
-        let acronym = index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        let acronym = index
+            .insert(ROOT, "Design System Review.pdf", false)
+            .unwrap();
 
         let hits = index.search("dsr", 2000);
 
@@ -2060,7 +2203,11 @@ mod tests {
             .filter(|h| h.score.kind == MatchKind::Fuzzy)
             .map(|h| h.id)
             .collect();
-        assert_eq!(fuzzy, vec![acronym], "below the gate the fallback still runs");
+        assert_eq!(
+            fuzzy,
+            vec![acronym],
+            "below the gate the fallback still runs"
+        );
     }
 
     #[test]
@@ -2072,7 +2219,9 @@ mod tests {
         for i in 0..5 {
             index.insert(ROOT, &format!("dsr_{i}.txt"), false).unwrap();
         }
-        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        index
+            .insert(ROOT, "Design System Review.pdf", false)
+            .unwrap();
 
         let hits = index.search("dsr", 3);
         assert_eq!(hits.len(), 3);
@@ -2088,7 +2237,9 @@ mod tests {
         // must skip entries the literal pass already claimed.
         let mut index = VolumeIndex::new("/vol");
         index.insert(ROOT, "dsr.txt", false).unwrap();
-        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        index
+            .insert(ROOT, "Design System Review.pdf", false)
+            .unwrap();
 
         let hits = index.search("dsr", 10);
         let ids: std::collections::HashSet<EntryId> = hits.iter().map(|h| h.id).collect();
@@ -2099,13 +2250,20 @@ mod tests {
     #[test]
     fn fuzzy_fallback_respects_filters() {
         let mut index = VolumeIndex::new("/vol");
-        index.insert(ROOT, "Design System Review.pdf", false).unwrap();
+        index
+            .insert(ROOT, "Design System Review.pdf", false)
+            .unwrap();
         let dir = index.insert(ROOT, "Design System Review", true).unwrap();
 
-        let filters =
-            vec![crate::search_filter::Filter::Kind(crate::listing::FileKind::Directory)];
+        let filters = vec![crate::search_filter::Filter::Kind(
+            crate::listing::FileKind::Directory,
+        )];
         let hits = index.search_filtered("dsr", &filters, 10);
-        assert_eq!(hits.len(), 1, "the .pdf must be filtered out of the fuzzy pass");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the .pdf must be filtered out of the fuzzy pass"
+        );
         assert_eq!(hits[0].id, dir);
     }
 
@@ -2286,7 +2444,9 @@ mod tests {
         let docs = index.insert_with_key(ROOT, "docs", true, 10).unwrap();
         let keep = index.insert_with_key(docs, "keep.txt", false, 11).unwrap();
         let doomed = index.insert_with_key(ROOT, "doomed", true, 20).unwrap();
-        index.insert_with_key(doomed, "gone.txt", false, 21).unwrap();
+        index
+            .insert_with_key(doomed, "gone.txt", false, 21)
+            .unwrap();
         index.remove(doomed).unwrap();
         index.rename(keep, docs, "kept-longer-name.txt").unwrap();
         let generation = index.generation();
@@ -2299,7 +2459,10 @@ mod tests {
         assert_eq!(fresh.search("kept-longer", 10).len(), 1);
         assert!(fresh.search("gone", 10).is_empty());
         let hit = fresh.search("kept-longer", 10)[0].id;
-        assert_eq!(fresh.path_of(hit).unwrap(), PathBuf::from("/vol/docs/kept-longer-name.txt"));
+        assert_eq!(
+            fresh.path_of(hit).unwrap(),
+            PathBuf::from("/vol/docs/kept-longer-name.txt")
+        );
         assert_eq!(fresh.entry_by_native_key(5), Some(ROOT));
         assert_eq!(fresh.entry_by_native_key(11), Some(hit));
         assert_eq!(fresh.entry_by_native_key(21), None);

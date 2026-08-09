@@ -66,8 +66,12 @@ fn bench_bootstrap(c: &mut Criterion) {
     let root = tree.path();
 
     let mut group = c.benchmark_group("bootstrap_30k");
-    group.bench_function("names_only", |b| b.iter(|| black_box(walk_names_only(root))));
-    group.bench_function("with_metadata", |b| b.iter(|| black_box(walk_with_metadata(root))));
+    group.bench_function("names_only", |b| {
+        b.iter(|| black_box(walk_names_only(root)))
+    });
+    group.bench_function("with_metadata", |b| {
+        b.iter(|| black_box(walk_with_metadata(root)))
+    });
     group.finish();
 }
 

@@ -9,7 +9,12 @@ use super::theme::Theme;
 
 /// Container stacking one [`job_row`] per active job.
 pub fn jobs_bar(theme: &Theme) -> Div {
-    div().flex().flex_col().border_t_1().border_color(theme.border).bg(theme.panel)
+    div()
+        .flex()
+        .flex_col()
+        .border_t_1()
+        .border_color(theme.border)
+        .bg(theme.panel)
 }
 
 /// One job: label on the left, progress bar filling the middle.
@@ -36,13 +41,18 @@ pub fn job_row(
         .text_color(theme.text_dim)
         .child(div().overflow_hidden().child(label.into()))
         .child(
-            div().flex_1().h(px(4.)).rounded_full().bg(theme.border).child(
-                div()
-                    .h_full()
-                    .rounded_full()
-                    .bg(theme.accent)
-                    .w(relative(fraction.unwrap_or(0.))),
-            ),
+            div()
+                .flex_1()
+                .h(px(4.))
+                .rounded_full()
+                .bg(theme.border)
+                .child(
+                    div()
+                        .h_full()
+                        .rounded_full()
+                        .bg(theme.accent)
+                        .w(relative(fraction.unwrap_or(0.))),
+                ),
         )
         .child(div().w(px(36.)).text_right().child(percent))
 }

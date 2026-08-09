@@ -42,12 +42,18 @@ const TAG_ERROR: u8 = 255;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+    },
     Status,
     /// `filters` are the index-evaluable filters (`kind:`/`ext:`/`size:`/
     /// `modified:`) applied service-side; `tag:` stays client-side (the
     /// service has no sidecar), so it is never sent here.
-    Search { query: String, limit: u32, filters: Vec<crate::search_filter::Filter> },
+    Search {
+        query: String,
+        limit: u32,
+        filters: Vec<crate::search_filter::Filter>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,11 +102,15 @@ impl<'a> Cursor<'a> {
     }
 
     fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
     }
 
     fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
     }
 
     fn string(&mut self) -> Result<String> {
@@ -127,20 +137,30 @@ pub fn encode_request(request: &Request) -> Vec<u8> {
             buf.extend_from_slice(&version.to_le_bytes());
         }
         Request::Status => buf.push(TAG_STATUS),
-        Request::Search { query, limit, filters } => {
+        Request::Search {
+            query,
+            limit,
+            filters,
+        } => {
             buf.push(TAG_SEARCH);
             put_string(&mut buf, query);
             buf.extend_from_slice(&limit.to_le_bytes());
             // The filter list rides as a small JSON blob (tiny — a handful
             // of filters); the frame envelope stays hand-rolled.
-            put_string(&mut buf, &serde_json::to_string(filters).unwrap_or_default());
+            put_string(
+                &mut buf,
+                &serde_json::to_string(filters).unwrap_or_default(),
+            );
         }
     }
     buf
 }
 
 pub fn decode_request(payload: &[u8]) -> Result<Request> {
-    let mut c = Cursor { buf: payload, pos: 0 };
+    let mut c = Cursor {
+        buf: payload,
+        pos: 0,
+    };
     let request = match c.u8()? {
         TAG_HELLO => Request::Hello { version: c.u32()? },
         TAG_STATUS => Request::Status,
@@ -189,14 +209,20 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
 }
 
 pub fn decode_response(payload: &[u8]) -> Result<Response> {
-    let mut c = Cursor { buf: payload, pos: 0 };
+    let mut c = Cursor {
+        buf: payload,
+        pos: 0,
+    };
     let response = match c.u8()? {
         TAG_HELLO_OK => Response::HelloOk { version: c.u32()? },
         TAG_STATUS_REPLY => {
             let count = c.u32()? as usize;
             let mut roots = Vec::with_capacity(count.min(1024));
             for _ in 0..count {
-                roots.push(RootStatus { path: c.string()?, files: c.u64()? });
+                roots.push(RootStatus {
+                    path: c.string()?,
+                    files: c.u64()?,
+                });
             }
             Response::Status(HostStatus { roots })
         }
@@ -212,7 +238,9 @@ pub fn decode_response(payload: &[u8]) -> Result<Response> {
             }
             Response::Search(hits)
         }
-        TAG_ERROR => Response::Error { message: c.string()? },
+        TAG_ERROR => Response::Error {
+            message: c.string()?,
+        },
         tag => bail!("unknown response tag {tag}"),
     };
     ensure!(c.finished(), "trailing bytes in response frame");
@@ -230,7 +258,9 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     let len = u32::from_le_bytes(len_buf) as usize;
     ensure!(len <= MAX_FRAME, "frame of {len} bytes exceeds limit");
     let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload).context("reading frame payload")?;
+    reader
+        .read_exact(&mut payload)
+        .context("reading frame payload")?;
     Ok(Some(payload))
 }
 
@@ -269,8 +299,7 @@ impl IndexHost for MultiRootHost {
         filters: &[crate::search_filter::Filter],
         limit: usize,
     ) -> Vec<RemoteHit> {
-        let indexes: Vec<SharedIndex> =
-            self.roots.iter().map(|(_, index)| index.clone()).collect();
+        let indexes: Vec<SharedIndex> = self.roots.iter().map(|(_, index)| index.clone()).collect();
         // Index filters (kind:/ext:/size:/modified:) apply service-side in
         // the scan; tag: stays on the client and is never sent here.
         //
@@ -281,7 +310,11 @@ impl IndexHost for MultiRootHost {
         // a known gap, tracked in docs/design-search-ranking.md.
         manager::search_all(&indexes, query, filters, limit, &Default::default())
             .into_iter()
-            .map(|hit| RemoteHit { name: hit.name, path: hit.path, is_dir: hit.is_dir })
+            .map(|hit| RemoteHit {
+                name: hit.name,
+                path: hit.path,
+                is_dir: hit.is_dir,
+            })
             .collect()
     }
 
@@ -312,7 +345,9 @@ pub fn serve_connection(
         let response = match decode_request(&payload) {
             Ok(Request::Hello { version }) if version == PROTOCOL_VERSION => {
                 greeted = true;
-                Response::HelloOk { version: PROTOCOL_VERSION }
+                Response::HelloOk {
+                    version: PROTOCOL_VERSION,
+                }
             }
             Ok(Request::Hello { version }) => {
                 let message = format!(
@@ -327,10 +362,14 @@ pub fn serve_connection(
                 bail!("client skipped the Hello handshake");
             }
             Ok(Request::Status) => Response::Status(host.status()),
-            Ok(Request::Search { query, limit, filters }) => {
-                Response::Search(host.search(&query, &filters, limit.min(10_000) as usize))
-            }
-            Err(err) => Response::Error { message: format!("{err:#}") },
+            Ok(Request::Search {
+                query,
+                limit,
+                filters,
+            }) => Response::Search(host.search(&query, &filters, limit.min(10_000) as usize)),
+            Err(err) => Response::Error {
+                message: format!("{err:#}"),
+            },
         };
         write_frame(&mut writer, &encode_response(&response))?;
     }
@@ -350,7 +389,9 @@ impl<R: Read, W: Write> RemoteIndex<R, W> {
     /// Perform the version handshake and return a ready client.
     pub fn connect(reader: R, writer: W) -> Result<Self> {
         let mut client = Self { reader, writer };
-        match client.roundtrip(&Request::Hello { version: PROTOCOL_VERSION })? {
+        match client.roundtrip(&Request::Hello {
+            version: PROTOCOL_VERSION,
+        })? {
             Response::HelloOk { .. } => Ok(client),
             Response::Error { message } => bail!("service rejected connection: {message}"),
             other => bail!("unexpected handshake response {other:?}"),
@@ -363,8 +404,11 @@ impl<R: Read, W: Write> RemoteIndex<R, W> {
         filters: &[crate::search_filter::Filter],
         limit: u32,
     ) -> Result<Vec<RemoteHit>> {
-        let request =
-            Request::Search { query: query.to_string(), limit, filters: filters.to_vec() };
+        let request = Request::Search {
+            query: query.to_string(),
+            limit,
+            filters: filters.to_vec(),
+        };
         match self.roundtrip(&request)? {
             Response::Search(hits) => Ok(hits),
             Response::Error { message } => bail!("service error: {message}"),
@@ -382,8 +426,8 @@ impl<R: Read, W: Write> RemoteIndex<R, W> {
 
     fn roundtrip(&mut self, request: &Request) -> Result<Response> {
         write_frame(&mut self.writer, &encode_request(request))?;
-        let payload = read_frame(&mut self.reader)?
-            .context("service closed the connection mid-request")?;
+        let payload =
+            read_frame(&mut self.reader)?.context("service closed the connection mid-request")?;
         decode_response(&payload)
     }
 }
@@ -406,7 +450,9 @@ impl ServiceClient {
         let stream = super::windows::connect_index_pipe(PIPE_NAME, 1)?;
         let reader = stream.try_clone().context("cloning pipe stream")?;
         let client = RemoteIndex::connect(reader, stream)?;
-        Ok(Self { inner: std::sync::Mutex::new(client) })
+        Ok(Self {
+            inner: std::sync::Mutex::new(client),
+        })
     }
 
     pub fn search(
@@ -449,26 +495,48 @@ mod tests {
                     crate::search_filter::Filter::Size(crate::search_filter::Bound::Gt(2 << 20)),
                 ],
             },
-            Request::Search { query: String::new(), limit: 10, filters: vec![] },
+            Request::Search {
+                query: String::new(),
+                limit: 10,
+                filters: vec![],
+            },
         ];
         for request in requests {
             assert_eq!(decode_request(&encode_request(&request)).unwrap(), request);
         }
 
         let responses = [
-            Response::HelloOk { version: PROTOCOL_VERSION },
+            Response::HelloOk {
+                version: PROTOCOL_VERSION,
+            },
             Response::Status(HostStatus {
-                roots: vec![RootStatus { path: "/vol".into(), files: 42 }],
+                roots: vec![RootStatus {
+                    path: "/vol".into(),
+                    files: 42,
+                }],
             }),
             Response::Search(vec![
-                RemoteHit { name: "a.txt".into(), path: "/vol/a.txt".into(), is_dir: false },
-                RemoteHit { name: "dir".into(), path: "/vol/dir".into(), is_dir: true },
+                RemoteHit {
+                    name: "a.txt".into(),
+                    path: "/vol/a.txt".into(),
+                    is_dir: false,
+                },
+                RemoteHit {
+                    name: "dir".into(),
+                    path: "/vol/dir".into(),
+                    is_dir: true,
+                },
             ]),
             Response::Search(Vec::new()),
-            Response::Error { message: "nope".into() },
+            Response::Error {
+                message: "nope".into(),
+            },
         ];
         for response in responses {
-            assert_eq!(decode_response(&encode_response(&response)).unwrap(), response);
+            assert_eq!(
+                decode_response(&encode_response(&response)).unwrap(),
+                response
+            );
         }
     }
 
@@ -476,8 +544,11 @@ mod tests {
     fn decode_rejects_garbage_and_truncation() {
         assert!(decode_request(&[99]).is_err()); // unknown tag
         assert!(decode_request(&[]).is_err()); // empty
-        let mut valid =
-            encode_request(&Request::Search { query: "x".into(), limit: 5, filters: vec![] });
+        let mut valid = encode_request(&Request::Search {
+            query: "x".into(),
+            limit: 5,
+            filters: vec![],
+        });
         valid.truncate(valid.len() - 1);
         assert!(decode_request(&valid).is_err());
         // Trailing junk is rejected, not silently ignored.
@@ -491,7 +562,10 @@ mod tests {
         let mut buf = Vec::new();
         write_frame(&mut buf, b"hello").unwrap();
         let mut reader = &buf[..];
-        assert_eq!(read_frame(&mut reader).unwrap().as_deref(), Some(&b"hello"[..]));
+        assert_eq!(
+            read_frame(&mut reader).unwrap().as_deref(),
+            Some(&b"hello"[..])
+        );
         assert_eq!(read_frame(&mut reader).unwrap(), None); // clean EOF
 
         let huge = (MAX_FRAME as u32 + 1).to_le_bytes();
@@ -556,7 +630,11 @@ mod tests {
         let stream = TcpStream::connect(addr).unwrap();
         let mut reader = stream.try_clone().unwrap();
         let mut writer = stream;
-        write_frame(&mut writer, &encode_request(&Request::Hello { version: 999 })).unwrap();
+        write_frame(
+            &mut writer,
+            &encode_request(&Request::Hello { version: 999 }),
+        )
+        .unwrap();
         let payload = read_frame(&mut reader).unwrap().unwrap();
         let Response::Error { message } = decode_response(&payload).unwrap() else {
             panic!("expected an error response");

@@ -57,8 +57,8 @@ fn is_hidden_entry(name: &str, metadata: Option<&std::fs::Metadata>) -> bool {
 /// listing. One stat per entry is deliberate: browse directories are
 /// small, and the search index never stats (see docs/roadmap.md).
 pub fn read_dir_sorted(path: &Path, sort: &SortSettings) -> Result<Vec<Entry>> {
-    let read_dir = std::fs::read_dir(path)
-        .with_context(|| format!("reading directory {}", path.display()))?;
+    let read_dir =
+        std::fs::read_dir(path).with_context(|| format!("reading directory {}", path.display()))?;
 
     let mut entries: Vec<Entry> = read_dir
         .filter_map(|dirent| {
@@ -104,7 +104,11 @@ fn compare_entries(a: &Entry, b: &Entry, sort: &SortSettings) -> Ordering {
         SortBy::Modified => a.modified.cmp(&b.modified),
         SortBy::Kind => kind_rank(a).cmp(&kind_rank(b)),
     };
-    let primary = if sort.ascending { primary } else { primary.reverse() };
+    let primary = if sort.ascending {
+        primary
+    } else {
+        primary.reverse()
+    };
     primary.then_with(|| name_order(a, b))
 }
 
@@ -153,21 +157,22 @@ impl FileKind {
         if is_dir {
             return Self::Directory;
         }
-        let Some(ext) = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()) else {
+        let Some(ext) = name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+        else {
             return Self::Other;
         };
         match ext.as_str() {
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" => {
-                Self::Image
-            }
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" => Self::Image,
             "mp4" | "mkv" | "mov" | "avi" | "webm" | "m4v" => Self::Video,
             "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => Self::Audio,
             "zip" | "tar" | "gz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "dmg" | "iso" => {
                 Self::Archive
             }
             "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "c" | "h" | "cpp" | "hpp" | "go"
-            | "java" | "rb" | "sh" | "swift" | "kt" | "toml" | "yaml" | "yml" | "json"
-            | "html" | "css" | "sql" => Self::Code,
+            | "java" | "rb" | "sh" | "swift" | "kt" | "toml" | "yaml" | "yml" | "json" | "html"
+            | "css" | "sql" => Self::Code,
             "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf" => {
                 Self::Document
             }
@@ -288,7 +293,10 @@ mod tests {
     }
 
     fn sized(name: &str, size: u64) -> Entry {
-        Entry { size, ..entry(name, false) }
+        Entry {
+            size,
+            ..entry(name, false)
+        }
     }
 
     fn names(entries: &[Entry]) -> Vec<&str> {
@@ -319,7 +327,11 @@ mod tests {
 
     #[test]
     fn descending_keeps_directories_first_and_name_ties_ascending() {
-        let sort = SortSettings { by: SortBy::Size, ascending: false, directories_first: true };
+        let sort = SortSettings {
+            by: SortBy::Size,
+            ascending: false,
+            directories_first: true,
+        };
         let mut entries = vec![
             sized("small.txt", 1),
             sized("big.txt", 100),
@@ -330,12 +342,19 @@ mod tests {
         sort_entries(&mut entries, &sort);
         // Directory stays on top despite descending; equal sizes keep
         // ascending name order.
-        assert_eq!(names(&entries), ["dir", "big.txt", "tie-a.txt", "tie-b.txt", "small.txt"]);
+        assert_eq!(
+            names(&entries),
+            ["dir", "big.txt", "tie-a.txt", "tie-b.txt", "small.txt"]
+        );
     }
 
     #[test]
     fn directories_mix_in_when_grouping_is_off() {
-        let sort = SortSettings { by: SortBy::Name, ascending: true, directories_first: false };
+        let sort = SortSettings {
+            by: SortBy::Name,
+            ascending: true,
+            directories_first: false,
+        };
         let mut entries = vec![entry("zeta", true), entry("alpha.txt", false)];
         sort_entries(&mut entries, &sort);
         assert_eq!(names(&entries), ["alpha.txt", "zeta"]);
@@ -343,7 +362,11 @@ mod tests {
 
     #[test]
     fn sorts_by_modified_with_unknown_first() {
-        let sort = SortSettings { by: SortBy::Modified, ascending: true, directories_first: true };
+        let sort = SortSettings {
+            by: SortBy::Modified,
+            ascending: true,
+            directories_first: true,
+        };
         let epoch = SystemTime::UNIX_EPOCH;
         let mut old = entry("old.txt", false);
         old.modified = Some(epoch);
@@ -354,7 +377,10 @@ mod tests {
         sort_entries(&mut entries, &sort);
         assert_eq!(names(&entries), ["unknown.txt", "old.txt", "new.txt"]);
 
-        let sort = SortSettings { ascending: false, ..sort };
+        let sort = SortSettings {
+            ascending: false,
+            ..sort
+        };
         let mut entries = vec![old, unknown, new];
         sort_entries(&mut entries, &sort);
         assert_eq!(names(&entries), ["new.txt", "old.txt", "unknown.txt"]);
@@ -362,7 +388,11 @@ mod tests {
 
     #[test]
     fn sorts_by_kind_grouping_extensions_together() {
-        let sort = SortSettings { by: SortBy::Kind, ascending: true, directories_first: true };
+        let sort = SortSettings {
+            by: SortBy::Kind,
+            ascending: true,
+            directories_first: true,
+        };
         let mut entries = vec![
             entry("b.txt", false),
             entry("a.png", false),
@@ -373,7 +403,10 @@ mod tests {
         sort_entries(&mut entries, &sort);
         // Directory first, then Image (.jpg before .png by extension),
         // then Code, then Document.
-        assert_eq!(names(&entries), ["folder", "z.jpg", "a.png", "c.rs", "b.txt"]);
+        assert_eq!(
+            names(&entries),
+            ["folder", "z.jpg", "a.png", "c.rs", "b.txt"]
+        );
     }
 
     #[test]
@@ -400,8 +433,10 @@ mod tests {
         fs::write(dir.path().join("visible.txt"), b"").unwrap();
 
         let entries = read_dir_sorted(dir.path(), &SortSettings::default()).unwrap();
-        let flags: Vec<(&str, bool)> =
-            entries.iter().map(|e| (e.name.as_str(), e.is_hidden)).collect();
+        let flags: Vec<(&str, bool)> = entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_hidden))
+            .collect();
         assert_eq!(flags, [(".dotfile", true), ("visible.txt", false)]);
     }
 
@@ -415,12 +450,20 @@ mod tests {
     #[test]
     fn empty_directory_yields_no_entries() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_dir_sorted(dir.path(), &SortSettings::default()).unwrap().is_empty());
+        assert!(
+            read_dir_sorted(dir.path(), &SortSettings::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn missing_directory_reports_path_in_error() {
-        let err = read_dir_sorted(Path::new("/nonexistent/filex-test"), &SortSettings::default()).unwrap_err();
+        let err = read_dir_sorted(
+            Path::new("/nonexistent/filex-test"),
+            &SortSettings::default(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("/nonexistent/filex-test"));
     }
 
@@ -461,7 +504,10 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn path_segments_walk_from_root() {
-        assert_eq!(path_segments(Path::new("/")), [("/".to_string(), PathBuf::from("/"))]);
+        assert_eq!(
+            path_segments(Path::new("/")),
+            [("/".to_string(), PathBuf::from("/"))]
+        );
         assert_eq!(
             path_segments(Path::new("/Users/nayan/code")),
             [
