@@ -109,7 +109,12 @@ impl Recents {
             Ok(paths) => Self {
                 visits: paths
                     .into_iter()
-                    .map(|path| Visit { path, weight: 1.0, last_opened: now, opened: true })
+                    .map(|path| Visit {
+                        path,
+                        weight: 1.0,
+                        last_opened: now,
+                        opened: true,
+                    })
                     .collect(),
             },
             Err(_) => Self::default(),
@@ -170,7 +175,12 @@ impl Recents {
                 visit.weight = frecency::decay(visit.weight, now - visit.last_opened);
                 visit
             }
-            None => Visit { path, weight: 0.0, last_opened: now, opened: false },
+            None => Visit {
+                path,
+                weight: 0.0,
+                last_opened: now,
+                opened: false,
+            },
         };
         visit.weight += amount;
         visit.last_opened = now;
@@ -196,8 +206,11 @@ impl Recents {
             .collect();
         // Worst first; ties break toward evicting the older position.
         ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)));
-        let doomed: std::collections::HashSet<usize> =
-            ranked.into_iter().take(self.visits.len() - CAP).map(|(ix, _)| ix).collect();
+        let doomed: std::collections::HashSet<usize> = ranked
+            .into_iter()
+            .take(self.visits.len() - CAP)
+            .map(|(ix, _)| ix)
+            .collect();
         let mut ix = 0;
         self.visits.retain(|_| {
             let keep = !doomed.contains(&ix);
@@ -215,7 +228,12 @@ impl Recents {
     pub fn score_table(&self, now: i64) -> HashMap<PathBuf, f32> {
         self.visits
             .iter()
-            .map(|v| (v.path.clone(), frecency::score(v.weight, v.last_opened, now)))
+            .map(|v| {
+                (
+                    v.path.clone(),
+                    frecency::score(v.weight, v.last_opened, now),
+                )
+            })
             .collect()
     }
 
@@ -244,11 +262,18 @@ mod tests {
     const DAY: i64 = 86_400;
 
     fn paths(recents: &Recents) -> Vec<&str> {
-        recents.recent_paths().map(|p| p.to_str().unwrap()).collect()
+        recents
+            .recent_paths()
+            .map(|p| p.to_str().unwrap())
+            .collect()
     }
 
     fn score_of(recents: &Recents, path: &str, now: i64) -> f32 {
-        recents.score_table(now).get(Path::new(path)).copied().unwrap_or(0.0)
+        recents
+            .score_table(now)
+            .get(Path::new(path))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     #[test]
@@ -410,7 +435,10 @@ mod tests {
         // The pre-frecency on-disk format.
         let r = Recents::from_json(r#"["/a","/b","/c"]"#, 1_000);
         assert_eq!(paths(&r), ["/a", "/b", "/c"]);
-        assert!(score_of(&r, "/a", 1_000) > 0.0, "migrated visits carry weight");
+        assert!(
+            score_of(&r, "/a", 1_000) > 0.0,
+            "migrated visits carry weight"
+        );
         assert_eq!(r.visits()[0].last_opened, 1_000, "stamped at load time");
     }
 

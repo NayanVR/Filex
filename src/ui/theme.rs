@@ -130,18 +130,30 @@ mod tests {
 
     #[test]
     fn explicit_modes_ignore_appearance() {
-        assert_eq!(Theme::resolve(ThemeMode::Light, WindowAppearance::Dark), Theme::light());
-        assert_eq!(Theme::resolve(ThemeMode::Dark, WindowAppearance::Light), Theme::dark());
+        assert_eq!(
+            Theme::resolve(ThemeMode::Light, WindowAppearance::Dark),
+            Theme::light()
+        );
+        assert_eq!(
+            Theme::resolve(ThemeMode::Dark, WindowAppearance::Light),
+            Theme::dark()
+        );
     }
 
     #[test]
     fn system_follows_appearance() {
-        assert_eq!(Theme::resolve(ThemeMode::System, WindowAppearance::Light), Theme::light());
+        assert_eq!(
+            Theme::resolve(ThemeMode::System, WindowAppearance::Light),
+            Theme::light()
+        );
         assert_eq!(
             Theme::resolve(ThemeMode::System, WindowAppearance::VibrantLight),
             Theme::light()
         );
-        assert_eq!(Theme::resolve(ThemeMode::System, WindowAppearance::Dark), Theme::dark());
+        assert_eq!(
+            Theme::resolve(ThemeMode::System, WindowAppearance::Dark),
+            Theme::dark()
+        );
         assert_eq!(
             Theme::resolve(ThemeMode::System, WindowAppearance::VibrantDark),
             Theme::dark()

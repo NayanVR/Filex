@@ -41,7 +41,13 @@ pub fn tab_bar(theme: &Theme) -> Div {
 /// The left group that scrolls/clips its tabs without pushing the icon
 /// group off the bar's right edge.
 pub fn tab_group() -> Div {
-    div().flex().flex_1().min_w_0().items_center().gap(px(2.)).overflow_hidden()
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .gap(px(2.))
+        .overflow_hidden()
 }
 
 /// One tab: the active one gets the window background (reads as "raised
@@ -69,7 +75,11 @@ pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Di
 
 /// A tab's label (clips at the tab's max width).
 pub fn tab_label(name: impl Into<SharedString>) -> Div {
-    div().flex_1().text_sm().overflow_hidden().child(name.into())
+    div()
+        .flex_1()
+        .text_sm()
+        .overflow_hidden()
+        .child(name.into())
 }
 
 /// The little ✕ on a tab; callers chain `.on_click` (and should stop

@@ -29,17 +29,30 @@ fn bench_phrases(c: &mut Criterion) {
     // Worst case, and the common one: nothing matches, so every position
     // probes the full 4-word window before falling through to text.
     group.bench_function("expand_plain", |b| {
-        b.iter(|| black_box(filex::phrases::expand(black_box("quarterly earnings deck"), NOW)))
+        b.iter(|| {
+            black_box(filex::phrases::expand(
+                black_box("quarterly earnings deck"),
+                NOW,
+            ))
+        })
     });
 
     group.bench_function("expand_matching", |b| {
-        b.iter(|| black_box(filex::phrases::expand(black_box("photos from last week"), NOW)))
+        b.iter(|| {
+            black_box(filex::phrases::expand(
+                black_box("photos from last week"),
+                NOW,
+            ))
+        })
     });
 
     // The four-word comparative that motivated widening the window.
     group.bench_function("expand_comparative", |b| {
         b.iter(|| {
-            black_box(filex::phrases::expand(black_box("screenshots older than 30 days"), NOW))
+            black_box(filex::phrases::expand(
+                black_box("screenshots older than 30 days"),
+                NOW,
+            ))
         })
     });
 
@@ -52,12 +65,20 @@ fn bench_magic(c: &mut Criterion) {
     // No verb in the first word ⇒ immediate `None`. This is what every
     // ordinary search keystroke pays.
     group.bench_function("parse_rejects_filename", |b| {
-        b.iter(|| black_box(filex::magic::parse(black_box("quarterly earnings deck"), NOW)))
+        b.iter(|| {
+            black_box(filex::magic::parse(
+                black_box("quarterly earnings deck"),
+                NOW,
+            ))
+        })
     });
 
     group.bench_function("parse_delete", |b| {
         b.iter(|| {
-            black_box(filex::magic::parse(black_box("delete screenshots older than 30 days"), NOW))
+            black_box(filex::magic::parse(
+                black_box("delete screenshots older than 30 days"),
+                NOW,
+            ))
         })
     });
 

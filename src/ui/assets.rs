@@ -22,8 +22,12 @@ macro_rules! icon {
     ($name:literal) => {
         (
             concat!("icons/", $name, ".svg"),
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/", $name, ".svg"))
-                as &'static [u8],
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/icons/",
+                $name,
+                ".svg"
+            )) as &'static [u8],
         )
     };
 }
@@ -71,7 +75,10 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(ICONS.iter().find(|(p, _)| *p == path).map(|(_, bytes)| Cow::Borrowed(*bytes)))
+        Ok(ICONS
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {

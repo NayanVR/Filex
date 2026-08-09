@@ -100,7 +100,12 @@ pub fn parse_events(buf: &[u8]) -> Vec<InotifyEvent> {
             .unwrap_or_default()
             .to_vec();
 
-        events.push(InotifyEvent { wd, mask, cookie, name });
+        events.push(InotifyEvent {
+            wd,
+            mask,
+            cookie,
+            name,
+        });
         offset = name_end;
     }
     events
@@ -182,7 +187,9 @@ impl WatchRegistry {
 pub fn event_to_delta(root: &Path, dir: Option<&Path>, event: &InotifyEvent) -> Option<FsDelta> {
     if event.mask & IN_Q_OVERFLOW != 0 {
         // The kernel dropped events; only a reconcile walk restores truth.
-        return Some(FsDelta::Rescan { path: root.to_path_buf() });
+        return Some(FsDelta::Rescan {
+            path: root.to_path_buf(),
+        });
     }
     // Directory-self events carry no name; registry maintenance (dropping
     // the watch) is the caller's job, and the parent's IN_DELETE/IN_MOVED_*
@@ -301,17 +308,15 @@ pub fn parse_fanotify_events(buf: &[u8]) -> Vec<FanotifyEvent> {
         while info_offset + INFO_HEADER_LEN <= event_len {
             let info = &meta[info_offset..];
             let info_type = info[0];
-            let info_len =
-                u16::from_ne_bytes(info[2..4].try_into().expect("2 bytes")) as usize;
+            let info_len = u16::from_ne_bytes(info[2..4].try_into().expect("2 bytes")) as usize;
             if info_len < INFO_HEADER_LEN || info_offset + info_len > event_len {
                 break;
             }
             if info_type == FAN_EVENT_INFO_TYPE_DFID_NAME
                 && info_len >= INFO_HEADER_LEN + DFID_NAME_FIXED_LEN
             {
-                let handle_bytes = u32::from_ne_bytes(
-                    info[12..16].try_into().expect("4 bytes"),
-                ) as usize;
+                let handle_bytes =
+                    u32::from_ne_bytes(info[12..16].try_into().expect("4 bytes")) as usize;
                 let handle_end = INFO_HEADER_LEN + DFID_NAME_FIXED_LEN + handle_bytes;
                 if handle_end <= info_len {
                     // file_handle = handle_bytes + handle_type + f_handle.
@@ -327,7 +332,11 @@ pub fn parse_fanotify_events(buf: &[u8]) -> Vec<FanotifyEvent> {
         }
 
         if mask & FAN_Q_OVERFLOW != 0 || !name.is_empty() {
-            events.push(FanotifyEvent { mask, dir_handle, name });
+            events.push(FanotifyEvent {
+                mask,
+                dir_handle,
+                name,
+            });
         }
         offset += event_len;
     }
@@ -344,7 +353,9 @@ pub fn fanotify_event_to_delta(
     event: &FanotifyEvent,
 ) -> Option<FsDelta> {
     if event.mask & FAN_Q_OVERFLOW != 0 {
-        return Some(FsDelta::Rescan { path: root.to_path_buf() });
+        return Some(FsDelta::Rescan {
+            path: root.to_path_buf(),
+        });
     }
     let dir = dir?;
     let name = std::str::from_utf8(&event.name).ok()?;
@@ -441,7 +452,10 @@ mod imp {
             // SAFETY: plain syscall, no pointers.
             let fan_fd = unsafe {
                 libc::fanotify_init(
-                    FAN_CLOEXEC | FAN_NONBLOCK | FAN_CLASS_NOTIF | FAN_REPORT_DIR_FID
+                    FAN_CLOEXEC
+                        | FAN_NONBLOCK
+                        | FAN_CLASS_NOTIF
+                        | FAN_REPORT_DIR_FID
                         | FAN_REPORT_NAME,
                     libc::O_RDONLY as u32,
                 )
@@ -454,8 +468,8 @@ mod imp {
             }
             let fan_guard = FdGuard(fan_fd);
 
-            let c_root = CString::new(root.as_os_str().as_bytes())
-                .context("root path contains NUL")?;
+            let c_root =
+                CString::new(root.as_os_str().as_bytes()).context("root path contains NUL")?;
             // SAFETY: valid fd and NUL-terminated path.
             let marked = unsafe {
                 libc::fanotify_mark(
@@ -506,7 +520,10 @@ mod imp {
                     }
                 })?;
 
-            Ok(Self { shutdown, thread: Some(thread) })
+            Ok(Self {
+                shutdown,
+                thread: Some(thread),
+            })
         }
     }
 
@@ -539,7 +556,11 @@ mod imp {
         // few so a misbehaving kernel/filesystem is diagnosable from logs.
         let mut resolve_failures_logged = 0u32;
         while !shutdown.load(Ordering::Relaxed) {
-            let mut pollfd = libc::pollfd { fd: fan.0, events: libc::POLLIN, revents: 0 };
+            let mut pollfd = libc::pollfd {
+                fd: fan.0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             // SAFETY: pollfd points at one valid struct for the call.
             let ready = unsafe { libc::poll(&mut pollfd, 1, 500) };
             if ready <= 0 {
@@ -557,7 +578,11 @@ mod imp {
                     Ok(dir) => {
                         // The filesystem mark sees the whole fs; keep only
                         // events under our root.
-                        if dir.starts_with(root) { Some(dir) } else { None }
+                        if dir.starts_with(root) {
+                            Some(dir)
+                        } else {
+                            None
+                        }
                     }
                     Err(err) if err.raw_os_error() == Some(libc::ESTALE) => None,
                     Err(err) => {
@@ -650,10 +675,7 @@ mod imp {
             // SAFETY: plain syscall, no pointers.
             let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
             if fd < 0 {
-                bail!(
-                    "inotify_init1 failed: {}",
-                    std::io::Error::last_os_error()
-                );
+                bail!("inotify_init1 failed: {}", std::io::Error::last_os_error());
             }
 
             let budget = budget_override.unwrap_or_else(|| {
@@ -753,8 +775,8 @@ mod imp {
         if registry.wd_of(dir).is_some() {
             return Ok(());
         }
-        let c_path = CString::new(dir.as_os_str().as_bytes())
-            .context("directory path contains NUL")?;
+        let c_path =
+            CString::new(dir.as_os_str().as_bytes()).context("directory path contains NUL")?;
         // SAFETY: c_path is a valid NUL-terminated string.
         let wd = unsafe { libc::inotify_add_watch(fd, c_path.as_ptr(), WATCH_MASK) };
         if wd < 0 {
@@ -770,7 +792,9 @@ mod imp {
     /// the caller covers by emitting an Upsert for `dir`).
     fn add_watches_recursive(fd: i32, dir: &Path, registry: &mut WatchRegistry) -> Result<()> {
         add_watch(fd, dir, registry)?;
-        let walk = jwalk::WalkDir::new(dir).skip_hidden(false).follow_links(false);
+        let walk = jwalk::WalkDir::new(dir)
+            .skip_hidden(false)
+            .follow_links(false);
         for dirent in walk.into_iter().flatten() {
             if dirent.file_type().is_dir() && dirent.depth() > 0 {
                 // Record degradation *here*, at the moment a directory
@@ -797,7 +821,11 @@ mod imp {
     ) {
         let mut buf = vec![0u8; 64 * 1024];
         while !shutdown.load(Ordering::Relaxed) {
-            let mut pollfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let mut pollfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             // SAFETY: pollfd points at one valid struct for the call.
             let ready = unsafe { libc::poll(&mut pollfd, 1, 500) };
             if ready <= 0 {
@@ -877,7 +905,12 @@ mod tests {
     }
 
     fn event(wd: i32, mask: u32, name: &[u8]) -> InotifyEvent {
-        InotifyEvent { wd, mask, cookie: 0, name: name.to_vec() }
+        InotifyEvent {
+            wd,
+            mask,
+            cookie: 0,
+            name: name.to_vec(),
+        }
     }
 
     #[test]
@@ -886,11 +919,17 @@ mod tests {
         let dir = Path::new("/root/sub");
         assert_eq!(
             event_to_delta(root, Some(dir), &event(1, IN_CREATE, b"a.txt")),
-            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: dir.join("a.txt"),
+                is_dir: false
+            })
         );
         assert_eq!(
             event_to_delta(root, Some(dir), &event(1, IN_MOVED_TO | IN_ISDIR, b"moved")),
-            Some(FsDelta::Upsert { path: dir.join("moved"), is_dir: true })
+            Some(FsDelta::Upsert {
+                path: dir.join("moved"),
+                is_dir: true
+            })
         );
     }
 
@@ -901,12 +940,18 @@ mod tests {
         // A written-and-closed file → Upsert (writer re-stats size/mtime).
         assert_eq!(
             event_to_delta(root, Some(dir), &event(1, IN_CLOSE_WRITE, b"a.txt")),
-            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: dir.join("a.txt"),
+                is_dir: false
+            })
         );
         // touch/chmod → Upsert (mtime).
         assert_eq!(
             event_to_delta(root, Some(dir), &event(1, IN_ATTRIB, b"a.txt")),
-            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: dir.join("a.txt"),
+                is_dir: false
+            })
         );
     }
 
@@ -916,11 +961,19 @@ mod tests {
         let dir = Path::new("/root/sub");
         assert_eq!(
             event_to_delta(root, Some(dir), &event(1, IN_DELETE, b"a.txt")),
-            Some(FsDelta::Remove { path: dir.join("a.txt") })
+            Some(FsDelta::Remove {
+                path: dir.join("a.txt")
+            })
         );
         assert_eq!(
-            event_to_delta(root, Some(dir), &event(1, IN_MOVED_FROM | IN_ISDIR, b"gone")),
-            Some(FsDelta::Remove { path: dir.join("gone") })
+            event_to_delta(
+                root,
+                Some(dir),
+                &event(1, IN_MOVED_FROM | IN_ISDIR, b"gone")
+            ),
+            Some(FsDelta::Remove {
+                path: dir.join("gone")
+            })
         );
     }
 
@@ -937,8 +990,14 @@ mod tests {
     fn self_events_and_unknown_watches_map_to_nothing() {
         let root = Path::new("/root");
         let dir = Path::new("/root/sub");
-        assert_eq!(event_to_delta(root, Some(dir), &event(1, IN_DELETE_SELF, b"")), None);
-        assert_eq!(event_to_delta(root, Some(dir), &event(1, IN_IGNORED, b"")), None);
+        assert_eq!(
+            event_to_delta(root, Some(dir), &event(1, IN_DELETE_SELF, b"")),
+            None
+        );
+        assert_eq!(
+            event_to_delta(root, Some(dir), &event(1, IN_IGNORED, b"")),
+            None
+        );
         // Stale wd: no registered dir.
         assert_eq!(event_to_delta(root, None, &event(9, IN_CREATE, b"x")), None);
     }
@@ -1043,29 +1102,45 @@ mod tests {
 
         assert_eq!(
             fanotify_event_to_delta(root, Some(dir), &event(FAN_CREATE, b"a.txt")),
-            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: dir.join("a.txt"),
+                is_dir: false
+            })
         );
         assert_eq!(
             fanotify_event_to_delta(root, Some(dir), &event(FAN_MOVED_TO | FAN_ONDIR, b"d")),
-            Some(FsDelta::Upsert { path: dir.join("d"), is_dir: true })
+            Some(FsDelta::Upsert {
+                path: dir.join("d"),
+                is_dir: true
+            })
         );
         assert_eq!(
             fanotify_event_to_delta(root, Some(dir), &event(FAN_MOVED_FROM, b"x")),
-            Some(FsDelta::Remove { path: dir.join("x") })
+            Some(FsDelta::Remove {
+                path: dir.join("x")
+            })
         );
         // Close-write / attrib refresh size/mtime (Upsert → re-stat).
         assert_eq!(
             fanotify_event_to_delta(root, Some(dir), &event(FAN_CLOSE_WRITE, b"a.txt")),
-            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: dir.join("a.txt"),
+                is_dir: false
+            })
         );
         assert_eq!(
             fanotify_event_to_delta(root, Some(dir), &event(FAN_ATTRIB, b"a.txt")),
-            Some(FsDelta::Upsert { path: dir.join("a.txt"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: dir.join("a.txt"),
+                is_dir: false
+            })
         );
         // Merged create+delete: removal wins (final state).
         assert_eq!(
             fanotify_event_to_delta(root, Some(dir), &event(FAN_CREATE | FAN_DELETE, b"t")),
-            Some(FsDelta::Remove { path: dir.join("t") })
+            Some(FsDelta::Remove {
+                path: dir.join("t")
+            })
         );
         // Overflow needs no resolved dir.
         assert_eq!(
@@ -1073,7 +1148,10 @@ mod tests {
             Some(FsDelta::Rescan { path: root.into() })
         );
         // Unresolvable handle: dropped.
-        assert_eq!(fanotify_event_to_delta(root, None, &event(FAN_CREATE, b"y")), None);
+        assert_eq!(
+            fanotify_event_to_delta(root, None, &event(FAN_CREATE, b"y")),
+            None
+        );
     }
 
     /// Live smoke tests against the real inotify API — these are what CI's
@@ -1138,13 +1216,8 @@ mod tests {
             fs::create_dir(root.join("c")).unwrap();
 
             let (tx, rx) = mpsc::channel();
-            let _watcher = InotifyWatcher::spawn_with(
-                &root,
-                tx,
-                Some(1),
-                Duration::from_millis(300),
-            )
-            .unwrap();
+            let _watcher =
+                InotifyWatcher::spawn_with(&root, tx, Some(1), Duration::from_millis(300)).unwrap();
 
             assert!(
                 wait_for(&rx, Duration::from_secs(10), |d| {

@@ -12,8 +12,8 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions,
-    div, fill, point, prelude::*, px, relative, size,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -699,7 +699,10 @@ impl Element for TextElement {
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
             vec![
-                TextRun { len: marked_range.start, ..run.clone() },
+                TextRun {
+                    len: marked_range.start,
+                    ..run.clone()
+                },
                 TextRun {
                     len: marked_range.end - marked_range.start,
                     underline: Some(UnderlineStyle {
@@ -709,7 +712,10 @@ impl Element for TextElement {
                     }),
                     ..run.clone()
                 },
-                TextRun { len: display_text.len() - marked_range.end, ..run },
+                TextRun {
+                    len: display_text.len() - marked_range.end,
+                    ..run
+                },
             ]
             .into_iter()
             .filter(|run| run.len > 0)
@@ -771,7 +777,12 @@ impl Element for TextElement {
                 None,
             )
         };
-        PrepaintState { line: Some(line), cursor, selection, scroll_offset: scroll }
+        PrepaintState {
+            line: Some(line),
+            cursor,
+            selection,
+            scroll_offset: scroll,
+        }
     }
 
     fn paint(

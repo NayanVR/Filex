@@ -53,7 +53,12 @@ pub fn toolbar_button(
 /// The breadcrumb strip filling the bar's middle. Children are
 /// [`breadcrumb_segment`]s interleaved with [`breadcrumb_separator`]s.
 pub fn breadcrumbs() -> Div {
-    div().flex_1().flex().items_center().gap_1().overflow_hidden()
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .gap_1()
+        .overflow_hidden()
 }
 
 /// One clickable path segment. Callers chain `.on_click` to navigate.

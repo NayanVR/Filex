@@ -39,7 +39,10 @@ pub fn local_index_status(
     degraded: bool,
 ) -> String {
     let mut text = if ready == total {
-        format!("{files} files · {total} root{}", if total == 1 { "" } else { "s" })
+        format!(
+            "{files} files · {total} root{}",
+            if total == 1 { "" } else { "s" }
+        )
     } else {
         format!("indexing {ready}/{total} roots · {files} files")
     };
@@ -56,7 +59,10 @@ pub fn local_index_status(
 /// is answering searches.
 #[cfg(target_os = "windows")]
 pub fn service_index_status(files: u64, roots: usize) -> String {
-    format!("service · {files} files · {roots} root{}", if roots == 1 { "" } else { "s" })
+    format!(
+        "service · {files} files · {roots} root{}",
+        if roots == 1 { "" } else { "s" }
+    )
 }
 
 #[cfg(test)]
@@ -71,7 +77,10 @@ mod tests {
 
     #[test]
     fn still_indexing_shows_progress() {
-        assert_eq!(local_index_status(1, 3, 0, 10, false), "indexing 1/3 roots · 10 files");
+        assert_eq!(
+            local_index_status(1, 3, 0, 10, false),
+            "indexing 1/3 roots · 10 files"
+        );
     }
 
     #[test]

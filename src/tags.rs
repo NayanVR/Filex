@@ -73,7 +73,15 @@ impl TagColor {
 
     /// All colors, in palette order — for the picker UI.
     pub fn all() -> [Self; 7] {
-        [Self::Grey, Self::Green, Self::Purple, Self::Blue, Self::Yellow, Self::Red, Self::Orange]
+        [
+            Self::Grey,
+            Self::Green,
+            Self::Purple,
+            Self::Blue,
+            Self::Yellow,
+            Self::Red,
+            Self::Orange,
+        ]
     }
 }
 
@@ -87,11 +95,17 @@ pub struct Tag {
 
 impl Tag {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), color: None }
+        Self {
+            name: name.into(),
+            color: None,
+        }
     }
 
     pub fn colored(name: impl Into<String>, color: TagColor) -> Self {
-        Self { name: name.into(), color: Some(color) }
+        Self {
+            name: name.into(),
+            color: Some(color),
+        }
     }
 }
 
@@ -128,7 +142,11 @@ pub fn decode_finder_tags(bytes: &[u8]) -> Vec<Tag> {
     let Some(array) = value.as_array() else {
         return Vec::new();
     };
-    array.iter().filter_map(|v| v.as_string()).map(decode_finder_tag).collect()
+    array
+        .iter()
+        .filter_map(|v| v.as_string())
+        .map(decode_finder_tag)
+        .collect()
 }
 
 /// Fold `new` into a tag set for the details-panel editor. When
@@ -170,7 +188,8 @@ pub fn upsert_tag(tags: &[Tag], replacing: Option<&str>, new: Tag) -> Vec<Tag> {
 pub fn distinct_tags<'a>(tags: impl Iterator<Item = &'a Tag>) -> Vec<Tag> {
     let mut seen: BTreeMap<String, Tag> = BTreeMap::new();
     for tag in tags {
-        seen.entry(tag.name.to_lowercase()).or_insert_with(|| tag.clone());
+        seen.entry(tag.name.to_lowercase())
+            .or_insert_with(|| tag.clone());
     }
     seen.into_values().collect()
 }
@@ -190,7 +209,10 @@ fn decode_finder_tag(entry: &str) -> Tag {
         && let Ok(index) = idx.parse::<u8>()
         && index <= 7
     {
-        return Tag { name: name.to_string(), color: TagColor::from_finder_index(index) };
+        return Tag {
+            name: name.to_string(),
+            color: TagColor::from_finder_index(index),
+        };
     }
     Tag::new(entry)
 }
@@ -223,15 +245,22 @@ impl SidecarTags {
             .ok()
             .and_then(|contents| serde_json::from_str(&contents).ok())
             .unwrap_or_default();
-        Self { file, map: RwLock::new(map) }
+        Self {
+            file,
+            map: RwLock::new(map),
+        }
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<PathBuf, Vec<Tag>>> {
-        self.map.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.map
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<PathBuf, Vec<Tag>>> {
-        self.map.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.map
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Serialize the current map to `file` via temp-file + rename.
@@ -322,8 +351,7 @@ impl SidecarTags {
     /// Drop keys whose path no longer exists (lazy cleanup for files
     /// moved/deleted outside filex). Returns how many were pruned.
     pub fn prune(&self, exists: impl Fn(&Path) -> bool) -> Result<usize> {
-        let removed: Vec<PathBuf> =
-            self.read().keys().filter(|p| !exists(p)).cloned().collect();
+        let removed: Vec<PathBuf> = self.read().keys().filter(|p| !exists(p)).cloned().collect();
         if removed.is_empty() {
             return Ok(0);
         }
@@ -351,7 +379,11 @@ impl SidecarTags {
                 self.rename_key(from, to)
             }
             AppliedOp::Copied { from, to } => self.copy_key(from, to),
-            AppliedOp::Deleted { original, removed_tags, .. } => {
+            AppliedOp::Deleted {
+                original,
+                removed_tags,
+                ..
+            } => {
                 *removed_tags = self.remove_key(original)?;
                 Ok(())
             }
@@ -373,9 +405,11 @@ impl SidecarTags {
                 self.remove_key(to)?;
                 Ok(())
             }
-            AppliedOp::Deleted { original, removed_tags, .. } => {
-                self.restore_key(original, removed_tags.clone())
-            }
+            AppliedOp::Deleted {
+                original,
+                removed_tags,
+                ..
+            } => self.restore_key(original, removed_tags.clone()),
         }
     }
 }
@@ -398,7 +432,10 @@ impl TagStore for SidecarTags {
     }
 
     fn all(&self) -> Vec<(PathBuf, Vec<Tag>)> {
-        self.read().iter().map(|(path, tags)| (path.clone(), tags.clone())).collect()
+        self.read()
+            .iter()
+            .map(|(path, tags)| (path.clone(), tags.clone()))
+            .collect()
     }
 }
 
@@ -437,7 +474,9 @@ mod macos {
 
     impl MacosTags {
         pub fn load(file: PathBuf) -> Self {
-            Self { inner: SidecarTags::load(file) }
+            Self {
+                inner: SidecarTags::load(file),
+            }
         }
 
         /// Lazy prune of the enumeration index — delegates to the sidecar
@@ -460,7 +499,11 @@ mod macos {
         pub fn apply_applied(&self, op: &mut AppliedOp) -> Result<()> {
             if let AppliedOp::Copied { from, to } = op {
                 let tags = self.tags(from);
-                return if tags.is_empty() { Ok(()) } else { self.set_tags(to, &tags) };
+                return if tags.is_empty() {
+                    Ok(())
+                } else {
+                    self.set_tags(to, &tags)
+                };
             }
             self.inner.apply_applied(op)
         }
@@ -529,8 +572,7 @@ mod macos {
         // SAFETY: `cpath`/`name` are valid NUL-terminated C strings that
         // outlive the call; a null value pointer with size 0 is the
         // documented way to query the attribute length.
-        let size =
-            unsafe { libc::getxattr(cpath.as_ptr(), name, std::ptr::null_mut(), 0, 0, 0) };
+        let size = unsafe { libc::getxattr(cpath.as_ptr(), name, std::ptr::null_mut(), 0, 0, 0) };
         if size < 0 {
             return match std::io::Error::last_os_error() {
                 err if err.raw_os_error() == Some(libc::ENOATTR) => Ok(None),
@@ -540,7 +582,14 @@ mod macos {
         let mut buf = vec![0u8; size as usize];
         // SAFETY: `buf` has `size` bytes; the kernel writes at most that.
         let read = unsafe {
-            libc::getxattr(cpath.as_ptr(), name, buf.as_mut_ptr().cast(), buf.len(), 0, 0)
+            libc::getxattr(
+                cpath.as_ptr(),
+                name,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                0,
+            )
         };
         if read < 0 {
             return match std::io::Error::last_os_error() {
@@ -577,9 +626,8 @@ mod macos {
     fn remove_xattr(path: &Path, name: &[u8]) -> Result<()> {
         let cpath = cstring_path(path)?;
         // SAFETY: valid NUL-terminated C strings outliving the call.
-        let rc = unsafe {
-            libc::removexattr(cpath.as_ptr(), name.as_ptr() as *const libc::c_char, 0)
-        };
+        let rc =
+            unsafe { libc::removexattr(cpath.as_ptr(), name.as_ptr() as *const libc::c_char, 0) };
         if rc != 0 {
             return match std::io::Error::last_os_error() {
                 err if err.raw_os_error() == Some(libc::ENOATTR) => Ok(()),
@@ -635,7 +683,10 @@ mod macos {
             // Option B: migrating a Copied op writes the tags onto `to`'s
             // xattr, not just the sidecar.
             store
-                .apply_applied(&mut AppliedOp::Copied { from: from.clone(), to: to.clone() })
+                .apply_applied(&mut AppliedOp::Copied {
+                    from: from.clone(),
+                    to: to.clone(),
+                })
                 .unwrap();
             let raw = get_xattr(&to, TAGS_XATTR).unwrap().unwrap();
             assert_eq!(decode_finder_tags(&raw), vec![Tag::new("Keep")]);
@@ -658,7 +709,10 @@ mod tests {
     #[test]
     fn finder_color_index_round_trips() {
         for color in TagColor::all() {
-            assert_eq!(TagColor::from_finder_index(color.finder_index()), Some(color));
+            assert_eq!(
+                TagColor::from_finder_index(color.finder_index()),
+                Some(color)
+            );
         }
         assert_eq!(TagColor::from_finder_index(0), None); // "no color"
         assert_eq!(TagColor::from_finder_index(9), None);
@@ -668,7 +722,11 @@ mod tests {
     fn set_get_and_clear() {
         let (_dir, store) = store();
         assert!(store.tags(Path::new("/a")).is_empty());
-        store.set_tags(Path::new("/a"), &[Tag::new("Work"), Tag::colored("Hot", TagColor::Red)])
+        store
+            .set_tags(
+                Path::new("/a"),
+                &[Tag::new("Work"), Tag::colored("Hot", TagColor::Red)],
+            )
             .unwrap();
         assert_eq!(
             store.tags(Path::new("/a")),
@@ -685,10 +743,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("tags.json");
         let store = SidecarTags::load(file.clone());
-        store.set_tags(Path::new("/a"), &[Tag::colored("Blue", TagColor::Blue)]).unwrap();
+        store
+            .set_tags(Path::new("/a"), &[Tag::colored("Blue", TagColor::Blue)])
+            .unwrap();
         // A fresh load sees the persisted tags.
         let reloaded = SidecarTags::load(file);
-        assert_eq!(reloaded.tags(Path::new("/a")), vec![Tag::colored("Blue", TagColor::Blue)]);
+        assert_eq!(
+            reloaded.tags(Path::new("/a")),
+            vec![Tag::colored("Blue", TagColor::Blue)]
+        );
     }
 
     #[test]
@@ -715,8 +778,12 @@ mod tests {
     #[test]
     fn prune_drops_vanished_paths_only() {
         let (_dir, store) = store();
-        store.set_tags(Path::new("/keep"), &[Tag::new("K")]).unwrap();
-        store.set_tags(Path::new("/gone"), &[Tag::new("G")]).unwrap();
+        store
+            .set_tags(Path::new("/keep"), &[Tag::new("K")])
+            .unwrap();
+        store
+            .set_tags(Path::new("/gone"), &[Tag::new("G")])
+            .unwrap();
         let pruned = store.prune(|p| p == Path::new("/keep")).unwrap();
         assert_eq!(pruned, 1);
         assert_eq!(store.tags(Path::new("/keep")), vec![Tag::new("K")]);
@@ -732,14 +799,20 @@ mod tests {
 
         // Copy duplicates the source's tags onto the copy.
         store
-            .apply_applied(&mut AppliedOp::Copied { from: "/a".into(), to: "/b".into() })
+            .apply_applied(&mut AppliedOp::Copied {
+                from: "/a".into(),
+                to: "/b".into(),
+            })
             .unwrap();
         assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
         assert_eq!(store.tags(Path::new("/b")), vec![Tag::new("T")]);
 
         // Move/rename migrates the key.
         store
-            .apply_applied(&mut AppliedOp::Moved { from: "/a".into(), to: "/c".into() })
+            .apply_applied(&mut AppliedOp::Moved {
+                from: "/a".into(),
+                to: "/c".into(),
+            })
             .unwrap();
         assert!(store.tags(Path::new("/a")).is_empty());
         assert_eq!(store.tags(Path::new("/c")), vec![Tag::new("T")]);
@@ -752,7 +825,9 @@ mod tests {
         };
         store.apply_applied(&mut del).unwrap();
         assert!(store.tags(Path::new("/c")).is_empty());
-        let AppliedOp::Deleted { removed_tags, .. } = &del else { panic!() };
+        let AppliedOp::Deleted { removed_tags, .. } = &del else {
+            panic!()
+        };
         assert_eq!(removed_tags, &vec![Tag::new("T")]);
     }
 
@@ -762,14 +837,20 @@ mod tests {
         store.set_tags(Path::new("/a"), &[Tag::new("T")]).unwrap();
 
         // Undo of a rename puts the key back.
-        let renamed = AppliedOp::Renamed { from: "/a".into(), to: "/z".into() };
+        let renamed = AppliedOp::Renamed {
+            from: "/a".into(),
+            to: "/z".into(),
+        };
         store.apply_applied(&mut renamed.clone()).unwrap();
         store.undo_applied(&renamed).unwrap();
         assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
         assert!(store.tags(Path::new("/z")).is_empty());
 
         // Undo of a copy removes the copy's key, leaving the source.
-        let copied = AppliedOp::Copied { from: "/a".into(), to: "/b".into() };
+        let copied = AppliedOp::Copied {
+            from: "/a".into(),
+            to: "/b".into(),
+        };
         store.apply_applied(&mut copied.clone()).unwrap();
         store.undo_applied(&copied).unwrap();
         assert_eq!(store.tags(Path::new("/a")), vec![Tag::new("T")]);
@@ -789,7 +870,11 @@ mod tests {
 
     #[test]
     fn upsert_adds_replaces_and_dedups() {
-        let base = vec![Tag::new("A"), Tag::colored("B", TagColor::Blue), Tag::new("C")];
+        let base = vec![
+            Tag::new("A"),
+            Tag::colored("B", TagColor::Blue),
+            Tag::new("C"),
+        ];
 
         // Add a fresh tag → appended.
         assert_eq!(
@@ -806,13 +891,21 @@ mod tests {
         // to the end (its old occurrence dropped).
         assert_eq!(
             upsert_tag(&base, None, Tag::colored("B", TagColor::Green)),
-            vec![Tag::new("A"), Tag::new("C"), Tag::colored("B", TagColor::Green)]
+            vec![
+                Tag::new("A"),
+                Tag::new("C"),
+                Tag::colored("B", TagColor::Green)
+            ]
         );
 
         // Recolor in place (replacing == new.name) → order preserved.
         assert_eq!(
             upsert_tag(&base, Some("B"), Tag::colored("B", TagColor::Yellow)),
-            vec![Tag::new("A"), Tag::colored("B", TagColor::Yellow), Tag::new("C")]
+            vec![
+                Tag::new("A"),
+                Tag::colored("B", TagColor::Yellow),
+                Tag::new("C")
+            ]
         );
 
         // Rename in place, colliding with another existing tag → the
@@ -825,7 +918,12 @@ mod tests {
         // `replacing` a name that isn't present → appended.
         assert_eq!(
             upsert_tag(&base, Some("Z"), Tag::new("D")),
-            vec![Tag::new("A"), Tag::colored("B", TagColor::Blue), Tag::new("C"), Tag::new("D")]
+            vec![
+                Tag::new("A"),
+                Tag::colored("B", TagColor::Blue),
+                Tag::new("C"),
+                Tag::new("D")
+            ]
         );
     }
 
@@ -837,7 +935,11 @@ mod tests {
         // Sorted by (lowercased) name; "Work" appears once, first color won.
         assert_eq!(
             distinct_tags(all.into_iter()),
-            vec![Tag::new("Archive"), Tag::new("Urgent"), Tag::colored("Work", TagColor::Blue)]
+            vec![
+                Tag::new("Archive"),
+                Tag::new("Urgent"),
+                Tag::colored("Work", TagColor::Blue)
+            ]
         );
         assert!(distinct_tags(std::iter::empty()).is_empty());
     }
@@ -854,9 +956,15 @@ mod tests {
     #[test]
     fn paths_with_all_tags_intersects() {
         let (_dir, store) = store();
-        store.set_tags(Path::new("/a"), &[Tag::new("Work"), Tag::new("Urgent")]).unwrap();
-        store.set_tags(Path::new("/b"), &[Tag::new("Work")]).unwrap();
-        store.set_tags(Path::new("/c"), &[Tag::new("Home")]).unwrap();
+        store
+            .set_tags(Path::new("/a"), &[Tag::new("Work"), Tag::new("Urgent")])
+            .unwrap();
+        store
+            .set_tags(Path::new("/b"), &[Tag::new("Work")])
+            .unwrap();
+        store
+            .set_tags(Path::new("/c"), &[Tag::new("Home")])
+            .unwrap();
 
         let mut work = store.paths_with_all_tags(&["work".into()]);
         work.sort();

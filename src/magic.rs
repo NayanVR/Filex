@@ -258,7 +258,11 @@ pub fn parse_with_gate(raw: &str, now: i64, require_delete_evidence: bool) -> Op
     if require_delete_evidence && !clears_delete_gate(verb, &selection) {
         return None;
     }
-    Some(Command { verb, selection, action })
+    Some(Command {
+        verb,
+        selection,
+        action,
+    })
 }
 
 /// The extra bar a **delete** command must clear: its selection has to
@@ -357,7 +361,11 @@ fn selection_from(words: &[&str], now: i64) -> Option<Selection> {
     if expansion.text.is_empty() && filters.is_empty() {
         return None;
     }
-    Some(Selection { source, text: expansion.text, filters })
+    Some(Selection {
+        source,
+        text: expansion.text,
+        filters,
+    })
 }
 
 /// Clean a destination phrase down to a folder name: drop leading filler
@@ -376,7 +384,9 @@ fn parse_destination(words: &[&str]) -> Option<Destination> {
     if words.is_empty() {
         return None;
     }
-    Some(Destination { name: words.join(" ") })
+    Some(Destination {
+        name: words.join(" "),
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -448,7 +458,9 @@ impl NamePattern {
     /// pure literals ("rename screenshots to shot.png") collapses every
     /// match onto one name, which is only meaningful for a single file.
     pub fn varies_per_file(&self) -> bool {
-        self.segments.iter().any(|s| matches!(s, Segment::Index | Segment::Stem))
+        self.segments
+            .iter()
+            .any(|s| matches!(s, Segment::Index | Segment::Stem))
     }
 
     /// The name `original` takes as entry `index` (1-based) of a batch
@@ -518,11 +530,14 @@ impl UserDirs {
 
     /// Register a folder under `name` (lowercased).
     pub fn insert(&mut self, name: impl Into<String>, path: impl Into<PathBuf>) {
-        self.by_name.insert(name.into().to_ascii_lowercase(), path.into());
+        self.by_name
+            .insert(name.into().to_ascii_lowercase(), path.into());
     }
 
     fn get(&self, name: &str) -> Option<&Path> {
-        self.by_name.get(&name.to_ascii_lowercase()).map(PathBuf::as_path)
+        self.by_name
+            .get(&name.to_ascii_lowercase())
+            .map(PathBuf::as_path)
     }
 }
 
@@ -551,10 +566,7 @@ pub struct PlanContext<'a> {
 /// while the same probe resolves nothing on Linux — one command
 /// producing a differently-spelled destination per OS. Scanning yields
 /// the folder's true on-disk name everywhere.
-pub fn resolve_destination(
-    dest: &Destination,
-    ctx: &PlanContext,
-) -> Result<PathBuf, PlanError> {
+pub fn resolve_destination(dest: &Destination, ctx: &PlanContext) -> Result<PathBuf, PlanError> {
     let mut case_insensitive: Option<PathBuf> = None;
     if let Ok(entries) = std::fs::read_dir(ctx.cwd) {
         for entry in entries.flatten() {
@@ -604,11 +616,7 @@ pub fn resolve_destination(
 /// destination folder, or already carrying the name the pattern renders.
 /// [`Plan::skipped`] counts them so the card can account for the
 /// difference between what the search found and what the plan does.
-pub fn build(
-    command: &Command,
-    matches: &[PathBuf],
-    ctx: &PlanContext,
-) -> Result<Plan, PlanError> {
+pub fn build(command: &Command, matches: &[PathBuf], ctx: &PlanContext) -> Result<Plan, PlanError> {
     if matches.is_empty() {
         return Err(PlanError::NoMatches);
     }
@@ -619,9 +627,10 @@ pub fn build(
     matches.sort();
 
     let ops = match &command.action {
-        Action::Delete => {
-            matches.iter().map(|path| FileOp::Delete { path: path.clone() }).collect()
-        }
+        Action::Delete => matches
+            .iter()
+            .map(|path| FileOp::Delete { path: path.clone() })
+            .collect(),
         Action::Move(dest) => transfer_ops(&matches, dest, ctx, true)?,
         Action::Copy(dest) => transfer_ops(&matches, dest, ctx, false)?,
         Action::Rename(pattern) => rename_ops(&matches, pattern)?,
@@ -631,7 +640,11 @@ pub fn build(
         return Err(PlanError::NothingToDo);
     }
     check_collisions(&ops)?;
-    Ok(Plan { verb: command.verb, skipped: matches.len() - ops.len(), ops })
+    Ok(Plan {
+        verb: command.verb,
+        skipped: matches.len() - ops.len(),
+        ops,
+    })
 }
 
 /// Move/copy operations into a resolved destination directory.
@@ -682,9 +695,15 @@ fn transfer_ops(
         taken.insert(free.clone());
         let to = dir.join(&free);
         ops.push(if moving {
-            FileOp::Move { from: from.clone(), to }
+            FileOp::Move {
+                from: from.clone(),
+                to,
+            }
         } else {
-            FileOp::Copy { from: from.clone(), to }
+            FileOp::Copy {
+                from: from.clone(),
+                to,
+            }
         });
     }
     Ok(ops)
@@ -727,10 +746,16 @@ fn rename_ops(matches: &[PathBuf], pattern: &NamePattern) -> Result<Vec<FileOp>,
         }
         // Already called that — nothing to do, and renaming a file onto
         // its own name would fail the "already exists" check.
-        if path.file_name().is_some_and(|current| current == new_name.as_str()) {
+        if path
+            .file_name()
+            .is_some_and(|current| current == new_name.as_str())
+        {
             continue;
         }
-        ops.push(FileOp::Rename { path: path.clone(), new_name });
+        ops.push(FileOp::Rename {
+            path: path.clone(),
+            new_name,
+        });
     }
     Ok(ops)
 }
@@ -789,8 +814,16 @@ mod tests {
     fn a_plain_filename_query_is_not_a_command() {
         // The whole point of the classifier gate: ordinary searches must
         // fall straight through here.
-        for query in ["report.pdf", "quarterly earnings", "photos from last week", ""] {
-            assert!(cmd(query).is_none(), "{query:?} should not parse as a command");
+        for query in [
+            "report.pdf",
+            "quarterly earnings",
+            "photos from last week",
+            "",
+        ] {
+            assert!(
+                cmd(query).is_none(),
+                "{query:?} should not parse as a command"
+            );
         }
     }
 
@@ -801,10 +834,13 @@ mod tests {
         assert_eq!(command.action, Action::Delete);
         assert_eq!(command.selection.source, "screenshots older than 30 days");
         assert_eq!(command.selection.text, "");
-        assert_eq!(command.selection.filters, vec![
-            Filter::Kind(FileKind::Image),
-            Filter::Modified(Bound::Lt(NOW - 30 * 86_400)),
-        ]);
+        assert_eq!(
+            command.selection.filters,
+            vec![
+                Filter::Kind(FileKind::Image),
+                Filter::Modified(Bound::Lt(NOW - 30 * 86_400)),
+            ]
+        );
     }
 
     #[test]
@@ -819,11 +855,19 @@ mod tests {
     fn move_parses_target_and_destination() {
         let command = cmd("move pdfs modified this week to Documents").unwrap();
         assert_eq!(command.verb, Verb::Move);
-        assert_eq!(command.action, Action::Move(Destination { name: "Documents".into() }));
-        assert_eq!(command.selection.filters, vec![
-            Filter::Ext("pdf".into()),
-            Filter::Modified(Bound::Ge(NOW - 7 * 86_400)),
-        ]);
+        assert_eq!(
+            command.action,
+            Action::Move(Destination {
+                name: "Documents".into()
+            })
+        );
+        assert_eq!(
+            command.selection.filters,
+            vec![
+                Filter::Ext("pdf".into()),
+                Filter::Modified(Bound::Ge(NOW - 7 * 86_400)),
+            ]
+        );
         // "modified" is a connective here, not a filename to match on.
         assert_eq!(command.selection.text, "");
     }
@@ -841,21 +885,35 @@ mod tests {
     fn the_last_separator_splits_target_from_destination() {
         // A target word "to" must not steal the split from the real one.
         let command = cmd("move notes to self to Archive").unwrap();
-        assert_eq!(command.action, Action::Move(Destination { name: "Archive".into() }));
+        assert_eq!(
+            command.action,
+            Action::Move(Destination {
+                name: "Archive".into()
+            })
+        );
         assert_eq!(command.selection.source, "notes to self");
     }
 
     #[test]
     fn a_verb_with_no_destination_produces_no_command() {
         // The doc's explicit example of ambiguity: suppress, never guess.
-        for query in ["move my screenshots", "copy the invoices", "rename screenshots"] {
+        for query in [
+            "move my screenshots",
+            "copy the invoices",
+            "rename screenshots",
+        ] {
             assert!(cmd(query).is_none(), "{query:?} should not parse");
         }
     }
 
     #[test]
     fn a_verb_with_no_target_produces_no_command() {
-        for query in ["delete", "delete all", "move to Documents", "move all to Documents"] {
+        for query in [
+            "delete",
+            "delete all",
+            "move to Documents",
+            "move all to Documents",
+        ] {
             assert!(cmd(query).is_none(), "{query:?} should not parse");
         }
     }
@@ -867,7 +925,12 @@ mod tests {
         assert_eq!(command.selection.text, "");
 
         let command = cmd("move screenshots to the Archive folder").unwrap();
-        assert_eq!(command.action, Action::Move(Destination { name: "Archive".into() }));
+        assert_eq!(
+            command.action,
+            Action::Move(Destination {
+                name: "Archive".into()
+            })
+        );
     }
 
     #[test]
@@ -881,7 +944,10 @@ mod tests {
             "remove index signature",
             "trash 2 svg",
         ] {
-            assert!(cmd(query).is_none(), "{query:?} should not offer to delete anything");
+            assert!(
+                cmd(query).is_none(),
+                "{query:?} should not offer to delete anything"
+            );
         }
     }
 
@@ -936,7 +1002,10 @@ mod tests {
                 vec![Filter::Kind(FileKind::Image)],
                 "{query:?} should describe a set"
             );
-            assert_eq!(command.selection.text, "", "{query:?} should leave no name to match");
+            assert_eq!(
+                command.selection.text, "",
+                "{query:?} should leave no name to match"
+            );
         }
     }
 
@@ -944,12 +1013,18 @@ mod tests {
     fn quantifiers_are_command_grammar_not_search_grammar() {
         // The same word must stay searchable in an ordinary query — this
         // is why QUANTIFIERS lives here and not in phrases::FILLER.
-        assert_eq!(phrases::expand("all hands notes", NOW).text, "all hands notes");
+        assert_eq!(
+            phrases::expand("all hands notes", NOW).text,
+            "all hands notes"
+        );
     }
 
     #[test]
     fn parsing_is_case_insensitive_on_the_verb() {
-        assert_eq!(cmd("DELETE logs older than 30 days").unwrap().verb, Verb::Delete);
+        assert_eq!(
+            cmd("DELETE logs older than 30 days").unwrap().verb,
+            Verb::Delete
+        );
         assert_eq!(cmd("Move screenshots TO Archive").unwrap().verb, Verb::Move);
     }
 
@@ -968,7 +1043,9 @@ mod tests {
     #[test]
     fn rename_pattern_parses_placeholders_and_literals() {
         let command = cmd("rename screenshots to shot-{n}.{ext}").unwrap();
-        let Action::Rename(pattern) = &command.action else { panic!("expected a rename") };
+        let Action::Rename(pattern) = &command.action else {
+            panic!("expected a rename")
+        };
         assert!(pattern.varies_per_file());
         assert_eq!(pattern.render(Path::new("/a/b.png"), 3, 2), "shot-03.png");
     }
@@ -976,9 +1053,15 @@ mod tests {
     #[test]
     fn rename_pattern_placeholders_read_the_original_name() {
         let pattern = NamePattern::parse("{name}-old.{ext}").unwrap();
-        assert_eq!(pattern.render(Path::new("/a/report.pdf"), 1, 1), "report-old.pdf");
+        assert_eq!(
+            pattern.render(Path::new("/a/report.pdf"), 1, 1),
+            "report-old.pdf"
+        );
         // An extensionless file renders an empty {ext}, not a panic.
-        assert_eq!(pattern.render(Path::new("/a/Makefile"), 1, 1), "Makefile-old.");
+        assert_eq!(
+            pattern.render(Path::new("/a/Makefile"), 1, 1),
+            "Makefile-old."
+        );
     }
 
     #[test]
@@ -986,8 +1069,14 @@ mod tests {
         // Unknown placeholder — almost certainly a typo, and guessing
         // would write braces into real filenames.
         assert!(NamePattern::parse("shot-{nmae}.png").is_none());
-        assert!(NamePattern::parse("shot-{n.png").is_none(), "unclosed brace");
-        assert!(NamePattern::parse("shot-n}.png").is_none(), "unopened brace");
+        assert!(
+            NamePattern::parse("shot-{n.png").is_none(),
+            "unclosed brace"
+        );
+        assert!(
+            NamePattern::parse("shot-n}.png").is_none(),
+            "unopened brace"
+        );
         assert!(NamePattern::parse("").is_none());
     }
 
@@ -1006,12 +1095,23 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let command = cmd("delete logs older than 30 days").unwrap();
         // Deliberately unsorted input.
-        let plan = build(&command, &paths(&["/b.log", "/a.log"]), &ctx(cwd.path(), &dirs))
-            .unwrap();
-        assert_eq!(plan.ops, vec![
-            FileOp::Delete { path: "/a.log".into() },
-            FileOp::Delete { path: "/b.log".into() },
-        ]);
+        let plan = build(
+            &command,
+            &paths(&["/b.log", "/a.log"]),
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ops,
+            vec![
+                FileOp::Delete {
+                    path: "/a.log".into()
+                },
+                FileOp::Delete {
+                    path: "/b.log".into()
+                },
+            ]
+        );
         assert_eq!(plan.skipped, 0);
     }
 
@@ -1024,9 +1124,13 @@ mod tests {
 
         assert_eq!(build(&command, &[], &context), Err(PlanError::NoMatches));
 
-        let many: Vec<PathBuf> =
-            (0..MAX_PLAN_OPS + 1).map(|i| PathBuf::from(format!("/f{i}.log"))).collect();
-        assert_eq!(build(&command, &many, &context), Err(PlanError::TooMany(MAX_PLAN_OPS + 1)));
+        let many: Vec<PathBuf> = (0..MAX_PLAN_OPS + 1)
+            .map(|i| PathBuf::from(format!("/f{i}.log")))
+            .collect();
+        assert_eq!(
+            build(&command, &many, &context),
+            Err(PlanError::TooMany(MAX_PLAN_OPS + 1))
+        );
     }
 
     #[test]
@@ -1038,13 +1142,21 @@ mod tests {
 
         let command = cmd("move screenshots to archive").unwrap();
         let source = cwd.path().join("shot.png");
-        let plan = build(&command, std::slice::from_ref(&source), &ctx(cwd.path(), &dirs)).unwrap();
+        let plan = build(
+            &command,
+            std::slice::from_ref(&source),
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
 
         // Case-insensitive: "archive" found the folder named "Archive".
-        assert_eq!(plan.ops, vec![FileOp::Move {
-            from: source,
-            to: archive.join("shot.png")
-        }]);
+        assert_eq!(
+            plan.ops,
+            vec![FileOp::Move {
+                from: source,
+                to: archive.join("shot.png")
+            }]
+        );
     }
 
     #[test]
@@ -1058,8 +1170,19 @@ mod tests {
 
         let command = cmd("move pdfs to Documents").unwrap();
         let source = cwd.path().join("a.pdf");
-        let plan = build(&command, std::slice::from_ref(&source), &ctx(cwd.path(), &dirs)).unwrap();
-        assert_eq!(plan.ops, vec![FileOp::Move { from: source, to: local.join("a.pdf") }]);
+        let plan = build(
+            &command,
+            std::slice::from_ref(&source),
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ops,
+            vec![FileOp::Move {
+                from: source,
+                to: local.join("a.pdf")
+            }]
+        );
     }
 
     #[test]
@@ -1071,11 +1194,19 @@ mod tests {
 
         let command = cmd("move pdfs to Documents").unwrap();
         let source = cwd.path().join("a.pdf");
-        let plan = build(&command, std::slice::from_ref(&source), &ctx(cwd.path(), &dirs)).unwrap();
-        assert_eq!(plan.ops, vec![FileOp::Move {
-            from: source,
-            to: documents.path().join("a.pdf")
-        }]);
+        let plan = build(
+            &command,
+            std::slice::from_ref(&source),
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ops,
+            vec![FileOp::Move {
+                from: source,
+                to: documents.path().join("a.pdf")
+            }]
+        );
     }
 
     #[test]
@@ -1084,7 +1215,11 @@ mod tests {
         let dirs = UserDirs::default();
         let command = cmd("move pdfs to Nowhere").unwrap();
         assert_eq!(
-            build(&command, &[cwd.path().join("a.pdf")], &ctx(cwd.path(), &dirs)),
+            build(
+                &command,
+                &[cwd.path().join("a.pdf")],
+                &ctx(cwd.path(), &dirs)
+            ),
             Err(PlanError::UnknownDestination("Nowhere".into()))
         );
     }
@@ -1099,12 +1234,22 @@ mod tests {
         let command = cmd("move screenshots to Archive").unwrap();
         let outside = cwd.path().join("a.png");
         let already = archive.join("b.png");
-        let plan =
-            build(&command, &[outside.clone(), already], &ctx(cwd.path(), &dirs)).unwrap();
+        let plan = build(
+            &command,
+            &[outside.clone(), already],
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
 
         assert_eq!(plan.ops.len(), 1);
         assert_eq!(plan.skipped, 1);
-        assert_eq!(plan.ops[0], FileOp::Move { from: outside, to: archive.join("a.png") });
+        assert_eq!(
+            plan.ops[0],
+            FileOp::Move {
+                from: outside,
+                to: archive.join("a.png")
+            }
+        );
     }
 
     #[test]
@@ -1123,8 +1268,12 @@ mod tests {
         let command = cmd("move roadmap to Downloads").unwrap();
         let first = cwd.path().join("a/ROADMAP.md");
         let second = cwd.path().join("b/ROADMAP.md");
-        let plan =
-            build(&command, &[first.clone(), second.clone()], &ctx(cwd.path(), &dirs)).unwrap();
+        let plan = build(
+            &command,
+            &[first.clone(), second.clone()],
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
 
         assert_eq!(plan.ops.len(), 2, "both files are planned, none refused");
         // `matches` is sorted, so a/ROADMAP.md keeps the base name and
@@ -1132,8 +1281,14 @@ mod tests {
         assert_eq!(
             plan.ops,
             vec![
-                FileOp::Move { from: first, to: downloads.join("ROADMAP.md") },
-                FileOp::Move { from: second, to: downloads.join("ROADMAP 2.md") },
+                FileOp::Move {
+                    from: first,
+                    to: downloads.join("ROADMAP.md")
+                },
+                FileOp::Move {
+                    from: second,
+                    to: downloads.join("ROADMAP 2.md")
+                },
             ]
         );
     }
@@ -1154,7 +1309,13 @@ mod tests {
         let from = cwd.path().join("src/notes.md");
         let plan = build(&command, &[from.clone()], &ctx(cwd.path(), &dirs)).unwrap();
 
-        assert_eq!(plan.ops, vec![FileOp::Move { from, to: downloads.join("notes 2.md") }]);
+        assert_eq!(
+            plan.ops,
+            vec![FileOp::Move {
+                from,
+                to: downloads.join("notes 2.md")
+            }]
+        );
     }
 
     #[test]
@@ -1168,10 +1329,20 @@ mod tests {
 
         let command = cmd("move folders to Archive").unwrap();
         let other = cwd.path().join("Other");
-        let plan =
-            build(&command, &[archive.clone(), other.clone()], &ctx(cwd.path(), &dirs)).unwrap();
+        let plan = build(
+            &command,
+            &[archive.clone(), other.clone()],
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
 
-        assert_eq!(plan.ops, vec![FileOp::Move { from: other, to: archive.join("Other") }]);
+        assert_eq!(
+            plan.ops,
+            vec![FileOp::Move {
+                from: other,
+                to: archive.join("Other")
+            }]
+        );
         assert_eq!(plan.skipped, 1);
     }
 
@@ -1195,14 +1366,19 @@ mod tests {
         let dirs = UserDirs::default();
         let command = cmd("rename screenshots to shot-{n}.png").unwrap();
 
-        let files: Vec<PathBuf> =
-            (0..12).map(|i| cwd.path().join(format!("img{i:02}.png"))).collect();
+        let files: Vec<PathBuf> = (0..12)
+            .map(|i| cwd.path().join(format!("img{i:02}.png")))
+            .collect();
         let plan = build(&command, &files, &ctx(cwd.path(), &dirs)).unwrap();
 
         // 12 files ⇒ two-digit counter, so names sort in numbered order.
-        let FileOp::Rename { new_name, .. } = &plan.ops[0] else { panic!() };
+        let FileOp::Rename { new_name, .. } = &plan.ops[0] else {
+            panic!()
+        };
         assert_eq!(new_name, "shot-01.png");
-        let FileOp::Rename { new_name, .. } = &plan.ops[11] else { panic!() };
+        let FileOp::Rename { new_name, .. } = &plan.ops[11] else {
+            panic!()
+        };
         assert_eq!(new_name, "shot-12.png");
     }
 
@@ -1213,7 +1389,9 @@ mod tests {
         let command = cmd("rename screenshots to shot-{n}.png").unwrap();
         let files = vec![cwd.path().join("a.png"), cwd.path().join("b.png")];
         let plan = build(&command, &files, &ctx(cwd.path(), &dirs)).unwrap();
-        let FileOp::Rename { new_name, .. } = &plan.ops[0] else { panic!() };
+        let FileOp::Rename { new_name, .. } = &plan.ops[0] else {
+            panic!()
+        };
         assert_eq!(new_name, "shot-1.png");
     }
 
@@ -1255,10 +1433,13 @@ mod tests {
         let files = vec![cwd.path().join("a.png"), cwd.path().join("b.jpg")];
         let plan = build(&command, &files, &ctx(cwd.path(), &dirs)).unwrap();
         assert_eq!(plan.skipped, 1, "a.png already renders to a.png");
-        assert_eq!(plan.ops, vec![FileOp::Rename {
-            path: cwd.path().join("b.jpg"),
-            new_name: "b.png".into()
-        }]);
+        assert_eq!(
+            plan.ops,
+            vec![FileOp::Rename {
+                path: cwd.path().join("b.jpg"),
+                new_name: "b.png".into()
+            }]
+        );
     }
 
     #[test]
@@ -1268,7 +1449,11 @@ mod tests {
         let dirs = UserDirs::default();
         let command = cmd("rename screenshots to ../{name}.png").unwrap();
         assert!(matches!(
-            build(&command, &[cwd.path().join("a.jpg")], &ctx(cwd.path(), &dirs)),
+            build(
+                &command,
+                &[cwd.path().join("a.jpg")],
+                &ctx(cwd.path(), &dirs)
+            ),
             Err(PlanError::InvalidName(_))
         ));
     }

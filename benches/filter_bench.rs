@@ -25,15 +25,29 @@ const LIMIT: usize = 500;
 
 fn synthetic_index() -> VolumeIndex {
     const STEMS: [&str; 10] = [
-        "report", "invoice", "photo", "backup", "notes", "main", "config", "readme", "data",
+        "report",
+        "invoice",
+        "photo",
+        "backup",
+        "notes",
+        "main",
+        "config",
+        "readme",
+        "data",
         "screenshot",
     ];
     const EXTS: [&str; 5] = ["txt", "rs", "pdf", "png", "tar.gz"];
     let mut index = VolumeIndex::new("/bench");
     for d in 0..DIRS {
-        let dir = index.insert(ROOT, &format!("project-{d:04}"), true).expect("dir");
+        let dir = index
+            .insert(ROOT, &format!("project-{d:04}"), true)
+            .expect("dir");
         for f in 0..FILES_PER_DIR {
-            let name = format!("{}_{d:04}_{f:03}.{}", STEMS[(d + f) % STEMS.len()], EXTS[f % EXTS.len()]);
+            let name = format!(
+                "{}_{d:04}_{f:03}.{}",
+                STEMS[(d + f) % STEMS.len()],
+                EXTS[f % EXTS.len()]
+            );
             index.insert(dir, &name, false).expect("file");
         }
     }

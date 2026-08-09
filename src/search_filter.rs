@@ -124,7 +124,10 @@ pub fn parse_query(raw: &str, now: i64) -> Query {
             None => text_words.push(word),
         }
     }
-    Query { text: text_words.join(" "), filters }
+    Query {
+        text: text_words.join(" "),
+        filters,
+    }
 }
 
 /// The recognized filter tokens in `raw`, each as `(source word, filter)`,
@@ -146,7 +149,10 @@ pub fn filter_tokens(raw: &str, now: i64) -> Vec<(String, Filter)> {
 /// `raw` with every whitespace token equal to `token` removed — the effect
 /// of removing one search chip. Collapses the surrounding whitespace.
 pub fn without_token(raw: &str, token: &str) -> String {
-    raw.split_whitespace().filter(|w| *w != token).collect::<Vec<_>>().join(" ")
+    raw.split_whitespace()
+        .filter(|w| *w != token)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Try to read one word as a `key:value` filter. `None` means "treat it as
@@ -160,7 +166,9 @@ fn parse_token(word: &str, now: i64) -> Option<Filter> {
     match key.to_ascii_lowercase().as_str() {
         "tag" => Some(Filter::Tag(value.to_lowercase())),
         "kind" => parse_kind(value).map(Filter::Kind),
-        "ext" => Some(Filter::Ext(value.trim_start_matches('.').to_ascii_lowercase())),
+        "ext" => Some(Filter::Ext(
+            value.trim_start_matches('.').to_ascii_lowercase(),
+        )),
         "size" => parse_size_bound(value).map(Filter::Size),
         "modified" => parse_time_bound(value, now).map(Filter::Modified),
         _ => None,
@@ -187,7 +195,9 @@ fn parse_kind(value: &str) -> Option<FileKind> {
 /// or a dotfile like `.bashrc`). Matches [`FileKind::of`]'s notion of the
 /// extension.
 fn extension_of(name: &str) -> Option<String> {
-    std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase())
+    std::path::Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
 }
 
 /// Split a leading comparator (`>=`, `<=`, `>`, `<`) off a value.
@@ -225,7 +235,9 @@ pub(crate) fn parse_bytes(text: &str) -> Option<u64> {
     if text.is_empty() {
         return None;
     }
-    let split = text.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(text.len());
+    let split = text
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(text.len());
     let (number, unit) = text.split_at(split);
     let value: f64 = number.trim().parse().ok()?;
     if !value.is_finite() || value < 0. {
@@ -312,7 +324,11 @@ fn parse_relative_age(value: &str, now: i64) -> Option<Bound<i64>> {
         _ => return None,
     };
     let threshold = now - secs;
-    Some(if younger { Bound::Gt(threshold) } else { Bound::Lt(threshold) })
+    Some(if younger {
+        Bound::Gt(threshold)
+    } else {
+        Bound::Lt(threshold)
+    })
 }
 
 /// Unix seconds at the UTC midnight starting `t`'s day.
@@ -374,7 +390,13 @@ mod tests {
 
     #[test]
     fn plain_text_has_no_filters() {
-        assert_eq!(q("annual report"), Query { text: "annual report".into(), filters: vec![] });
+        assert_eq!(
+            q("annual report"),
+            Query {
+                text: "annual report".into(),
+                filters: vec![]
+            }
+        );
     }
 
     #[test]
@@ -393,28 +415,45 @@ mod tests {
     fn parses_kind_ext_tag_and_dedups() {
         let query = parse_query("shot kind:image ext:.PNG tag:Work tag:work", 0);
         assert_eq!(query.text, "shot");
-        assert_eq!(query.filters, vec![
-            Filter::Kind(FileKind::Image),
-            Filter::Ext("png".into()),
-            Filter::Tag("work".into()),
-        ]);
+        assert_eq!(
+            query.filters,
+            vec![
+                Filter::Kind(FileKind::Image),
+                Filter::Ext("png".into()),
+                Filter::Tag("work".into()),
+            ]
+        );
     }
 
     #[test]
     fn size_bounds_are_base_1024() {
         assert_eq!(parse_size_bound(">2mb"), Some(Bound::Gt(2 * (1 << 20))));
-        assert_eq!(parse_size_bound("<=500kb"), Some(Bound::Le(500 * (1 << 10))));
+        assert_eq!(
+            parse_size_bound("<=500kb"),
+            Some(Bound::Le(500 * (1 << 10)))
+        );
         assert_eq!(parse_size_bound("1gb"), Some(Bound::Eq(1 << 30)));
         assert_eq!(parse_size_bound("1.5gb"), Some(Bound::Eq(1536 * (1 << 20))));
-        assert_eq!(parse_size_bound("1mb..5mb"), Some(Bound::Range(1 << 20, 5 * (1 << 20))));
+        assert_eq!(
+            parse_size_bound("1mb..5mb"),
+            Some(Bound::Range(1 << 20, 5 * (1 << 20)))
+        );
         assert_eq!(parse_size_bound("1024"), Some(Bound::Eq(1024)));
         assert_eq!(parse_size_bound("nope"), None);
     }
 
     #[test]
     fn size_filter_matches_item() {
-        let big = ItemMeta { name: "a.bin", is_dir: false, size: Some(3 << 20), mtime: None };
-        let small = ItemMeta { size: Some(100), ..big };
+        let big = ItemMeta {
+            name: "a.bin",
+            is_dir: false,
+            size: Some(3 << 20),
+            mtime: None,
+        };
+        let small = ItemMeta {
+            size: Some(100),
+            ..big
+        };
         let unknown = ItemMeta { size: None, ..big };
         let f = Filter::Size(Bound::Gt(2 << 20));
         assert!(f.matches(&big));
@@ -424,8 +463,18 @@ mod tests {
 
     #[test]
     fn kind_and_ext_match_from_name() {
-        let png = ItemMeta { name: "pic.PNG", is_dir: false, size: None, mtime: None };
-        let dir = ItemMeta { name: "src", is_dir: true, size: None, mtime: None };
+        let png = ItemMeta {
+            name: "pic.PNG",
+            is_dir: false,
+            size: None,
+            mtime: None,
+        };
+        let dir = ItemMeta {
+            name: "src",
+            is_dir: true,
+            size: None,
+            mtime: None,
+        };
         assert!(Filter::Kind(FileKind::Image).matches(&png));
         assert!(Filter::Ext("png".into()).matches(&png));
         assert!(!Filter::Ext("jpg".into()).matches(&png));
@@ -439,12 +488,21 @@ mod tests {
         // today: at/after the day's midnight.
         assert_eq!(parse_time_bound("today", now), Some(Bound::Ge(100 * DAY)));
         // week: within the last 7 days.
-        assert_eq!(parse_time_bound("week", now), Some(Bound::Ge(now - 7 * DAY)));
+        assert_eq!(
+            parse_time_bound("week", now),
+            Some(Bound::Ge(now - 7 * DAY))
+        );
         // <7d ⇒ modified more recently than now-7d.
         assert_eq!(parse_time_bound("<7d", now), Some(Bound::Gt(now - 7 * DAY)));
         // >30d ⇒ older than 30 days.
-        assert_eq!(parse_time_bound(">30d", now), Some(Bound::Lt(now - 30 * DAY)));
-        assert_eq!(parse_time_bound("<2h", now), Some(Bound::Gt(now - 2 * 3_600)));
+        assert_eq!(
+            parse_time_bound(">30d", now),
+            Some(Bound::Lt(now - 30 * DAY))
+        );
+        assert_eq!(
+            parse_time_bound("<2h", now),
+            Some(Bound::Gt(now - 2 * 3_600))
+        );
     }
 
     #[test]
@@ -470,8 +528,16 @@ mod tests {
     #[test]
     fn modified_filter_matches_mtime() {
         let now = 100 * DAY;
-        let recent = ItemMeta { name: "x", is_dir: false, size: None, mtime: Some(now - DAY) };
-        let old = ItemMeta { mtime: Some(now - 40 * DAY), ..recent };
+        let recent = ItemMeta {
+            name: "x",
+            is_dir: false,
+            size: None,
+            mtime: Some(now - DAY),
+        };
+        let old = ItemMeta {
+            mtime: Some(now - 40 * DAY),
+            ..recent
+        };
         let f = Filter::Modified(parse_time_bound("week", now).unwrap());
         assert!(f.matches(&recent));
         assert!(!f.matches(&old));
@@ -504,10 +570,13 @@ mod tests {
         let query = parse_query("report tag:work kind:pdf size:>1mb modified:<7d", now);
         // kind:pdf isn't a FileKind word → stays text; the rest parse.
         assert_eq!(query.text, "report kind:pdf");
-        assert_eq!(query.filters, vec![
-            Filter::Tag("work".into()),
-            Filter::Size(Bound::Gt(1 << 20)),
-            Filter::Modified(Bound::Gt(now - 7 * DAY)),
-        ]);
+        assert_eq!(
+            query.filters,
+            vec![
+                Filter::Tag("work".into()),
+                Filter::Size(Bound::Gt(1 << 20)),
+                Filter::Modified(Bound::Gt(now - 7 * DAY)),
+            ]
+        );
     }
 }

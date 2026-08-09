@@ -125,7 +125,11 @@ pub struct SortSettings {
 
 impl Default for SortSettings {
     fn default() -> Self {
-        Self { by: SortBy::Name, ascending: true, directories_first: true }
+        Self {
+            by: SortBy::Name,
+            ascending: true,
+            directories_first: true,
+        }
     }
 }
 
@@ -169,13 +173,16 @@ impl Settings {
     /// [`CURRENT_VERSION`].
     pub fn save(&self, file: &Path) -> Result<()> {
         let parent = file.parent().context("settings file has no parent dir")?;
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        let on_disk = Self { version: CURRENT_VERSION, ..self.clone() };
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+        let on_disk = Self {
+            version: CURRENT_VERSION,
+            ..self.clone()
+        };
         let json = serde_json::to_string_pretty(&on_disk).context("serializing settings")?;
         let tmp = file.with_extension("json.tmp");
         std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, file)
-            .with_context(|| format!("replacing {}", file.display()))
+        std::fs::rename(&tmp, file).with_context(|| format!("replacing {}", file.display()))
     }
 }
 
@@ -226,9 +233,11 @@ mod tests {
         let legacy = dir.path().join("roots.list");
         std::fs::write(&legacy, "/tmp/x\n/tmp/y\n").unwrap();
 
-        let settings =
-            Settings::load(&dir.path().join("settings.json"), Some(&legacy)).unwrap();
-        assert_eq!(settings.roots, vec![PathBuf::from("/tmp/x"), PathBuf::from("/tmp/y")]);
+        let settings = Settings::load(&dir.path().join("settings.json"), Some(&legacy)).unwrap();
+        assert_eq!(
+            settings.roots,
+            vec![PathBuf::from("/tmp/x"), PathBuf::from("/tmp/y")]
+        );
         // Everything else is defaults.
         assert!(!settings.show_hidden_files);
     }
@@ -257,8 +266,11 @@ mod tests {
         let file = dir.path().join("settings.json");
         // A newer filex may write fields this version doesn't know, and
         // an older file may lack fields this version added.
-        std::fs::write(&file, r#"{ "version": 1, "show_hidden_files": true, "future": 42 }"#)
-            .unwrap();
+        std::fs::write(
+            &file,
+            r#"{ "version": 1, "show_hidden_files": true, "future": 42 }"#,
+        )
+        .unwrap();
         let settings = Settings::load(&file, None).unwrap();
         assert!(settings.show_hidden_files);
         assert_eq!(settings.sort, SortSettings::default());

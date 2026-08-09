@@ -42,7 +42,10 @@ pub struct FsWalkSource {
 
 impl Default for FsWalkSource {
     fn default() -> Self {
-        Self { skip_hidden: false, skip_system_dirs: true }
+        Self {
+            skip_hidden: false,
+            skip_system_dirs: true,
+        }
     }
 }
 
@@ -159,7 +162,11 @@ mod tests {
             index.path_of(hits[0].id).unwrap(),
             dir.path().canonicalize().unwrap().join("a/b/deep.txt")
         );
-        assert!(index.is_dir(index.resolve(Path::new("a/b")).unwrap()).unwrap());
+        assert!(
+            index
+                .is_dir(index.resolve(Path::new("a/b")).unwrap())
+                .unwrap()
+        );
     }
 
     #[test]
@@ -230,9 +237,12 @@ mod tests {
         assert_eq!(index.search("user-file", 10).len(), 1);
 
         // Opt back in: everything indexed again.
-        let index = FsWalkSource { skip_hidden: false, skip_system_dirs: false }
-            .bootstrap(dir.path())
-            .unwrap();
+        let index = FsWalkSource {
+            skip_hidden: false,
+            skip_system_dirs: false,
+        }
+        .bootstrap(dir.path())
+        .unwrap();
         assert_eq!(index.len(), 4); // sys, deep, lib.so, user-file.txt
         assert_eq!(index.search("lib", 10).len(), 1);
     }
@@ -243,9 +253,12 @@ mod tests {
         fs::write(dir.path().join(".hidden"), b"x").unwrap();
         fs::write(dir.path().join("visible.txt"), b"x").unwrap();
 
-        let index = FsWalkSource { skip_hidden: true, skip_system_dirs: false }
-            .bootstrap(dir.path())
-            .unwrap();
+        let index = FsWalkSource {
+            skip_hidden: true,
+            skip_system_dirs: false,
+        }
+        .bootstrap(dir.path())
+        .unwrap();
         assert_eq!(index.len(), 1);
         assert!(index.search("hidden", 10).is_empty());
 

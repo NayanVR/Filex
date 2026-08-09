@@ -18,14 +18,22 @@ pub const UI_FONT_FAMILY: &str = "Inter";
 /// Font bytes baked into the binary at build time. `CARGO_MANIFEST_DIR`
 /// anchors the path so the include resolves regardless of the build's
 /// working directory.
-const INTER_REGULAR: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Inter-Regular.ttf"));
-const INTER_MEDIUM: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Inter-Medium.ttf"));
-const INTER_SEMIBOLD: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Inter-SemiBold.ttf"));
-const INTER_BOLD: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Inter-Bold.ttf"));
+const INTER_REGULAR: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/fonts/Inter-Regular.ttf"
+));
+const INTER_MEDIUM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/fonts/Inter-Medium.ttf"
+));
+const INTER_SEMIBOLD: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/fonts/Inter-SemiBold.ttf"
+));
+const INTER_BOLD: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/fonts/Inter-Bold.ttf"
+));
 
 /// Register the bundled weights with the text system so
 /// [`UI_FONT_FAMILY`] resolves. Call once at startup. A failure here is

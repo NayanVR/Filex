@@ -102,7 +102,13 @@ pub fn card(
 
 /// The square that holds a card's icon or thumbnail, centered.
 pub fn card_icon_area(size: f32) -> Div {
-    div().flex().items_center().justify_center().w(px(size)).h(px(size)).flex_none()
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(size))
+        .h(px(size))
+        .flex_none()
 }
 
 /// A card's name block: centered, wrapping to at most two lines with a

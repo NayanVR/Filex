@@ -144,7 +144,9 @@ pub enum FsDelta {
     /// has been applied. Enqueue-time capture makes the checkpoint safe:
     /// watchers advance their checkpoint atomics before sending, so all
     /// events the checkpoint covers precede the marker in the channel.
-    PersistNow { checkpoint: super::persist::Checkpoint },
+    PersistNow {
+        checkpoint: super::persist::Checkpoint,
+    },
 }
 
 /// Where a file's size/mtime comes from when [`apply`] upserts it.
@@ -175,7 +177,11 @@ impl MetaSource {
     pub fn prefetch(batch: &[FsDelta]) -> Self {
         let mut map = std::collections::HashMap::new();
         for delta in batch {
-            if let FsDelta::Upsert { path, is_dir: false } = delta {
+            if let FsDelta::Upsert {
+                path,
+                is_dir: false,
+            } = delta
+            {
                 map.entry(path.clone()).or_insert_with(|| stat_meta(path));
             }
         }
@@ -192,7 +198,9 @@ impl MetaSource {
 
 /// One `symlink_metadata` reduced to the two fields the index keeps.
 fn stat_meta(path: &Path) -> Option<(u64, i64)> {
-    std::fs::symlink_metadata(path).ok().map(|meta| (meta.len(), super::mtime_secs(&meta)))
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.len(), super::mtime_secs(&meta)))
 }
 
 /// Apply one delta to the index, stat-ing inline. Idempotent: replaying an
@@ -209,9 +217,12 @@ pub fn apply_prepared(index: &mut VolumeIndex, delta: &FsDelta, meta: &MetaSourc
         FsDelta::Upsert { path, is_dir } => upsert(index, path, *is_dir, meta),
         FsDelta::Remove { path } => remove(index, path),
         FsDelta::Rescan { path } => rescan(index, path, meta),
-        FsDelta::NativeUpsert { key, parent_key, name, is_dir } => {
-            native_upsert(index, *key, *parent_key, name, *is_dir)
-        }
+        FsDelta::NativeUpsert {
+            key,
+            parent_key,
+            name,
+            is_dir,
+        } => native_upsert(index, *key, *parent_key, name, *is_dir),
         FsDelta::NativeRemove { key } => match index.entry_by_native_key(*key) {
             Some(id) => index.remove(id),
             None => Ok(()), // outside the subtree, or already applied
@@ -231,11 +242,7 @@ fn native_upsert(
     // A top-level OS/system dir (parent is the volume root): never insert it
     // when exclusion is on, so its whole subtree stays out — every child's
     // parent FRN then resolves to nothing and is dropped below.
-    if index.exclude_system_dirs()
-        && is_dir
-        && parent == Some(ROOT)
-        && super::is_system_top(name)
-    {
+    if index.exclude_system_dirs() && is_dir && parent == Some(ROOT) && super::is_system_top(name) {
         return Ok(());
     }
     let existing = index.entry_by_native_key(key);
@@ -412,7 +419,10 @@ fn ensure_dirs(index: &mut VolumeIndex, rel: &Path) -> Result<EntryId> {
     let mut current = ROOT;
     for component in rel.components() {
         let Component::Normal(os_name) = component else {
-            bail!("unexpected path component {component:?} in {}", rel.display());
+            bail!(
+                "unexpected path component {component:?} in {}",
+                rel.display()
+            );
         };
         let Some(name) = os_name.to_str() else {
             bail!("non-UTF-8 path component in {}", rel.display());
@@ -574,9 +584,21 @@ impl IndexWriter {
                     // longer contend for it). Warn only if it is surprisingly
                     // long — a heavy walk still to be moved off the head.
                     if hold_ms >= 200 {
-                        tracing::warn!(deltas = batch.len(), mutations, prefetch_ms, hold_ms, "slow delta apply");
+                        tracing::warn!(
+                            deltas = batch.len(),
+                            mutations,
+                            prefetch_ms,
+                            hold_ms,
+                            "slow delta apply"
+                        );
                     } else {
-                        tracing::debug!(deltas = batch.len(), mutations, prefetch_ms, hold_ms, "applied delta batch");
+                        tracing::debug!(
+                            deltas = batch.len(),
+                            mutations,
+                            prefetch_ms,
+                            hold_ms,
+                            "applied delta batch"
+                        );
                     }
 
                     // Publish on a bounded cadence; a pending save forces it
@@ -610,7 +632,9 @@ impl IndexWriter {
                     }
                 }
             })?;
-        Ok(Self { handle: Some(handle) })
+        Ok(Self {
+            handle: Some(handle),
+        })
     }
 }
 
@@ -649,7 +673,14 @@ mod tests {
         let (_dir, mut index) = indexed_tempdir();
         let path = root(&index).join("existing/new.txt");
         // (No need for the file to exist: file upserts don't touch the fs.)
-        apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
+        apply(
+            &mut index,
+            &FsDelta::Upsert {
+                path,
+                is_dir: false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(index.search("new.txt", 10).len(), 1);
         assert_eq!(index.len(), 3);
@@ -665,11 +696,21 @@ mod tests {
         let before = index.len();
 
         let path = root(&index).join(sys).join("System32/evil.dll");
-        apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
+        apply(
+            &mut index,
+            &FsDelta::Upsert {
+                path,
+                is_dir: false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(index.len(), before, "excluded subtree must not be inserted");
         assert!(index.search("evil", 10).is_empty());
-        assert!(index.resolve(Path::new(sys)).is_none(), "top dir not vivified");
+        assert!(
+            index.resolve(Path::new(sys)).is_none(),
+            "top dir not vivified"
+        );
     }
 
     #[test]
@@ -681,14 +722,27 @@ mod tests {
         // Upsert — the freshness path must re-stat it.
         let id = index.resolve(Path::new("existing/old.txt")).unwrap();
         index.set_meta(id, 1, 1);
-        assert!(index.search_filtered("", &[Filter::Size(Bound::Ge(500))], 10).is_empty());
+        assert!(
+            index
+                .search_filtered("", &[Filter::Size(Bound::Ge(500))], 10)
+                .is_empty()
+        );
 
         fs::write(&path, vec![0u8; 500]).unwrap();
-        apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
+        apply(
+            &mut index,
+            &FsDelta::Upsert {
+                path,
+                is_dir: false,
+            },
+        )
+        .unwrap();
 
         let hits = index.search_filtered("", &[Filter::Size(Bound::Ge(500))], 10);
         assert_eq!(
-            hits.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            hits.iter()
+                .filter_map(|h| index.name_of(h.id))
+                .collect::<Vec<_>>(),
             vec!["old.txt"]
         );
     }
@@ -701,7 +755,10 @@ mod tests {
         fs::write(&path, vec![0u8; 500]).unwrap();
 
         // Gather metadata off the lock…
-        let batch = vec![FsDelta::Upsert { path: path.clone(), is_dir: false }];
+        let batch = vec![FsDelta::Upsert {
+            path: path.clone(),
+            is_dir: false,
+        }];
         let meta = MetaSource::prefetch(&batch);
 
         // …then the file vanishes before the (locked) apply. An inline
@@ -713,7 +770,9 @@ mod tests {
 
         let hits = index.search_filtered("", &[Filter::Size(Bound::Ge(500))], 10);
         assert_eq!(
-            hits.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            hits.iter()
+                .filter_map(|h| index.name_of(h.id))
+                .collect::<Vec<_>>(),
             vec!["big.txt"],
             "the size recorded is the prefetched one"
         );
@@ -729,9 +788,17 @@ mod tests {
         fs::create_dir(&subdir).unwrap();
 
         let batch = vec![
-            FsDelta::Upsert { path: file.clone(), is_dir: false },
-            FsDelta::Upsert { path: subdir.clone(), is_dir: true },
-            FsDelta::Remove { path: dir.path().join("gone") },
+            FsDelta::Upsert {
+                path: file.clone(),
+                is_dir: false,
+            },
+            FsDelta::Upsert {
+                path: subdir.clone(),
+                is_dir: true,
+            },
+            FsDelta::Remove {
+                path: dir.path().join("gone"),
+            },
         ];
         let MetaSource::Prefetched(map) = MetaSource::prefetch(&batch) else {
             panic!("prefetch returns Prefetched");
@@ -749,10 +816,24 @@ mod tests {
         let (_dir, mut index) = indexed_tempdir();
         let path = root(&index).join("existing/old.txt");
         // First upsert populates size/mtime (generation moves once).
-        apply(&mut index, &FsDelta::Upsert { path: path.clone(), is_dir: false }).unwrap();
+        apply(
+            &mut index,
+            &FsDelta::Upsert {
+                path: path.clone(),
+                is_dir: false,
+            },
+        )
+        .unwrap();
         let generation = index.generation();
         // A repeat upsert of the unchanged file is a true no-op.
-        apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
+        apply(
+            &mut index,
+            &FsDelta::Upsert {
+                path,
+                is_dir: false,
+            },
+        )
+        .unwrap();
         assert_eq!(index.generation(), generation); // untouched
         assert_eq!(index.search("old.txt", 10).len(), 1);
     }
@@ -805,10 +886,20 @@ mod tests {
     fn upsert_creates_missing_ancestor_directories() {
         let (_dir, mut index) = indexed_tempdir();
         let path = root(&index).join("a/b/c/orphan.txt");
-        apply(&mut index, &FsDelta::Upsert { path, is_dir: false }).unwrap();
+        apply(
+            &mut index,
+            &FsDelta::Upsert {
+                path,
+                is_dir: false,
+            },
+        )
+        .unwrap();
 
         assert!(index.resolve(Path::new("a/b/c/orphan.txt")).is_some());
-        assert_eq!(index.is_dir(index.resolve(Path::new("a/b")).unwrap()), Some(true));
+        assert_eq!(
+            index.is_dir(index.resolve(Path::new("a/b")).unwrap()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -834,7 +925,10 @@ mod tests {
         let (_dir, mut index) = indexed_tempdir();
         apply(
             &mut index,
-            &FsDelta::Upsert { path: PathBuf::from("/elsewhere/x.txt"), is_dir: false },
+            &FsDelta::Upsert {
+                path: PathBuf::from("/elsewhere/x.txt"),
+                is_dir: false,
+            },
         )
         .unwrap();
         assert_eq!(index.len(), 2);
@@ -880,9 +974,13 @@ mod tests {
     /// Keyed fixture: root(frn 5)/{docs(10)/{a.txt(11)}, b.txt(20)}
     fn keyed_index() -> VolumeIndex {
         let mut index = VolumeIndex::new_with_root_key("/vol", 5);
-        let docs = index.insert_with_key(crate::index::ROOT, "docs", true, 10).unwrap();
+        let docs = index
+            .insert_with_key(crate::index::ROOT, "docs", true, 10)
+            .unwrap();
         index.insert_with_key(docs, "a.txt", false, 11).unwrap();
-        index.insert_with_key(crate::index::ROOT, "b.txt", false, 20).unwrap();
+        index
+            .insert_with_key(crate::index::ROOT, "b.txt", false, 20)
+            .unwrap();
         index
     }
 
@@ -891,11 +989,19 @@ mod tests {
         let mut index = keyed_index();
         apply(
             &mut index,
-            &FsDelta::NativeUpsert { key: 12, parent_key: 10, name: "new.txt".into(), is_dir: false },
+            &FsDelta::NativeUpsert {
+                key: 12,
+                parent_key: 10,
+                name: "new.txt".into(),
+                is_dir: false,
+            },
         )
         .unwrap();
         let hits = index.search("new.txt", 10);
-        assert_eq!(index.path_of(hits[0].id).unwrap(), PathBuf::from("/vol/docs/new.txt"));
+        assert_eq!(
+            index.path_of(hits[0].id).unwrap(),
+            PathBuf::from("/vol/docs/new.txt")
+        );
     }
 
     #[test]
@@ -904,7 +1010,12 @@ mod tests {
         // docs (frn 10) renamed to "archive" — a.txt must follow.
         apply(
             &mut index,
-            &FsDelta::NativeUpsert { key: 10, parent_key: 5, name: "archive".into(), is_dir: true },
+            &FsDelta::NativeUpsert {
+                key: 10,
+                parent_key: 5,
+                name: "archive".into(),
+                is_dir: true,
+            },
         )
         .unwrap();
         let hits = index.search("a.txt", 10);
@@ -920,7 +1031,12 @@ mod tests {
         let mut index = keyed_index();
         apply(
             &mut index,
-            &FsDelta::NativeUpsert { key: 20, parent_key: 999, name: "b.txt".into(), is_dir: false },
+            &FsDelta::NativeUpsert {
+                key: 20,
+                parent_key: 999,
+                name: "b.txt".into(),
+                is_dir: false,
+            },
         )
         .unwrap();
         assert!(index.search("b.txt", 10).is_empty());
@@ -928,7 +1044,12 @@ mod tests {
         // Entirely-unknown key + parent: silently ignored.
         apply(
             &mut index,
-            &FsDelta::NativeUpsert { key: 777, parent_key: 999, name: "x".into(), is_dir: false },
+            &FsDelta::NativeUpsert {
+                key: 777,
+                parent_key: 999,
+                name: "x".into(),
+                is_dir: false,
+            },
         )
         .unwrap();
         assert_eq!(index.len(), 2); // docs + a.txt remain
@@ -951,7 +1072,12 @@ mod tests {
         // FRN 20 was b.txt (file); journal now says it's a directory.
         apply(
             &mut index,
-            &FsDelta::NativeUpsert { key: 20, parent_key: 5, name: "b".into(), is_dir: true },
+            &FsDelta::NativeUpsert {
+                key: 20,
+                parent_key: 5,
+                name: "b".into(),
+                is_dir: true,
+            },
         )
         .unwrap();
         let id = index.entry_by_native_key(20).unwrap();
@@ -979,7 +1105,11 @@ mod tests {
         shared.publish();
 
         // The held snapshot is frozen at load time…
-        assert_eq!(snap.search("after", 10).len(), 0, "old snapshot must not mutate");
+        assert_eq!(
+            snap.search("after", 10).len(),
+            0,
+            "old snapshot must not mutate"
+        );
         // …and a fresh load sees the published change.
         assert_eq!(shared.load().search("after", 10).len(), 1);
     }
@@ -1018,7 +1148,10 @@ mod tests {
 
         let path = shared.load().root_path().join("from-writer.txt");
         delta_tx
-            .send(vec![FsDelta::Upsert { path, is_dir: false }])
+            .send(vec![FsDelta::Upsert {
+                path,
+                is_dir: false,
+            }])
             .unwrap();
 
         notify_rx
@@ -1041,7 +1174,9 @@ mod tests {
         for i in 0..6000 {
             index.insert(doomed, &format!("f{i}.txt"), false).unwrap();
         }
-        index.insert(crate::index::ROOT, "survivor.txt", false).unwrap();
+        index
+            .insert(crate::index::ROOT, "survivor.txt", false)
+            .unwrap();
         let arena_before = 6003; // root + doomed + 6000 + survivor
 
         let shared = SharedIndex::new(index);
@@ -1058,7 +1193,9 @@ mod tests {
         .unwrap();
 
         delta_tx
-            .send(vec![FsDelta::Remove { path: PathBuf::from("/vol/doomed") }])
+            .send(vec![FsDelta::Remove {
+                path: PathBuf::from("/vol/doomed"),
+            }])
             .unwrap();
 
         // Two notifications: the removal batch, then the compaction swap.
@@ -1102,7 +1239,10 @@ mod tests {
         let checkpoint = Checkpoint::FsEvents { last_event_id: 7 };
         delta_tx
             .send(vec![
-                FsDelta::Upsert { path, is_dir: false },
+                FsDelta::Upsert {
+                    path,
+                    is_dir: false,
+                },
                 FsDelta::PersistNow { checkpoint },
             ])
             .unwrap();
@@ -1110,7 +1250,10 @@ mod tests {
         let (hits_at_save, saved_checkpoint) = save_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("save hook never ran");
-        assert_eq!(hits_at_save, 1, "delta queued before the marker not applied");
+        assert_eq!(
+            hits_at_save, 1,
+            "delta queued before the marker not applied"
+        );
         assert_eq!(saved_checkpoint, checkpoint);
         drop(delta_tx);
     }

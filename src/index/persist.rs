@@ -41,7 +41,10 @@ impl Checkpoint {
         match self {
             Checkpoint::None => (0, 0, 0),
             Checkpoint::FsEvents { last_event_id } => (1, last_event_id, 0),
-            Checkpoint::UsnJournal { journal_id, next_usn } => (2, journal_id, next_usn),
+            Checkpoint::UsnJournal {
+                journal_id,
+                next_usn,
+            } => (2, journal_id, next_usn),
             Checkpoint::WalkedAt { unix_seconds } => (3, unix_seconds, 0),
         }
     }
@@ -50,7 +53,10 @@ impl Checkpoint {
         Ok(match kind {
             0 => Checkpoint::None,
             1 => Checkpoint::FsEvents { last_event_id: a },
-            2 => Checkpoint::UsnJournal { journal_id: a, next_usn: b },
+            2 => Checkpoint::UsnJournal {
+                journal_id: a,
+                next_usn: b,
+            },
             3 => Checkpoint::WalkedAt { unix_seconds: a },
             other => bail!("unknown checkpoint kind {other}"),
         })
@@ -68,7 +74,10 @@ pub struct Snapshot {
 /// one file per root keyed by a stable hash of its path.
 pub fn default_snapshot_path(root: &Path) -> Option<PathBuf> {
     let dir = dirs::data_local_dir()?.join("filex").join("index");
-    Some(dir.join(format!("{:016x}.fxidx", fnv1a(root.to_string_lossy().as_bytes()))))
+    Some(dir.join(format!(
+        "{:016x}.fxidx",
+        fnv1a(root.to_string_lossy().as_bytes())
+    )))
 }
 
 /// FNV-1a: stable across runs and platforms (std's DefaultHasher is not).
@@ -126,8 +135,8 @@ pub fn save(index: &VolumeIndex, checkpoint: Checkpoint, path: &Path) -> Result<
     std::fs::create_dir_all(parent)
         .with_context(|| format!("creating snapshot dir {}", parent.display()))?;
     let tmp = path.with_extension("fxidx.tmp");
-    let mut file = std::fs::File::create(&tmp)
-        .with_context(|| format!("creating {}", tmp.display()))?;
+    let mut file =
+        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     file.write_all(&buf)?;
     file.sync_all()?;
     drop(file);
@@ -155,15 +164,21 @@ impl<'a> Reader<'a> {
     }
 
     fn u16(&mut self) -> Result<u16> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("2 bytes")))
+        Ok(u16::from_le_bytes(
+            self.take(2)?.try_into().expect("2 bytes"),
+        ))
     }
 
     fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
     }
 
     fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
     }
 
     fn len_prefixed(&mut self) -> Result<&'a [u8]> {
@@ -175,9 +190,12 @@ impl<'a> Reader<'a> {
 /// Load and fully validate a snapshot. `expected_root` guards against a
 /// hash collision or a copied file: the stored root must match exactly.
 pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading snapshot {}", path.display()))?;
-    let mut r = Reader { buf: &bytes, pos: 0 };
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading snapshot {}", path.display()))?;
+    let mut r = Reader {
+        buf: &bytes,
+        pos: 0,
+    };
 
     ensure!(r.take(MAGIC.len())? == MAGIC, "not a filex index snapshot");
     let version = r.u32()?;
@@ -213,8 +231,14 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
 
     let mut entries = Vec::with_capacity(entry_count);
     for i in 0..entry_count {
-        let name = NameRef { offset: r.u32()?, len: r.u16()? };
-        let name_lower = NameRef { offset: r.u32()?, len: r.u16()? };
+        let name = NameRef {
+            offset: r.u32()?,
+            len: r.u16()?,
+        };
+        let name_lower = NameRef {
+            offset: r.u32()?,
+            len: r.u16()?,
+        };
         let parent = EntryId(r.u32()?);
         let flags = r.u8()?;
         let native_key = r.u64()?;
@@ -233,7 +257,15 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
             "entry {i}: parent {} out of range",
             parent.0
         );
-        entries.push(FileEntry { name, name_lower, parent, flags, native_key, size, mtime });
+        entries.push(FileEntry {
+            name,
+            name_lower,
+            parent,
+            flags,
+            native_key,
+            size,
+            mtime,
+        });
     }
 
     // Rebuild the children and native-key maps from the entry table;
@@ -262,7 +294,9 @@ pub fn load(path: &Path, expected_root: &Path) -> Result<Snapshot> {
             .push(EntryId(i as u32));
         if entry.native_key != 0 {
             ensure!(
-                by_native_key.insert(entry.native_key, EntryId(i as u32)).is_none(),
+                by_native_key
+                    .insert(entry.native_key, EntryId(i as u32))
+                    .is_none(),
                 "entry {i}: duplicate native key {:#x}",
                 entry.native_key
             );
@@ -325,12 +359,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = tmp_snapshot_path(&dir);
         let original = sample();
-        save(
-            &original,
-            Checkpoint::FsEvents { last_event_id: 42 },
-            &path,
-        )
-        .unwrap();
+        save(&original, Checkpoint::FsEvents { last_event_id: 42 }, &path).unwrap();
 
         let snapshot = load(&path, Path::new("/vol")).unwrap();
         assert_eq!(
@@ -355,7 +384,10 @@ mod tests {
         use crate::search_filter::{Bound, Filter};
         let by_size = index.search_filtered("", &[Filter::Size(Bound::Ge(4096))], 10);
         assert_eq!(
-            by_size.iter().filter_map(|h| index.name_of(h.id)).collect::<Vec<_>>(),
+            by_size
+                .iter()
+                .filter_map(|h| index.name_of(h.id))
+                .collect::<Vec<_>>(),
             vec!["Übersicht.md"]
         );
         let by_mtime = index.search_filtered("", &[Filter::Modified(Bound::Gt(1_600_000_000))], 10);
@@ -380,11 +412,19 @@ mod tests {
         let path = tmp_snapshot_path(&dir);
         for checkpoint in [
             Checkpoint::None,
-            Checkpoint::UsnJournal { journal_id: 7, next_usn: 900 },
-            Checkpoint::WalkedAt { unix_seconds: 1_752_400_000 },
+            Checkpoint::UsnJournal {
+                journal_id: 7,
+                next_usn: 900,
+            },
+            Checkpoint::WalkedAt {
+                unix_seconds: 1_752_400_000,
+            },
         ] {
             save(&sample(), checkpoint, &path).unwrap();
-            assert_eq!(load(&path, Path::new("/vol")).unwrap().checkpoint, checkpoint);
+            assert_eq!(
+                load(&path, Path::new("/vol")).unwrap().checkpoint,
+                checkpoint
+            );
         }
     }
 
@@ -457,12 +497,26 @@ mod tests {
         let mut index = VolumeIndex::new_with_root_key("/vol", 5);
         let docs = index.insert_with_key(ROOT, "docs", true, 10).unwrap();
         index.insert_with_key(docs, "a.txt", false, 11).unwrap();
-        save(&index, Checkpoint::UsnJournal { journal_id: 1, next_usn: 2 }, &path).unwrap();
+        save(
+            &index,
+            Checkpoint::UsnJournal {
+                journal_id: 1,
+                next_usn: 2,
+            },
+            &path,
+        )
+        .unwrap();
 
         let loaded = load(&path, Path::new("/vol")).unwrap().index;
         assert_eq!(loaded.entry_by_native_key(5), Some(ROOT));
-        assert_eq!(loaded.entry_by_native_key(10), loaded.resolve(Path::new("docs")));
-        assert_eq!(loaded.entry_by_native_key(11), loaded.resolve(Path::new("docs/a.txt")));
+        assert_eq!(
+            loaded.entry_by_native_key(10),
+            loaded.resolve(Path::new("docs"))
+        );
+        assert_eq!(
+            loaded.entry_by_native_key(11),
+            loaded.resolve(Path::new("docs/a.txt"))
+        );
 
         // Corrupt: give the last entry the same key as the root (5).
         // native_key sits before size(u64)+mtime(i64), i.e. 24 from the end.
@@ -470,7 +524,12 @@ mod tests {
         let key_field = bytes.len() - 24;
         bytes[key_field..key_field + 8].copy_from_slice(&5u64.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
-        assert!(load(&path, Path::new("/vol")).unwrap_err().to_string().contains("duplicate"));
+        assert!(
+            load(&path, Path::new("/vol"))
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
     }
 
     #[test]

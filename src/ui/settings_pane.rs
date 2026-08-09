@@ -42,7 +42,11 @@ pub fn card_header(theme: &Theme, text: impl Into<SharedString>, close: AnyEleme
 }
 
 /// The label + explanation stack shared by every settings row.
-fn row_label(theme: &Theme, label: impl Into<SharedString>, description: impl Into<SharedString>) -> Div {
+fn row_label(
+    theme: &Theme,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+) -> Div {
     div()
         // Take the row's free space and allow shrinking below content width
         // (`min_w(0)`) so a long description wraps here instead of
@@ -52,13 +56,25 @@ fn row_label(theme: &Theme, label: impl Into<SharedString>, description: impl In
         .flex()
         .flex_col()
         .child(div().text_sm().text_color(theme.text).child(label.into()))
-        .child(div().text_xs().text_color(theme.text_dim).child(description.into()))
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.text_dim)
+                .child(description.into()),
+        )
 }
 
 /// The shell of a settings row: label on the left, a control on the
 /// right. [`toggle_row`] and [`choice_row`] both build on it.
 fn row_shell() -> Div {
-    div().flex().items_center().justify_between().gap_4().px_3().py_2().rounded_md()
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .px_3()
+        .py_2()
+        .rounded_md()
 }
 
 /// One toggleable setting: label + explanation on the left, a switch
@@ -88,7 +104,9 @@ pub fn choice_row(
     description: impl Into<SharedString>,
     control: AnyElement,
 ) -> Div {
-    row_shell().child(row_label(theme, label, description)).child(control)
+    row_shell()
+        .child(row_label(theme, label, description))
+        .child(control)
 }
 
 /// The container for a segmented control (a pill split into [`segment`]s).
@@ -146,5 +164,9 @@ fn switch(theme: &Theme, on: bool) -> AnyElement {
 /// Dim footnote at the bottom of the pane (e.g. where settings live
 /// on disk).
 pub fn footnote(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().pt_3().text_xs().text_color(theme.text_dim).child(text.into())
+    div()
+        .pt_3()
+        .text_xs()
+        .text_color(theme.text_dim)
+        .child(text.into())
 }

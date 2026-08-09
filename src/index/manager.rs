@@ -59,8 +59,7 @@ pub fn load_roots(file: &Path) -> Vec<PathBuf> {
 
 pub fn save_roots(file: &Path, roots: &[PathBuf]) -> Result<()> {
     let parent = file.parent().context("roots file has no parent dir")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let mut contents = String::new();
     for root in roots {
         let Some(as_str) = root.to_str() else {
@@ -267,38 +266,35 @@ pub fn search_all_scoped(
         let ctl = ScanCtl { cancel, scope };
         // Run the parallel scan on the dedicated search pool, so a
         // concurrent filesystem walk on the global pool cannot starve it.
-        let hits = search_pool().install(|| index.search_filtered_cancellable(query, filters, fetch, &ctl));
-        merged.extend(
-            hits.into_iter().filter_map(
-                |SearchHit { id, score }| {
-                    if cancel.load(Ordering::Relaxed) {
-                        return None;
-                    }
-                    let path = index.path_of(id)?;
-                    let frecency_boost = if frecency.is_empty() {
-                        0
-                    } else {
-                        boost_for(frecency.get(path.as_path()).copied().unwrap_or(0.0))
-                    };
-                    // System files are indexed but de-prioritized within
-                    // their match tier, so they don't crowd out a user's
-                    // own files on a common query (#6).
-                    let boost = frecency_boost
-                        - if is_system_path(&path) {
-                            SYSTEM_PATH_PENALTY
-                        } else {
-                            0
-                        };
-                    Some(MergedHit {
-                        name: index.name_of(id)?.to_string(),
-                        is_dir: index.is_dir(id)?,
-                        score,
-                        rank: rank_of(score, boost),
-                        path,
-                    })
-                },
-            ),
-        );
+        let hits = search_pool()
+            .install(|| index.search_filtered_cancellable(query, filters, fetch, &ctl));
+        merged.extend(hits.into_iter().filter_map(|SearchHit { id, score }| {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            let path = index.path_of(id)?;
+            let frecency_boost = if frecency.is_empty() {
+                0
+            } else {
+                boost_for(frecency.get(path.as_path()).copied().unwrap_or(0.0))
+            };
+            // System files are indexed but de-prioritized within
+            // their match tier, so they don't crowd out a user's
+            // own files on a common query (#6).
+            let boost = frecency_boost
+                - if is_system_path(&path) {
+                    SYSTEM_PATH_PENALTY
+                } else {
+                    0
+                };
+            Some(MergedHit {
+                name: index.name_of(id)?.to_string(),
+                is_dir: index.is_dir(id)?,
+                score,
+                rank: rank_of(score, boost),
+                path,
+            })
+        }));
     }
     // A cancelled scan produces a partial, unranked set the caller will
     // discard by generation check — don't bother sorting it.
@@ -402,7 +398,10 @@ mod tests {
     }
 
     fn frecency(entries: &[(&str, f32)]) -> HashMap<PathBuf, f32> {
-        entries.iter().map(|(p, s)| (PathBuf::from(p), *s)).collect()
+        entries
+            .iter()
+            .map(|(p, s)| (PathBuf::from(p), *s))
+            .collect()
     }
 
     fn names_for(hits: &[MergedHit]) -> Vec<&str> {
@@ -415,10 +414,14 @@ mod tests {
         // even if a *deeper* directory shares a system name.
         #[cfg(target_os = "windows")]
         {
-            assert!(is_system_path(Path::new(r"C:\Windows\System32\drivers\x.sys")));
+            assert!(is_system_path(Path::new(
+                r"C:\Windows\System32\drivers\x.sys"
+            )));
             assert!(is_system_path(Path::new(r"C:\Program Files\App\a.exe")));
             assert!(is_system_path(Path::new(r"D:\$Recycle.Bin\x")));
-            assert!(!is_system_path(Path::new(r"C:\Users\me\Documents\notes.txt")));
+            assert!(!is_system_path(Path::new(
+                r"C:\Users\me\Documents\notes.txt"
+            )));
             // A user folder named "windows" nested deep is not the OS.
             assert!(!is_system_path(Path::new(r"C:\Users\me\windows\x.txt")));
         }
@@ -464,7 +467,8 @@ mod tests {
         // Both are word-boundary matches; the shorter name wins on the
         // built-in tiebreak...
         a.insert(ROOT, "notes_report.txt", false).unwrap();
-        a.insert(ROOT, "quarterly_report_archive.txt", false).unwrap();
+        a.insert(ROOT, "quarterly_report_archive.txt", false)
+            .unwrap();
         let indexes = [shared(a)];
 
         assert_eq!(
@@ -519,7 +523,8 @@ mod tests {
         const HOT: &str = "report_with_a_much_longer_name.txt";
         let mut a = VolumeIndex::new("/vol");
         for i in 0..5 {
-            a.insert(ROOT, &format!("report_{i:02}.txt"), false).unwrap();
+            a.insert(ROOT, &format!("report_{i:02}.txt"), false)
+                .unwrap();
         }
         a.insert(ROOT, HOT, false).unwrap();
         let indexes = [shared(a)];
@@ -530,7 +535,13 @@ mod tests {
 
         // ...but the overfetched scan still carried it into stage B,
         // where the boost brings it to the top.
-        let hits = search_all(&indexes, "report", &[], 2, &frecency(&[("/vol/report_with_a_much_longer_name.txt", 10.0)]));
+        let hits = search_all(
+            &indexes,
+            "report",
+            &[],
+            2,
+            &frecency(&[("/vol/report_with_a_much_longer_name.txt", 10.0)]),
+        );
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].name, HOT);
     }
@@ -542,7 +553,8 @@ mod tests {
         // result set is still exactly `limit` long.
         let mut a = VolumeIndex::new("/vol");
         for i in 0..40 {
-            a.insert(ROOT, &format!("report_{i:02}.txt"), false).unwrap();
+            a.insert(ROOT, &format!("report_{i:02}.txt"), false)
+                .unwrap();
         }
         let indexes = [shared(a)];
         let hot = frecency(&[("/vol/report_39.txt", 10.0)]);
@@ -583,7 +595,11 @@ mod tests {
         // its hit would be in the output.
         let hits = search_all(&indexes, "dsr", &[], 500, &none());
 
-        assert_eq!(hits.len(), FUZZY_GATE + 10, "the literal hits, and only those");
+        assert_eq!(
+            hits.len(),
+            FUZZY_GATE + 10,
+            "the literal hits, and only those"
+        );
         assert!(
             hits.iter().all(|h| h.score.kind != MatchKind::Fuzzy),
             "{} literal hits is already a useful result list; the second \

@@ -55,11 +55,7 @@ impl FsEventsWatcher {
     /// Start watching `root` (must be canonicalized). `since` is a
     /// previously persisted FSEvents event ID to replay from; `None` means
     /// "events from now on".
-    pub fn spawn(
-        root: &Path,
-        since: Option<u64>,
-        deltas: Sender<Vec<FsDelta>>,
-    ) -> Result<Self> {
+    pub fn spawn(root: &Path, since: Option<u64>, deltas: Sender<Vec<FsDelta>>) -> Result<Self> {
         let root_str = root
             .to_str()
             .ok_or_else(|| anyhow!("non-UTF-8 watch root {}", root.display()))?;
@@ -95,8 +91,7 @@ impl FsEventsWatcher {
                 paths.as_opaque(),
                 since.unwrap_or(fse::kFSEventStreamEventIdSinceNow),
                 0.15, // seconds of OS-side coalescing latency
-                fse::kFSEventStreamCreateFlagFileEvents
-                    | fse::kFSEventStreamCreateFlagNoDefer,
+                fse::kFSEventStreamCreateFlagFileEvents | fse::kFSEventStreamCreateFlagNoDefer,
             )
         };
         if stream.is_null() {
@@ -283,26 +278,35 @@ mod tests {
     fn map_event_prefers_rescan_over_everything() {
         let delta = map_event(
             PathBuf::from("/x"),
-            fse::kFSEventStreamEventFlagMustScanSubDirs
-                | fse::kFSEventStreamEventFlagItemCreated,
+            fse::kFSEventStreamEventFlagMustScanSubDirs | fse::kFSEventStreamEventFlagItemCreated,
             Some(true),
         );
-        assert_eq!(delta, Some(FsDelta::Rescan { path: PathBuf::from("/x") }));
+        assert_eq!(
+            delta,
+            Some(FsDelta::Rescan {
+                path: PathBuf::from("/x")
+            })
+        );
     }
 
     #[test]
     fn map_event_uses_filesystem_presence_not_sticky_flags() {
         // Created+Removed bits together (sticky within the latency window):
         // presence decides.
-        let flags = fse::kFSEventStreamEventFlagItemCreated
-            | fse::kFSEventStreamEventFlagItemRemoved;
+        let flags =
+            fse::kFSEventStreamEventFlagItemCreated | fse::kFSEventStreamEventFlagItemRemoved;
         assert_eq!(
             map_event(PathBuf::from("/x"), flags, Some(false)),
-            Some(FsDelta::Upsert { path: PathBuf::from("/x"), is_dir: false })
+            Some(FsDelta::Upsert {
+                path: PathBuf::from("/x"),
+                is_dir: false
+            })
         );
         assert_eq!(
             map_event(PathBuf::from("/x"), flags, None),
-            Some(FsDelta::Remove { path: PathBuf::from("/x") })
+            Some(FsDelta::Remove {
+                path: PathBuf::from("/x")
+            })
         );
     }
 
@@ -316,18 +320,31 @@ mod tests {
         ] {
             assert_eq!(
                 map_event(PathBuf::from("/x"), flags, Some(false)),
-                Some(FsDelta::Upsert { path: PathBuf::from("/x"), is_dir: false })
+                Some(FsDelta::Upsert {
+                    path: PathBuf::from("/x"),
+                    is_dir: false
+                })
             );
         }
         // A modify whose file has since vanished is still a Remove.
         assert_eq!(
-            map_event(PathBuf::from("/x"), fse::kFSEventStreamEventFlagItemModified, None),
-            Some(FsDelta::Remove { path: PathBuf::from("/x") })
+            map_event(
+                PathBuf::from("/x"),
+                fse::kFSEventStreamEventFlagItemModified,
+                None
+            ),
+            Some(FsDelta::Remove {
+                path: PathBuf::from("/x")
+            })
         );
         // Unrelated flags (e.g. xattr-only) are still ignored — no spurious
         // reindex when tags write the Finder xattr.
         assert_eq!(
-            map_event(PathBuf::from("/x"), fse::kFSEventStreamEventFlagItemXattrMod, Some(false)),
+            map_event(
+                PathBuf::from("/x"),
+                fse::kFSEventStreamEventFlagItemXattrMod,
+                Some(false)
+            ),
             None
         );
     }

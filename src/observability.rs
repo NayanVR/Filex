@@ -313,7 +313,9 @@ mod tests {
         assert_eq!(event.message.as_deref(), Some("failed to open <path>"));
         let exc = &event.exception.values[0];
         assert_eq!(exc.value.as_deref(), Some("<path> missing"));
-        let frame_path = exc.stacktrace.as_ref().unwrap().frames[0].abs_path.as_deref();
+        let frame_path = exc.stacktrace.as_ref().unwrap().frames[0]
+            .abs_path
+            .as_deref();
         assert_eq!(frame_path, Some("<path>"));
     }
 

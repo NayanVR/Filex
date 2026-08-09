@@ -41,7 +41,9 @@ pub fn spinner(path: &'static str, color: Rgba, size: f32, id: impl Into<Element
         .size(px(size))
         .with_animation(
             id,
-            Animation::new(Duration::from_secs(1)).repeat().with_easing(linear),
+            Animation::new(Duration::from_secs(1))
+                .repeat()
+                .with_easing(linear),
             |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
         )
         .into_any_element()
@@ -61,11 +63,7 @@ pub fn thumbnail_icon(imagery: Arc<RenderImage>, edge: f32) -> AnyElement {
         .flex_none()
         .overflow_hidden()
         .rounded(px(if edge > 40. { 6. } else { 3. }))
-        .child(
-            img(imagery)
-                .size_full()
-                .object_fit(gpui::ObjectFit::Cover),
-        )
+        .child(img(imagery).size_full().object_fit(gpui::ObjectFit::Cover))
         .into_any_element()
 }
 

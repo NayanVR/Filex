@@ -17,7 +17,10 @@ pub struct TextTooltip {
 
 impl TextTooltip {
     pub fn new(text: impl Into<SharedString>, theme: Theme) -> Self {
-        Self { text: text.into(), theme }
+        Self {
+            text: text.into(),
+            theme,
+        }
     }
 }
 
