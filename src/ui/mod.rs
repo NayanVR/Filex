@@ -18,6 +18,7 @@ pub mod magic_card;
 pub mod menu;
 pub mod modal;
 pub mod pane;
+pub mod scrollbar;
 pub mod search_input;
 pub mod settings_pane;
 pub mod sidebar;
