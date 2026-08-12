@@ -4,6 +4,16 @@
 use super::*;
 
 impl Workspace {
+    /// Move focus into the search box (the `/` shortcut and the search
+    /// affordance). Selecting the existing text means the next keystroke
+    /// replaces a stale query rather than appending to it.
+    pub(super) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.search_input.focus_handle(cx);
+        window.focus(&handle);
+        self.search_input
+            .update(cx, |input, cx| input.select_all_text(cx));
+    }
+
     /// Run a `tag:NAME` search (clicking a sidebar tag), focusing the
     /// search field so it can be refined.
     pub(super) fn search_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {

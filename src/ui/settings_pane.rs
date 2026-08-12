@@ -7,7 +7,10 @@
 //! presentation-only: the caller supplies current values and chains
 //! `.on_click` to mutate the settings store.
 
-use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px};
+use gpui::{
+    AnyElement, Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px,
+    transparent_black,
+};
 
 use super::theme::Theme;
 
@@ -142,6 +145,44 @@ pub fn segment(
     } else {
         base.text_color(theme.text_dim)
     }
+}
+
+/// The container for a row of accent [`swatch`]es. Wraps and right-aligns
+/// so the swatches + hex field never overflow the settings row.
+pub fn swatch_row() -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_end()
+        .gap(px(6.))
+}
+
+/// One accent-color swatch: a filled dot, ringed when selected. Callers
+/// chain `.on_click`.
+pub fn swatch(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    color: Rgba,
+    selected: bool,
+) -> Stateful<Div> {
+    let ring = if selected {
+        theme.text
+    } else {
+        transparent_black().into()
+    };
+    div()
+        .id(id)
+        .size(px(22.))
+        .rounded_full()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .border_2()
+        .border_color(ring)
+        .child(div().size(px(14.)).rounded_full().bg(color))
 }
 
 /// The switch pill: accent track with the knob at the end when on,

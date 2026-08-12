@@ -155,6 +155,13 @@ impl Workspace {
                     ),
                 )
                 .child(div().flex_1().min_w_0().child(self.search_input.clone()))
+                // The `/` hint: press it to focus the box. Hidden once a
+                // query is present so it never crowds the typed text.
+                .children(
+                    self.query
+                        .is_empty()
+                        .then(|| ui::kbd::keycap(&theme, "/")),
+                )
                 .child(
                     ui::top_bar::magic_toggle(&theme, self.in_magic_view()).on_click(cx.listener(
                         |this, _: &ClickEvent, window, cx| {
@@ -424,7 +431,7 @@ impl Workspace {
                 this.set_sort(by, cx);
             })
         };
-        ui::list_row::header_row(&theme, ui::icon::ICON_SIZE)
+        ui::list_row::header_row(&theme, theme.icon_size)
             .child(
                 ui::list_row::header_cell(&theme, "sort-name", "Name", active(SortBy::Name))
                     .flex_1()
@@ -457,11 +464,15 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let inner = match self.settings.read(cx).settings().view {
+            // A small horizontal inset so the header and the rounded row
+            // selection float off the pane edges, Finder-style (the header
+            // and list share it, so their columns stay aligned).
             ViewMode::List => div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h_0()
+                .px_1p5()
                 .child(self.render_column_headers(cx))
                 .child(self.render_file_list(cx))
                 .into_any_element(),
@@ -497,7 +508,16 @@ impl Workspace {
         if self.results.is_empty() {
             return ui::pane::empty_state(&theme, format!("no matches for “{}”", self.query));
         }
-        self.render_search_results(cx).into_any_element()
+        // Match the browse list's inset so search rows get the same
+        // floating rounded selection.
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .px_1p5()
+            .child(self.render_search_results(cx))
+            .into_any_element()
     }
 
     pub(super) fn render_status_bar(&self, theme: &Theme) -> impl IntoElement {
@@ -628,6 +648,23 @@ impl Workspace {
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_preview(cx))),
             )
+            // Keyboard-shortcuts overlay (also `?`).
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "shortcuts",
+                    "icons/keyboard.svg",
+                    if self.shortcuts_open {
+                        theme.accent
+                    } else {
+                        theme.text_dim
+                    },
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.shortcuts_open = !this.shortcuts_open;
+                    cx.notify();
+                })),
+            )
             .child(
                 ui::top_bar::toolbar_button(
                     &theme,
@@ -657,6 +694,16 @@ impl Render for Workspace {
         let theme = *cx.theme();
         div()
             .track_focus(&self.focus_handle)
+            // Anchors the `!SearchInput` key bindings: single-key
+            // shortcuts fire here (list focused) but not while the search
+            // box is focused, so those keys stay typeable as text.
+            .key_context("Workspace")
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleShortcuts, _window, cx| {
+                this.shortcuts_open = !this.shortcuts_open;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleView, _window, cx| this.toggle_view(cx)))
             .on_action(cx.listener(|this, _: &GoUp, _window, cx| this.go_up(cx)))
             .on_action(cx.listener(|this, _: &GoBack, _window, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _window, cx| this.go_forward(cx)))
@@ -673,14 +720,8 @@ impl Render for Workspace {
                     this.close_tab(this.active_tab, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &NextTab, _window, cx| {
-                let next = (this.active_tab + 1) % this.tabs.len();
-                this.activate_tab(next, cx);
-            }))
-            .on_action(cx.listener(|this, _: &PrevTab, _window, cx| {
-                let prev = (this.active_tab + this.tabs.len() - 1) % this.tabs.len();
-                this.activate_tab(prev, cx);
-            }))
+            .on_action(cx.listener(|this, _: &NextTab, _window, cx| this.cycle_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, _window, cx| this.cycle_tab(-1, cx)))
             .on_action(cx.listener(|this, _: &ToggleSettings, _window, cx| {
                 this.toggle_settings(cx);
             }))
@@ -711,15 +752,23 @@ impl Render for Workspace {
                 }),
             )
             // Escape, bubbled by the empty input: close whatever is
-            // topmost — conflict dialog first, then the settings pane.
+            // topmost, and failing that blur the search box back to the
+            // list so single-key shortcuts work again.
             .on_action(
-                cx.listener(|this, _: &search_input::ClearInput, _window, cx| {
-                    if this.context_menu.is_some() {
+                cx.listener(|this, _: &search_input::ClearInput, window, cx| {
+                    if this.shortcuts_open {
+                        this.shortcuts_open = false;
+                        cx.notify();
+                    } else if this.context_menu.is_some() {
                         this.close_menu(cx);
+                    } else if this.scope_menu.is_some() {
+                        this.close_scope_menu(cx);
                     } else if this.conflict.is_some() {
                         this.resolve_conflict(false, cx);
                     } else if this.settings_open {
                         this.toggle_settings(cx);
+                    } else {
+                        window.focus(&this.focus_handle);
                     }
                 }),
             )
@@ -767,7 +816,8 @@ impl Render for Workspace {
             .child(self.render_status_bar(&theme))
             .children(self.render_scope_menu(cx))
             .children(self.render_context_menu(cx))
-            .children(self.render_settings_modal(cx))
+            .children(self.render_settings_modal(window, cx))
             .children(self.render_conflict_modal(cx))
+            .children(self.render_shortcuts_modal(window, cx))
     }
 }

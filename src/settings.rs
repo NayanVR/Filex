@@ -44,9 +44,13 @@ pub struct Settings {
     pub confirm_delete: bool,
     pub delete_to_trash: bool,
     pub thumbnails_enabled: bool,
-    /// Which color theme to render: a fixed light/dark palette, or one
-    /// that follows the OS appearance.
+    /// Which color theme to render: a fixed light/dark/OLED palette, or
+    /// one that follows the OS appearance.
     pub theme: ThemeMode,
+    /// The accent color applied over whichever palette is active.
+    pub accent: AccentColor,
+    /// List density (row height / icon size).
+    pub density: Density,
     /// Browse layout: a detailed list or a card grid.
     pub view: ViewMode,
     /// Grid card size, as an index into the app's fixed size steps
@@ -80,8 +84,9 @@ pub enum ViewMode {
     Grid,
 }
 
-/// The three theme choices exposed in settings. `System` follows the
-/// window's OS appearance; the app maps this to a concrete palette.
+/// The theme choices exposed in settings. `System` follows the window's
+/// OS appearance; the app maps this to a concrete palette. `Oled` is a
+/// true-black variant of dark for OLED screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
@@ -89,6 +94,38 @@ pub enum ThemeMode {
     System,
     Light,
     Dark,
+    Oled,
+}
+
+/// The accent color the user picked. `Default` keeps each palette's
+/// built-in accent (tuned per light/dark for contrast); the rest override
+/// it, and the app derives the matching ink and selection tints. Named
+/// presets (not a raw hex) so the on-disk value is always valid and the
+/// picker stays a small swatch grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AccentColor {
+    #[default]
+    Default,
+    Blue,
+    Purple,
+    Pink,
+    Red,
+    Orange,
+    Green,
+    Teal,
+    /// A user-entered `0xRRGGBB` color from the hex field.
+    Custom(u32),
+}
+
+/// List density: row heights and icon sizes. `Compact` packs more rows in
+/// view; `Comfortable` is the roomier default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Compact,
 }
 
 impl Default for Settings {
@@ -103,6 +140,8 @@ impl Default for Settings {
             delete_to_trash: true,
             thumbnails_enabled: true,
             theme: ThemeMode::System,
+            accent: AccentColor::Default,
+            density: Density::Comfortable,
             view: ViewMode::List,
             grid_zoom: 1,
             preview_open: false,

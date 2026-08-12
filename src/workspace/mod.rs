@@ -24,7 +24,7 @@ use filex::ops::{self, FileOp};
 use filex::recents::Recents;
 use filex::search_filter::Filter;
 use filex::selection::Selection;
-use filex::settings::{SortBy, ThemeMode, ViewMode};
+use filex::settings::{AccentColor, Density, SortBy, ThemeMode, ViewMode};
 use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
 
 use crate::settings_store::{SettingsEvent, SettingsStore};
@@ -50,7 +50,10 @@ actions!(
         PrevTab,
         RenameSelected,
         DeleteSelected,
-        Undo
+        Undo,
+        FocusSearch,
+        ToggleShortcuts,
+        ToggleView
     ]
 );
 
@@ -672,6 +675,10 @@ struct Workspace {
     query: String,
     search_input: gpui::Entity<SearchInput>,
     _search_input_subscription: gpui::Subscription,
+    /// The accent hex field in Settings (its own text input, parsed into a
+    /// `Custom` accent on change).
+    accent_hex: gpui::Entity<SearchInput>,
+    _accent_hex_subscription: gpui::Subscription,
     results: Vec<SearchRow>,
     search_generation: u64,
     /// The Magic card's state when the query parses as a command.
@@ -702,6 +709,8 @@ struct Workspace {
     /// The settings pane replaces the browse list while open (search
     /// still takes precedence, Spotlight-style).
     settings_open: bool,
+    /// Whether the keyboard-shortcuts overlay is up (toggled by `?`).
+    shortcuts_open: bool,
     /// In-flight rename; `None` when no row is being edited.
     renaming: Option<RenameState>,
     /// Undo stack of completed file operations.
@@ -745,6 +754,15 @@ struct Workspace {
     /// state is the fields above; the others are real snapshots.
     tabs: Vec<TabSnapshot>,
     active_tab: usize,
+    /// Tab indices most-recently-used first (`tab_mru[0]` is `active_tab`
+    /// once a switch settles). Ctrl-Tab walks this order, not the strip's
+    /// positional order.
+    tab_mru: Vec<usize>,
+    /// Position within `tab_mru` during an in-progress Ctrl-Tab cycle, so
+    /// repeated presses keep walking the frozen recency order instead of
+    /// reshuffling after each hop. Cleared when a tab is opened, closed,
+    /// or clicked (see [`Workspace::commit_mru`]).
+    tab_cycle: Option<usize>,
     /// Back/forward navigation history for the active tab.
     history_back: Vec<PathBuf>,
     history_forward: Vec<PathBuf>,
@@ -798,8 +816,10 @@ impl Workspace {
     /// through `cx.theme()`. Called at startup, whenever settings
     /// change, and when the OS appearance flips.
     pub(super) fn apply_theme(&self, cx: &mut Context<Self>) {
-        let mode = self.settings.read(cx).settings().theme;
-        cx.set_global(Theme::resolve(mode, self.appearance));
+        let settings = self.settings.read(cx).settings();
+        let (mode, accent, density) = (settings.theme, settings.accent, settings.density);
+        let theme = Theme::resolve(mode, self.appearance, accent).with_density(density);
+        cx.set_global(theme);
         cx.notify();
     }
 
@@ -816,6 +836,18 @@ impl Workspace {
             SearchInputEvent::BackspaceWhenEmpty => this.go_up(cx),
             SearchInputEvent::Dismissed => {} // escape just clears the query
         });
+        let accent_hex = cx.new(SearchInput::new);
+        accent_hex.update(cx, |input, cx| input.set_placeholder("#RRGGBB", cx));
+        let accent_hex_subscription =
+            cx.subscribe(&accent_hex, |this, _input, event, cx| {
+                if let SearchInputEvent::Changed(text) = event
+                    && let Some(hex) = ui::theme::parse_hex(text)
+                {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.accent = filex::settings::AccentColor::Custom(hex));
+                    });
+                }
+            });
         let settings = cx.new(SettingsStore::new);
         // Settings changes re-derive everything visible that depends on
         // them (the hidden-file filter on the browse list, and the
@@ -852,12 +884,15 @@ impl Workspace {
             query: String::new(),
             search_input,
             _search_input_subscription: subscription,
+            accent_hex,
+            _accent_hex_subscription: accent_hex_subscription,
             results: Vec::new(),
             search_generation: 0,
             magic: None,
             magic_mode: MagicMode::Auto,
             search_scope: SearchScope::Anywhere,
             scope_menu: None,
+            shortcuts_open: false,
             user_dirs: filex::magic::UserDirs::from_os(),
             selection: Selection::default(),
             search_selection: Selection::default(),
@@ -883,6 +918,8 @@ impl Workspace {
             sidebar_tags: Vec::new(),
             tabs: vec![TabSnapshot::placeholder()],
             active_tab: 0,
+            tab_mru: vec![0],
+            tab_cycle: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
             frecency: std::sync::Arc::new(recents.score_table(filex::frecency::now_secs())),
@@ -1028,6 +1065,20 @@ pub fn run() {
                 KeyBinding::new("ctrl-tab", NextTab, None),
                 KeyBinding::new("ctrl-shift-tab", PrevTab, None),
                 KeyBinding::new("f2", RenameSelected, None),
+                // Single-key shortcuts, scoped to `!SearchInput` so the
+                // same keys type normally once the search box has focus.
+                // `/` focuses search (the cap shown in the box); the mod
+                // accelerator does the same from anywhere.
+                KeyBinding::new("/", FocusSearch, Some("!SearchInput")),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-f", FocusSearch, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-f", FocusSearch, None),
+                // `?` (and its shift-/ spelling) opens the shortcuts overlay.
+                KeyBinding::new("?", ToggleShortcuts, Some("!SearchInput")),
+                KeyBinding::new("shift-/", ToggleShortcuts, Some("!SearchInput")),
+                KeyBinding::new("v", ToggleView, Some("!SearchInput")),
+                KeyBinding::new("p", TogglePreview, Some("!SearchInput")),
             ]);
             search_input::bind_keys(cx);
             cx.on_window_closed(|cx| {
@@ -1068,9 +1119,11 @@ pub fn run() {
                     cx.activate(true);
                     let workspace = cx.new(|cx| {
                         let workspace = Workspace::new(cx);
-                        // Focus the input so typing searches immediately;
-                        // navigation keys bubble up to the workspace.
-                        window.focus(&workspace.search_input.focus_handle(cx));
+                        // Focus the workspace, not the search box: the app
+                        // starts on the file list so single-key shortcuts
+                        // work at once. `/` (or the mod accelerator) moves
+                        // focus into search when the user wants it.
+                        window.focus(&workspace.focus_handle);
                         workspace
                     });
                     // A window now exists, so its OS appearance is known:
