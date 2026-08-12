@@ -1,14 +1,20 @@
 //! Row scaffold shared by the browse and search-result lists, plus the
 //! clickable column header above the browse list.
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
+use std::sync::Arc;
+
+use gpui::{Div, ElementId, FontFeatures, SharedString, Stateful, div, prelude::*, px};
 
 use super::icon;
 use super::theme::Theme;
 
-/// Fixed row height — `uniform_list` requires every row equal-height,
-/// so this constant is the single place it's defined.
-pub const ROW_HEIGHT: f32 = 28.;
+/// Enable tabular (fixed-width) figures on a text element, so a column of
+/// sizes and dates aligns digit-for-digit instead of jittering.
+pub fn tabular(mut el: Div) -> Div {
+    el.text_style().get_or_insert_with(Default::default).font_features =
+        Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    el
+}
 
 /// Width of the Modified column (rows and header must agree).
 pub const MODIFIED_COL_WIDTH: f32 = 64.;
@@ -17,13 +23,15 @@ pub const SIZE_COL_WIDTH: f32 = 72.;
 
 /// A right-aligned fixed-width detail cell (Modified / Size columns).
 pub fn detail_cell(theme: &Theme, width: f32, text: impl Into<SharedString>) -> Div {
-    div()
-        .w(px(width))
-        .flex_none()
-        .text_xs()
-        .text_color(theme.text_dim)
-        .text_right()
-        .child(text.into())
+    tabular(
+        div()
+            .w(px(width))
+            .flex_none()
+            .text_xs()
+            .text_color(theme.text_dim)
+            .text_right()
+            .child(text.into()),
+    )
 }
 
 /// The header line above the browse list. Children are
@@ -95,9 +103,12 @@ pub fn list_row(theme: &Theme, ix: usize, is_selected: bool) -> Stateful<Div> {
         .flex()
         .items_center()
         .gap_2()
-        .h(px(ROW_HEIGHT))
+        .h(px(theme.row_height))
         .px_3()
         .cursor_pointer()
+        // Rounded selection/hover, Finder-style, so the fill reads as a
+        // pill on the row rather than a full-bleed band.
+        .rounded_md()
         // Subtle alternating stripes (Finder list view); selection and
         // hover paint over them.
         .when(!is_selected && ix % 2 == 1, |s| s.bg(theme.stripe))

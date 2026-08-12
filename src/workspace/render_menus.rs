@@ -139,7 +139,11 @@ impl Workspace {
     /// than replacing it): a dimmed backdrop closes on an outside click,
     /// Escape closes it too (see the ClearInput handler). `None` while
     /// closed.
-    pub(super) fn render_settings_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn render_settings_modal(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         if !self.settings_open {
             return None;
         }
@@ -153,14 +157,35 @@ impl Workspace {
             ui::top_bar::toolbar_button(&theme, "settings-close", "icons/x.svg", theme.text_dim)
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
                 .into_any_element();
-        let card = ui::settings_pane::settings_card(&theme, "settings-panel")
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .child(ui::settings_pane::card_header(&theme, "Settings", close))
+        // The rows scroll inside a height-capped card so a tall settings
+        // list can't run off the bottom of a short window; the header
+        // stays pinned.
+        let max_h = (window.viewport_size().height - px(80.)).max(px(240.));
+        let body = div()
+            .id("settings-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
             .child(ui::settings_pane::choice_row(
                 &theme,
                 "Appearance",
-                "Match the system, or force a light or dark palette",
+                "Match the system, or force a light, dark, or OLED palette",
                 self.render_theme_selector(&theme, settings.theme, cx),
+            ))
+            .child(ui::settings_pane::choice_row(
+                &theme,
+                "Accent color",
+                "The highlight color for folders, selection, and buttons",
+                self.render_accent_picker(&theme, settings.accent, cx),
+            ))
+            .child(ui::settings_pane::choice_row(
+                &theme,
+                "Density",
+                "Row height and icon size in the file list",
+                self.render_density_selector(&theme, settings.density, cx),
             ))
             .child(
                 ui::settings_pane::toggle_row(
@@ -251,9 +276,104 @@ impl Workspace {
                 })),
             )
             .child(ui::settings_pane::footnote(&theme, file_note));
+        let card = ui::settings_pane::settings_card(&theme, "settings-panel")
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .max_h(max_h)
+            .child(ui::settings_pane::card_header(&theme, "Settings", close))
+            .child(body);
         Some(
             ui::modal::backdrop("settings-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// The keyboard-shortcuts overlay: a centered card listing every
+    /// documented shortcut (from [`ui::kbd::catalog`]) as description +
+    /// keycaps. Toggled by `?` or the keyboard button; Escape / click
+    /// outside dismisses it.
+    pub(super) fn render_shortcuts_modal(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !self.shortcuts_open {
+            return None;
+        }
+        let theme = *cx.theme();
+        let close =
+            ui::top_bar::toolbar_button(&theme, "shortcuts-close", "icons/x.svg", theme.text_dim)
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.shortcuts_open = false;
+                    cx.notify();
+                }));
+        // Never taller than the window: the header stays put and the list
+        // of groups scrolls, so a short window can't clip the last rows.
+        let max_h = (window.viewport_size().height - px(80.)).max(px(240.));
+        let mut body = div()
+            .id("shortcuts-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3();
+        for group in ui::kbd::catalog() {
+            let mut section = div().flex().flex_col().gap_1p5().child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_dim)
+                    .child(group.title),
+            );
+            for sc in group.shortcuts {
+                section = section.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_4()
+                        .child(div().text_sm().text_color(theme.text).child(sc.action))
+                        .child(ui::kbd::keys_row(&theme, &sc.keys)),
+                );
+            }
+            body = body.child(section);
+        }
+        let card = div()
+            .id("shortcuts-panel")
+            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
+            .w(px(460.))
+            .max_h(max_h)
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.panel)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.text)
+                            .child("Keyboard Shortcuts"),
+                    )
+                    .child(close),
+            )
+            .child(body);
+        Some(
+            ui::modal::backdrop("shortcuts-backdrop")
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.shortcuts_open = false;
+                    cx.notify();
+                }))
                 .child(card)
                 .into_any_element(),
         )
@@ -282,7 +402,83 @@ impl Workspace {
             .child(segment("theme-system", "System", ThemeMode::System))
             .child(segment("theme-light", "Light", ThemeMode::Light))
             .child(segment("theme-dark", "Dark", ThemeMode::Dark))
+            .child(segment("theme-oled", "OLED", ThemeMode::Oled))
             .into_any_element()
+    }
+
+    /// The Comfortable/Compact list-density control.
+    pub(super) fn render_density_selector(
+        &self,
+        theme: &Theme,
+        current: Density,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let segment = |id: &'static str, label: &'static str, density: Density| {
+            ui::settings_pane::segment(theme, id, label, current == density).on_click(cx.listener(
+                move |this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.density = density);
+                    });
+                },
+            ))
+        };
+        ui::settings_pane::segmented(theme)
+            .child(segment("density-comfortable", "Comfortable", Density::Comfortable))
+            .child(segment("density-compact", "Compact", Density::Compact))
+            .into_any_element()
+    }
+
+    /// The accent-color swatch row: `Default` (the palette's own accent)
+    /// followed by the presets. Clicking one writes it to the store; the
+    /// Changed event re-resolves the theme and recolors the app live.
+    pub(super) fn render_accent_picker(
+        &self,
+        theme: &Theme,
+        current: AccentColor,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let swatch = |ix: usize, accent: AccentColor, color: gpui::Rgba| {
+            ui::settings_pane::swatch(theme, ("accent", ix), color, current == accent).on_click(
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.accent = accent);
+                    });
+                }),
+            )
+        };
+        // The Default swatch shows the palette's *own* accent (resolved
+        // without any override), so it stays a stable target even while a
+        // custom color is active.
+        let base = self.settings.read(cx).settings().theme;
+        let base_accent = Theme::resolve(base, self.appearance, AccentColor::Default).accent;
+        let mut row =
+            ui::settings_pane::swatch_row().child(swatch(0, AccentColor::Default, base_accent));
+        for (ix, accent) in ui::theme::ACCENT_PRESETS.into_iter().enumerate() {
+            let color = ui::theme::accent_rgb(accent).expect("presets are not Default");
+            row = row.child(swatch(ix + 1, accent, color));
+        }
+        // The free hex field: typing a valid `#RRGGBB` sets a Custom
+        // accent (see the accent_hex subscription). Its border lights when
+        // a custom color is the active one.
+        let custom_active = matches!(current, AccentColor::Custom(_));
+        let hex_box = div()
+            .flex()
+            .items_center()
+            .w(px(84.))
+            .px_1p5()
+            .py(px(2.))
+            .rounded_md()
+            .border_1()
+            .border_color(if custom_active {
+                theme.accent
+            } else {
+                theme.border
+            })
+            .bg(theme.bg)
+            .text_xs()
+            .text_color(theme.text)
+            .child(div().flex_1().min_w_0().child(self.accent_hex.clone()));
+        row.child(hex_box).into_any_element()
     }
 
     /// A row for one service-managed root (service mode has no local

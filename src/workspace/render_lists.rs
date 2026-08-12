@@ -301,13 +301,13 @@ impl Workspace {
             .tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
             .child(ui::grid::card_icon_area(size).child(icon))
             .child(ui::grid::card_name(theme, size).child(name))
-            .child(
+            .child(ui::list_row::tabular(
                 div()
                     .flex_none()
                     .text_xs()
                     .text_color(theme.text_dim)
                     .child(detail),
-            )
+            ))
             .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                 if event.click_count() >= 2 {
                     this.activate(ix, cx);
@@ -352,7 +352,7 @@ impl Workspace {
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let name_tip: SharedString = name.clone().into();
                         let icon =
-                            this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
+                            this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
                         let rename_input = this
                             .renaming
                             .as_ref()
@@ -448,7 +448,7 @@ impl Workspace {
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
                         let icon =
-                            this.render_icon_cell(&name, &path, is_dir, ui::icon::ICON_SIZE, cx);
+                            this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
                         Some(
                             ui::list_row::list_row(&theme, ix, is_selected)
                                 // Full path on hover — the row truncates it below.

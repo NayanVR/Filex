@@ -20,9 +20,6 @@ use filex::listing::FileKind;
 
 use super::theme::Theme;
 
-/// Width (and height, for thumbnails) of the icon cell. Public so the
-/// column header can align its leading spacer with the icon column.
-pub const ICON_SIZE: f32 = 20.;
 
 /// A themed UI glyph (chevrons, gear, search, markers…) from an asset
 /// path like `"icons/settings.svg"`. Caller sizes it (`.size(px(..))`)

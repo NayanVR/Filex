@@ -30,10 +30,13 @@ impl Workspace {
         self.pending_delete = None;
     }
 
-    /// Switch to tab `i` (no-op if it's already active or out of range).
-    pub(super) fn activate_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+    /// Snapshot the current tab and restore tab `i`. Returns whether the
+    /// switch happened (`false` = already active or out of range). Leaves
+    /// the MRU order untouched: a click commits the new tab to the front,
+    /// while a Ctrl-Tab cycle keeps the order frozen.
+    fn set_active_tab(&mut self, i: usize, cx: &mut Context<Self>) -> bool {
         if i == self.active_tab || i >= self.tabs.len() {
-            return;
+            return false;
         }
         self.tabs[self.active_tab] = self.snapshot_active();
         let target = std::mem::replace(&mut self.tabs[i], TabSnapshot::placeholder());
@@ -41,6 +44,44 @@ impl Workspace {
         self.active_tab = i;
         self.refresh_preview(cx);
         cx.notify();
+        true
+    }
+
+    /// End any Ctrl-Tab cycle and move the active tab to the front of the
+    /// MRU order — the "user settled here" signal.
+    fn commit_mru(&mut self) {
+        self.tab_cycle = None;
+        self.tab_mru.retain(|&t| t != self.active_tab);
+        self.tab_mru.insert(0, self.active_tab);
+    }
+
+    /// Switch to tab `i` from a click, committing it as most-recently-used.
+    pub(super) fn activate_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.set_active_tab(i, cx) {
+            self.commit_mru();
+        }
+    }
+
+    /// Switch to the next (`delta > 0`) or previous tab in
+    /// most-recently-used order. Consecutive presses keep walking the
+    /// frozen `tab_mru` order; it only refreshes once the user settles on
+    /// a tab (opens, closes, or clicks one), so Ctrl-Tab reads like an app
+    /// switcher rather than reshuffling after every hop.
+    pub(super) fn cycle_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = self.tab_mru.len();
+        if n <= 1 {
+            return;
+        }
+        let start = self.tab_cycle.unwrap_or_else(|| {
+            self.tab_mru
+                .iter()
+                .position(|&t| t == self.active_tab)
+                .unwrap_or(0)
+        });
+        let pos = ring_step(start, delta, n);
+        let target = self.tab_mru[pos];
+        self.set_active_tab(target, cx);
+        self.tab_cycle = Some(pos);
     }
 
     /// Open a new tab at `path` and make it active.
@@ -51,6 +92,8 @@ impl Workspace {
         self.restore_tab(TabSnapshot::placeholder());
         self.load_dir(&path, cx);
         self.refresh_preview(cx);
+        // The new index is fresh; committing puts it at the MRU front.
+        self.commit_mru();
         cx.notify();
     }
 
@@ -74,6 +117,11 @@ impl Workspace {
                 self.active_tab -= 1;
             }
         }
+        // Drop the closed index from the MRU (rewriting the higher indices
+        // that `Vec::remove` shifted down), then re-seat the active tab at
+        // the front.
+        mru_remove_index(&mut self.tab_mru, i);
+        self.commit_mru();
         cx.notify();
     }
 
@@ -88,5 +136,51 @@ impl Workspace {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string())
             .into()
+    }
+}
+
+/// Remove a closed tab's index from an MRU list, shifting every higher
+/// index down by one to match `Vec::remove` on the tab list.
+fn mru_remove_index(mru: &mut Vec<usize>, closed: usize) {
+    mru.retain(|&t| t != closed);
+    for t in mru.iter_mut() {
+        if *t > closed {
+            *t -= 1;
+        }
+    }
+}
+
+/// The position `delta` steps around a ring of `len` items from `start`
+/// (`rem_euclid` so a negative delta wraps to the end). `len` must be > 0.
+fn ring_step(start: usize, delta: isize, len: usize) -> usize {
+    (start as isize + delta).rem_euclid(len as isize) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mru_remove_index, ring_step};
+
+    #[test]
+    fn ring_step_wraps_both_ways() {
+        assert_eq!(ring_step(0, 1, 3), 1);
+        assert_eq!(ring_step(2, 1, 3), 0); // forward past the end wraps
+        assert_eq!(ring_step(0, -1, 3), 2); // backward past the start wraps
+        assert_eq!(ring_step(1, -1, 3), 0);
+    }
+
+    #[test]
+    fn mru_remove_shifts_higher_indices_down() {
+        // Closing tab 1 drops it and renumbers 2->1, 3->2 to match the
+        // post-remove tab list; lower indices are untouched.
+        let mut mru = vec![3, 0, 1, 2];
+        mru_remove_index(&mut mru, 1);
+        assert_eq!(mru, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn mru_remove_of_absent_index_still_shifts() {
+        let mut mru = vec![2, 0];
+        mru_remove_index(&mut mru, 1);
+        assert_eq!(mru, vec![1, 0]);
     }
 }
