@@ -1,10 +1,25 @@
 # Design: Interaction polish (block 9)
 
-Status: **design, not yet implemented.** Written 2026-08-31. Companion
+Status: **design ratified 2026-08-31, not yet implemented.** Companion
 to `docs/ui-enhance-roadmap.md`, which closed blocks 1–8 (the *visual*
 overhaul: theme, icons, grid, panel, tabs, sidebar, metadata tier).
 This block is the **felt** overhaul — the difference between an app that
 looks right in a screenshot and one that feels right under the hands.
+
+## Decisions taken (2026-08-31, user-confirmed)
+
+Recorded up front because three of them close questions this doc
+originally left open:
+
+1. **Type-ahead: route printable keys into the search box**, scoped to
+   Current Dir (§B3). The bare-key shortcuts move; see the migration
+   table there.
+2. **Hover motion: chrome only** (§A3a). Toolbar, sidebar and tabs may
+   fade; list rows and grid cards stay instant, per §A2.
+3. **Next stretch: sequencing items 1–3 only** (§A1, §B1, §B7), then
+   reassess before committing to the thumbnail and motion work.
+4. **All three platforms are tuning targets.** No macOS-only behaviour;
+   see the note in §B6.
 
 The target is the quality bar of a first-party Apple app: every
 keystroke and click acknowledged immediately, nothing that jumps, and no
@@ -60,7 +75,7 @@ Two consequences shape the whole block:
 
 1. **No transitions + no reversal** means animated hover on list rows is
    not cheaply available and would fight the virtualized-row ground rule
-   anyway. The motion budget goes to non-row chrome instead (§A3).
+   anyway. The motion budget goes to non-row chrome instead (§A3a, §A3).
 2. **No task priority** means thumbnail/search contention must be solved
    with an explicit concurrency cap in our own code (§B4). We cannot ask
    the executor to yield.
@@ -124,6 +139,35 @@ B1–B2 (not jumping), both of which are available now.
 
 This is a decision, not a deferral — revisit only if GPUI gains real
 transitions upstream.
+
+## A3a. Hover motion on chrome (confirmed scope)
+
+The §A2 "no" is scoped to **virtualized surfaces**. Toolbar buttons,
+sidebar rows, drive rows and tabs are neither virtualized nor
+per-row-stateful, so a hover fade there has neither problem, and is
+confirmed in scope.
+
+**Mechanism.** Key the animation's `ElementId` on the hover state and
+choose the interpolation direction from it — `lerp(base, hover, delta)`
+on enter, `lerp(hover, base, delta)` on leave. This works because the
+animator closure decides what it interpolates; the framework only
+supplies the 0→1 ramp.
+
+**The honest caveat.** Because an animation restarts from its endpoint
+rather than its current mid-value, flipping hover *during* a fade
+produces a visible jump. Sweeping the pointer across a tight cluster
+(the toolbar's five adjacent buttons) is exactly that case, and is not
+rare. Two mitigations, in order:
+
+1. Keep the duration short — 80–100ms, at the fast end of the menu's
+   existing 120ms — so any jump is small and brief.
+2. **Checkpoint during implementation:** if the artifact is visible on
+   the toolbar cluster, restrict the fade to sidebar rows and tabs,
+   where pointer sweep-through is far less common, and leave the
+   toolbar instant. Judge this on-screen; it is not decidable on paper.
+
+Pressed states (§A1) remain instant everywhere — a press must never lag
+the finger.
 
 ## A3. Discrete motion where it actually pays
 
@@ -220,30 +264,68 @@ belongs in `filex::selection` with plain `#[test]` coverage — same
 treatment `Selection::move_lead` already gets. This is the part that
 actually has edge cases; the binding is trivial.
 
-## B3. Type-ahead — a product decision, flagged not assumed
+## B3. Type-ahead — route printable keys into search (decided)
 
 Finder and Explorer both jump to a file as you type letters at the list.
 Filex has no equivalent.
 
-**The conflict.** `mod.rs:1079–1081` binds bare `v` (toggle view), `p`
-(toggle preview), and `?` (shortcuts) scoped to `!SearchInput`. Any
-type-ahead consumes exactly those keys. The two features cannot coexist
-as bound.
+**Decision (confirmed 2026-08-31).** Rather than a separate type-ahead
+buffer, printable keys pressed at the list feed the **existing search
+box, scoped to Current Dir**. This reuses the debounced, cancellable,
+generation-guarded search path — the best-engineered code in the app —
+and is strictly more capable than a prefix-jump: fuzzy, ranked, and
+composable with the `kind:`/`size:`/`tag:` filters from block 8. It is
+also the honest expression of what Filex *is*: a search-first explorer
+where typing searches.
 
-**Recommendation (needs sign-off — it changes existing shortcuts).**
-Rather than a separate type-ahead buffer, route printable keys at the
-list into the **existing search box, scoped to Current Dir**. This reuses
-the whole debounced/cancellable search machinery (which is already the
-best-engineered path in the app), is strictly more capable than Finder's
-prefix-jump (fuzzy, ranked, filterable), and is on-brand for a
-search-first explorer. Cost: `v` and `p` move to modifier shortcuts.
+### Keybinding migration
 
-The alternative — a classic prefix-match type-ahead buffer with a ~1s
-reset, leaving `v`/`p` alone — is more conservative and less useful.
+The bare-key bindings at `mod.rs:1072–1081` are scoped `!SearchInput`
+and collide with any type-ahead. Auditing them turned up that **most are
+already redundant**, so the migration is cheaper than it first looks:
 
-I recommend the first, but it is a product call about breaking two
-documented shortcuts, so it should not be made inside an implementation
-session. **Blocked on user decision.**
+| Key | Action | Status | Resolution |
+| --- | --- | --- | --- |
+| `p` | `TogglePreview` | **Pure duplicate** of `cmd-i`/`ctrl-i` (`mod.rs:1030,1057`) | Drop. Zero functional loss. |
+| `/` | `FocusSearch` | **Duplicate** of `cmd-f`/`ctrl-f` (`mod.rs:1074,1076`) | Drop as a shortcut; becomes a literal typed character. |
+| `v` | `ToggleView` | No modifier equivalent | Replace — see below. |
+| `?`, `shift-/` | `ToggleShortcuts` | No modifier equivalent | Rebind to `cmd-/` / `ctrl-/`. |
+
+So only **one** binding (`v`) loses real functionality, and one (`?`)
+needs a new home. `p` and `/` are pure redundancy being retired.
+
+For `v`, prefer **explicit view actions over a toggle**: `cmd-1` = list,
+`cmd-2` = grid, which is Finder's own convention and removes the "which
+way does it flip?" ambiguity a blind toggle has. Keep the `ToggleView`
+action itself for the top-bar button, which shows its current state and
+so reads correctly as a toggle.
+
+### Routing rules
+
+- Route only **printable characters with no platform/control modifier**;
+  arrows, `enter`, `esc`, `tab` and every accelerator are untouched.
+- A **leading space is ignored** — it cannot start a meaningful query,
+  and swallowing it keeps `space` free for a future Quick Look.
+- The first routed keystroke focuses the search input, sets scope to
+  **Current Dir**, and inserts the character; everything after is
+  ordinary input, so IME, selection and clipboard keep working unchanged.
+- `esc` already clears and leaves search, so the exit path exists.
+
+### UI hints that must change with it
+
+Two places advertise the retired keys and would become wrong:
+
+- `ui/kbd.rs:100` — the shortcuts overlay lists *"Focus search — `/`"*.
+- `render.rs:163` — the search box paints a `/` keycap as its affordance.
+
+Both should read "type to search" rather than naming a key. The overlay
+also needs new `cmd-1`/`cmd-2` and `cmd-/` rows.
+
+**Testing.** The routing predicate (which key events become query text,
+including the modifier and leading-space rules) is pure and belongs in
+the lib with plain `#[test]`s. The focus-and-insert sequence touches the
+input entity, so it wants `#[gpui::test]` with `TestAppContext`.
+
 
 ## B4. Thumbnail decode discipline (violates a stated ground rule today)
 
@@ -319,6 +401,25 @@ churn anywhere. Fade the idle alpha to zero after ~1s of no scrolling and
 no hover; hold it visible while dragging or hovering the track. This is
 non-virtualized chrome, so `with_animation` is appropriate here.
 
+**Cross-platform note (decision 4: all three OSes are tuning targets).**
+Auto-hiding scrollbars are no longer a macOS-only convention — Windows 11
+and GNOME/Adwaita both hide-when-idle by default — so **one shared
+behaviour is correct on all three** and no `#[cfg(target_os)]` split is
+warranted here. Per CLAUDE.md, resist adding one: a per-OS fade would be
+platform-specific code with no platform-specific justification.
+
+The same applies to §A1's pressed states. Windows conventionally uses a
+stronger press tint than macOS, but Filex has its own visual identity
+(block 1 chose its own accent over the mockup's), so a **single
+`pressed` slot per theme variant** is the right call, tuned to look
+right in both light and dark rather than forked per OS.
+
+Two things genuinely *are* worth checking on each platform, because they
+are OS-driven rather than style choices: scroll-wheel/trackpad event
+cadence feeding the idle timer (a trackpad emits a long tail of small
+deltas that must not read as "still scrolling" forever), and whether the
+fade holds correctly while a native overlay scrollbar is also present.
+
 ## B7. Per-frame work in the row processors
 
 Both list processors call `format_modified(modified, SystemTime::now())`
@@ -348,30 +449,60 @@ a navigation-time stall into a recurring one.
 
 ---
 
-## Suggested sequencing
+## Sequencing
 
 Ordered by felt-improvement per unit of risk, with dependencies
-respected:
+respected. **Items 1–3 are the committed next stretch** (decision 3);
+everything below the line is planned but not yet authorised.
 
 | # | Item | Size | Risk | Notes |
 | --- | --- | --- | --- | --- |
 | 1 | §A1 pressed states | S | Very low | Additive; no logic touched |
 | 2 | §B1 scroll strategy | XS | Very low | ~5 lines |
 | 3 | §B7 per-frame hoisting | XS | Very low | Free |
+| — | *reassess here* | | | |
 | 4 | §B4 thumbnail discipline | M | Medium | Also improves search latency |
 | 5 | §B5 preview size | S | Low | Depends on B4's decode path |
 | 6 | §B2 grid keyboard nav | M | Low | Pure logic + bindings |
-| 7 | §B6 scrollbar fade | S | Low | First `with_animation` use |
-| 8 | §A3 discrete motion | M | Medium | Panel reflow is the risk |
-| 9 | §B3 type-ahead | M | — | **Blocked on decision** |
-| 10 | §B8 stale browse list | S | Low | **After block 10** |
+| 7 | §B3 type-ahead | M | Medium | Ships with the §B2 key work |
+| 8 | §B6 scrollbar fade | S | Low | First `with_animation` use |
+| 9 | §A3a chrome hover fade | S | Medium | Sweep artifact needs an on-screen call |
+| 10 | §A3 discrete motion | M | Medium | Panel reflow is the risk |
+| 11 | §B8 stale browse list | S | Low | **After block 10** |
 
-Items 1–3 are a single sitting and cover most of the perceived gap.
+Two ordering notes changed by the ratified decisions:
+
+- **§B3 moved up to sit beside §B2.** Both rewrite the same key-handling
+  path (`workspace/input.rs` + the binding block at `mod.rs:1014–1081`),
+  so doing them together avoids touching that code twice and avoids an
+  intermediate state where the bare keys are half-migrated.
+- **§A3a is sequenced before §A3** — it is the smaller and more
+  reversible of the two motion items, and it is the one that tells us
+  whether the sweep artifact is tolerable before more motion is built on
+  the same mechanism.
+
+### The committed stretch, concretely
+
+Items 1–3 touch: `src/ui/theme.rs` (one new slot, two variants), the 27
+`.hover(` sites across `src/ui/*.rs`, `workspace/navigation.rs:121`
+(strategy selection), and the two row processors in
+`workspace/render_lists.rs` (hoisting `SystemTime::now()`).
+
+No public API changes, no new dependencies, no schema or settings
+changes, and nothing that alters behaviour on a background thread. Exit
+criteria are §A1's plus: arrowing through a long list never moves the
+viewport by more than one row, and no per-row `SystemTime::now()` call
+remains in a processor closure.
+
 
 ## Explicitly out of scope
 
 - **Animated hover/selection on rows and cards** — decided against in
-  §A2 on framework grounds, not deferred.
+  §A2 on framework grounds, not deferred. Hover motion on non-virtualized
+  chrome *is* in scope (§A3a); the exclusion is specific to rows and
+  cards.
+- **A classic prefix-jump type-ahead buffer** — rejected in §B3 in
+  favour of routing into search.
 - **Async `load_dir`** — the largest latency item in the app, but
   architectural. See block 10 below.
 - **Drag-to-resize for the details panel** — still deferred from block 5;
