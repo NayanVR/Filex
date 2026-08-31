@@ -308,11 +308,16 @@ fn describe_op(op: &FileOp) -> PlanRow {
             // file to dodge a collision (`ROADMAP.md` → `ROADMAP 2.md`),
             // so the rename is visible; otherwise the destination folder,
             // since the name is already in the source cell.
+            //
+            // No "→ " prefix: the arrow is a fixed-width gutter column in
+            // `op_row` now, which is what keeps every row's destination
+            // starting at the same x. Baking it into the text would both
+            // double it and re-ragged the column.
             let renamed = to.file_name() != from.file_name();
             let dest = if renamed {
-                format!("→ {}", to.display())
+                to.display().to_string()
             } else {
-                format!("→ {}", to.parent().unwrap_or(to.as_path()).display())
+                to.parent().unwrap_or(to.as_path()).display().to_string()
             };
             PlanRow {
                 name: file_name(from).into(),
@@ -324,7 +329,8 @@ fn describe_op(op: &FileOp) -> PlanRow {
         FileOp::Rename { path, new_name } => PlanRow {
             name: file_name(path).into(),
             location: parent(path).into(),
-            dest: Some(format!("→ {new_name}").into()),
+            // Bare, for the same reason as Move/Copy above.
+            dest: Some(SharedString::from(new_name.clone())),
             tooltip: format!("{} → {new_name}", path.display()).into(),
         },
     }
@@ -1297,9 +1303,10 @@ mod magic_ui_tests {
             Path::new("/a").display().to_string()
         );
         // Same name at the destination → show the folder, not the file.
+        // Bare: the "→" is a gutter column in the row, not part of the text.
         assert_eq!(
             row.dest.unwrap().to_string(),
-            format!("→ {}", Path::new("/b/Archive").display())
+            Path::new("/b/Archive").display().to_string()
         );
     }
 
@@ -1315,7 +1322,7 @@ mod magic_ui_tests {
         let row = describe_op(&op);
         assert_eq!(
             row.dest.unwrap().to_string(),
-            format!("→ {}", Path::new("/b/shot 2.png").display())
+            Path::new("/b/shot 2.png").display().to_string()
         );
     }
 
@@ -1327,7 +1334,38 @@ mod magic_ui_tests {
         };
         let row = describe_op(&op);
         assert_eq!(row.name, SharedString::from("img01.png"));
-        assert_eq!(row.dest.unwrap().to_string(), "→ shot-1.png");
+        assert_eq!(row.dest.unwrap().to_string(), "shot-1.png");
+    }
+
+    /// Regression: the destination text used to carry a literal "→ ".
+    /// `op_row` now renders the arrow as its own fixed-width gutter so the
+    /// destination column starts at the same x on every row, so an arrow
+    /// left in the text would both double it on screen and re-ragged the
+    /// column it was introduced to align.
+    #[test]
+    fn destination_text_carries_no_arrow_glyph() {
+        let ops = [
+            FileOp::Move {
+                from: "/a/shot.png".into(),
+                to: "/b/Archive/shot.png".into(),
+            },
+            FileOp::Copy {
+                from: "/a/shot.png".into(),
+                to: "/b/shot 2.png".into(),
+            },
+            FileOp::Rename {
+                path: "/a/img01.png".into(),
+                new_name: "shot-1.png".into(),
+            },
+        ];
+        for op in &ops {
+            let row = describe_op(op);
+            let dest = row.dest.expect("these verbs all have a destination");
+            assert!(
+                !dest.contains('→'),
+                "destination text should be bare, got {dest:?}"
+            );
+        }
     }
 
     #[test]

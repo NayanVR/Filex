@@ -61,8 +61,12 @@ impl Workspace {
 
         match &state.outcome {
             None => {
+                // Echo second in every state. It used to come third
+                // while loading and second once resolved, so the lines
+                // reshuffled under the user the moment results landed.
                 header = header
                     .child(ui::magic_card::heading(&theme, verb.label()))
+                    .child(ui::magic_card::subtitle(&theme, echo))
                     .child(ui::magic_card::subtitle(
                         &theme,
                         if self.any_root_ready() {
@@ -71,7 +75,6 @@ impl Workspace {
                             "still indexing — matches will appear when ready…"
                         },
                     ));
-                header = header.child(ui::magic_card::subtitle(&theme, echo));
             }
             Some(Ok(plan)) => {
                 let count = state.checked.iter().filter(|c| **c).count();
@@ -123,12 +126,7 @@ impl Workspace {
                                 } = describe_op(op);
                                 Some(
                                     ui::magic_card::op_row(
-                                        &theme,
-                                        ("magic-op", ix),
-                                        checked,
-                                        name,
-                                        location,
-                                        dest,
+                                        &theme, ix, checked, name, location, dest,
                                     )
                                     .tooltip(ui::tooltip::text_tooltip(tooltip, theme))
                                     .on_click(cx.listener(
@@ -148,7 +146,21 @@ impl Workspace {
                     cx.theme(),
                 ))
                 .flex_1();
-                body = Some(list.into_any_element());
+                // The plan is a table now: a column header over the rows,
+                // both inside the same inset container so the labels sit
+                // on their columns. The destination column (and so its
+                // label) is absent for deletes, which have no target.
+                let dest_label = match verb {
+                    filex::magic::Verb::Delete => None,
+                    filex::magic::Verb::Rename => Some("New name"),
+                    _ => Some("Destination"),
+                };
+                body = Some(
+                    ui::magic_card::pane_list()
+                        .child(ui::magic_card::plan_header(&theme, dest_label))
+                        .child(list)
+                        .into_any_element(),
+                );
 
                 // Select all / Deselect all: labelled by the current state
                 // so one click always flips the whole plan the other way.

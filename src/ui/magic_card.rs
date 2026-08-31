@@ -39,75 +39,125 @@ pub fn refusal(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div().text_xs().text_color(theme.warn).child(text.into())
 }
 
-/// One operation in the plan: a checkbox, the source name, and where it
-/// is going. Unchecked rows dim but stay legible — the user is
-/// reviewing them, not dismissing them.
-/// One operation in the plan, on a single fixed-height line (so the list
-/// can virtualize): the checkbox, the source (name + the folder it lives
-/// in), and where it is going. Both sides truncate with a … and the whole
-/// row carries a tooltip with the full source → destination, since the
-/// distinguishing part of a path is often the tail the truncation hides.
+/// Width of the "→" gutter between the source and destination columns.
+/// Shared by [`op_row`] and [`plan_header`] so the header labels sit over
+/// the cells they name.
+const ARROW_COL_WIDTH: f32 = 12.;
+/// Width of the checkbox column, likewise shared with the header.
+const CHECK_COL_WIDTH: f32 = 13.;
+
+/// One operation in the plan, on a single density-aware line (so the list
+/// can virtualize): a checkbox, then equal-width columns for the source
+/// name, the folder it lives in, and — for everything but a delete — the
+/// destination, separated by a "→".
+///
+/// Every column is `flex_1 min_w_0`, so a cell starts at the same x on
+/// every row. A plan is reviewed by scanning *down* a column ("are these
+/// all really screenshots?"), which only works if the columns line up;
+/// the previous layout let a long filename push its folder rightward, so
+/// no two rows agreed on where anything began.
 ///
 /// `dest` is `None` for deletes (there is no destination); the row then
 /// just names the file and its folder.
 pub fn op_row(
     theme: &Theme,
-    id: impl Into<ElementId>,
+    ix: usize,
     checked: bool,
     name: impl Into<SharedString>,
     location: impl Into<SharedString>,
     dest: Option<SharedString>,
 ) -> Stateful<Div> {
     let hover = theme.hover;
-    // The source cell: the name stays whole (flex_none), its folder path
-    // dims and truncates beside it.
-    let source = div()
+    let column = |text: SharedString, color| {
+        div().flex_1().min_w_0().child(
+            div()
+                .w_full()
+                .text_xs()
+                .text_color(color)
+                .truncate()
+                .child(text),
+        )
+    };
+    // Unchecked rows dim their content but never the checkbox — dimming
+    // the one control that re-arms the row made it read as disabled.
+    let content = div()
         .flex_1()
         .min_w_0()
         .flex()
-        .items_baseline()
+        .items_center()
         .gap_2()
-        .child(
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(theme.text)
-                .whitespace_nowrap()
-                .child(name.into()),
-        )
-        .child(
-            div().flex_1().min_w_0().child(
+        .when(!checked, |c| c.opacity(0.45))
+        .child(column(name.into(), theme.text))
+        .child(column(location.into(), theme.text_dim))
+        .children(dest.into_iter().flat_map(|target| {
+            [
                 div()
-                    .w_full()
+                    .w(px(ARROW_COL_WIDTH))
+                    .flex_none()
                     .text_xs()
                     .text_color(theme.text_dim)
-                    .truncate()
-                    .child(location.into()),
-            ),
-        );
+                    .child("→"),
+                column(target, theme.text_dim),
+            ]
+        }));
     div()
-        .id(id)
+        .id(("magic-op", ix))
+        // Fill the pane: uniform_list items shrink-wrap their content
+        // otherwise, which leaves the columns ragged row to row and the
+        // hover fill ending mid-row — the same trap `list_row` documents.
+        .w_full()
         .flex()
         .items_center()
         .gap_2()
-        .px_2()
-        .h(px(28.))
-        .rounded_sm()
+        .px_3()
+        // Density-aware like every other row in the app. The previous
+        // fixed 28px ignored the density setting from block 1, so the
+        // plan was the one list that did not respond to it.
+        .h(px(theme.row_height))
+        .rounded_md()
         .cursor_pointer()
+        // Same alternating stripe as the browse list, which is what makes
+        // a long plan scannable.
+        .when(ix % 2 == 1, |s| s.bg(theme.stripe))
         .hover(move |s| s.bg(hover))
-        .when(!checked, |row| row.opacity(0.45))
         .child(checkbox(theme, checked))
-        .child(source)
-        .children(dest.map(|target| {
-            div().flex_1().min_w_0().child(
-                div()
-                    .w_full()
-                    .text_xs()
-                    .text_color(theme.text_dim)
-                    .truncate()
-                    .child(target),
-            )
-        }))
+        .child(content)
+}
+
+/// The column header above the plan rows — the browse list has one and
+/// the plan did not, leaving its third column unexplained. Mirrors
+/// [`op_row`]'s inset, gaps and column widths exactly, so the labels sit
+/// over their cells.
+///
+/// `dest_label` is `None` for deletes, matching `op_row`'s missing
+/// destination column.
+pub fn plan_header(theme: &Theme, dest_label: Option<&'static str>) -> Div {
+    let cell = |label: &'static str| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .child(div().w_full().truncate().child(label))
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .h(px(22.))
+        .border_b_1()
+        .border_color(theme.border)
+        .text_xs()
+        .text_color(theme.text_dim)
+        // Spacer over the checkbox column so the labels align with the
+        // cells below rather than sitting one control to the left.
+        .child(div().w(px(CHECK_COL_WIDTH)).flex_none())
+        .child(cell("Name"))
+        .child(cell("In folder"))
+        .children(
+            dest_label
+                .into_iter()
+                .flat_map(|label| [div().w(px(ARROW_COL_WIDTH)).flex_none(), cell(label)]),
+        )
 }
 
 /// A small square check indicator. Hand-drawn rather than a glyph so it
@@ -197,7 +247,18 @@ pub fn secondary_button(
 
 /// The pane shell: a full-height column that replaces the results list.
 pub fn pane() -> Div {
-    div().flex().flex_1().min_h_0().flex_col().size_full()
+    // `flex_1` already claims the width from the row parent; the old
+    // `size_full` set an explicit w/h on top of that, which fights the
+    // flex sizing instead of cooperating with it.
+    div().flex().flex_1().min_h_0().flex_col()
+}
+
+/// The scroll region holding the plan rows. Carries the same small
+/// horizontal inset the browse and search panes use, so `op_row`'s
+/// rounded hover fill floats off the pane edge instead of running into
+/// it.
+pub fn pane_list() -> Div {
+    div().flex().flex_col().flex_1().min_h_0().px_1p5()
 }
 
 /// The fixed header block at the top of the pane — heading, echo line,
@@ -207,7 +268,10 @@ pub fn pane_header(theme: &Theme) -> Div {
         .flex()
         .flex_col()
         .gap_1()
-        .px_4()
+        // px_3 (not px_4): the rows below sit at px_1p5 + px_3, and the
+        // header text has to start on the same vertical line as the
+        // column it introduces.
+        .px_3()
         .py_3()
         .border_b_1()
         .border_color(theme.border)
@@ -220,7 +284,7 @@ pub fn pane_actions(theme: &Theme) -> Div {
         .items_center()
         .justify_end()
         .gap_2()
-        .px_4()
+        .px_3()
         .py_3()
         .border_t_1()
         .border_color(theme.border)
