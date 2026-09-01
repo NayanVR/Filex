@@ -19,15 +19,13 @@ use super::{EntryId, ROOT, VolumeIndex};
 /// Lock-free-read handle to a live index (optimization B,
 /// docs/indexing-architecture.md §3).
 ///
-/// Readers call [`load`](SharedIndex::load) and scan an immutable
-/// `Arc<VolumeIndex>` snapshot with **no lock at all** — so a background
-/// writer can never stall a search, and a slow search can never stall the
-/// writer. The (background) writers serialize on an internal `Mutex` that
-/// readers never touch: each mutates a private head in place via
-/// [`write`](SharedIndex::write) and then republishes on its own cadence
-/// via [`publish`](SharedIndex::publish). Splitting mutate from publish is
-/// what lets a burst of tiny delta batches update the head cheaply while
-/// the (cloning) publish happens only occasionally.
+/// Readers [`load`](SharedIndex::load) an immutable `Arc<VolumeIndex>` and
+/// scan it with **no lock at all**, so writer and search can never stall
+/// each other. Writers serialize on a `Mutex` readers never touch: each
+/// mutates a private head via [`write`](SharedIndex::write) and
+/// republishes on its own cadence via [`publish`](SharedIndex::publish).
+/// Splitting the two lets a burst of tiny batches update the head cheaply
+/// while the cloning publish happens rarely.
 #[derive(Clone)]
 pub struct SharedIndex(Arc<IndexCell>);
 
@@ -63,9 +61,8 @@ impl SharedIndex {
     }
 
     /// Exclusive in-place write access to the head. Does **not** publish —
-    /// call [`publish`](Self::publish) when readers should see the change.
-    /// The head is kept uniquely owned (publish clones into a *separate*
-    /// snapshot Arc), so mutation here never clones.
+    /// call [`publish`](Self::publish) for that. The head stays uniquely
+    /// owned (publish clones into a separate Arc), so this never clones.
     pub fn write(&self) -> IndexWrite<'_> {
         let mut head = self.0.head.lock().unwrap_or_else(PoisonError::into_inner);
         // No-op unless a `replace` just shared the Arc; then it clones once.
@@ -124,12 +121,11 @@ pub enum FsDelta {
     /// The watcher lost precision (event coalescing / queue overflow);
     /// reconcile the subtree at `path` against the real filesystem.
     Rescan { path: PathBuf },
-    /// Journal-sourced upsert addressed by platform-native keys (NTFS
-    /// FRNs): `key` now exists under `parent_key` with `name`. Covers
-    /// creates and renames/moves — the index entry is re-pointed, and
-    /// descendants follow automatically through parent links. A
-    /// `parent_key` unknown to the index means the event is outside the
-    /// indexed subtree; it (and, for moves, the entry) is dropped.
+    /// Journal-sourced upsert by platform-native key (NTFS FRN): `key` now
+    /// exists under `parent_key` with `name`. Covers creates and moves —
+    /// the entry is re-pointed and descendants follow via parent links. An
+    /// unknown `parent_key` means the event is outside the indexed
+    /// subtree, so it is dropped.
     NativeUpsert {
         key: u64,
         parent_key: u64,
@@ -139,26 +135,22 @@ pub enum FsDelta {
     /// Journal-sourced removal by native key. Unknown keys are no-ops
     /// (deletes outside the subtree, or replays of applied events).
     NativeRemove { key: u64 },
-    /// Writer control marker (never produced by watchers): save a
-    /// snapshot with this checkpoint once every delta queued *before* it
-    /// has been applied. Enqueue-time capture makes the checkpoint safe:
-    /// watchers advance their checkpoint atomics before sending, so all
-    /// events the checkpoint covers precede the marker in the channel.
+    /// Writer control marker (never produced by watchers): save a snapshot
+    /// with this checkpoint once every delta queued *before* it has been
+    /// applied. Watchers advance their checkpoint atomics before sending,
+    /// so everything the checkpoint covers precedes the marker.
     PersistNow {
         checkpoint: super::persist::Checkpoint,
     },
 }
 
-/// Where a file's size/mtime comes from when [`apply`] upserts it.
-///
-/// This is the seam for optimization A (`docs/indexing-architecture.md`
-/// §3): the writer loop pre-fetches metadata for a whole batch of file
-/// upserts *off* the write lock ([`MetaSource::prefetch`]) and applies
-/// with [`MetaSource::Prefetched`], so a burst of file changes holds the
-/// lock only for in-memory mutation — not for one `stat` per file, which
-/// was serializing hundreds of syscalls under the lock and stalling every
-/// concurrent search. [`MetaSource::Inline`] keeps the old
-/// stat-on-demand behaviour for tests and the direct [`apply`] entry.
+/// Where a file's size/mtime comes from when [`apply`] upserts it — the
+/// seam for optimization A (`docs/indexing-architecture.md` §3). The
+/// writer pre-fetches a whole batch's metadata *off* the write lock
+/// ([`MetaSource::prefetch`]), so a burst holds the lock only for
+/// in-memory mutation rather than one `stat` per file, which serialized
+/// hundreds of syscalls under it and stalled every search.
+/// [`MetaSource::Inline`] keeps stat-on-demand for tests.
 pub enum MetaSource {
     /// Stat each path on demand, under whatever lock the caller holds.
     Inline,
@@ -170,10 +162,9 @@ pub enum MetaSource {
 
 impl MetaSource {
     /// Gather size/mtime for every file upsert in `batch`, off the lock.
-    /// Directory upserts and rescans are not prefetched here — after the
-    /// known-directory no-op in [`upsert`], those walk only for genuinely
-    /// new subtrees, which is rare; a file `stat` on every change is the
-    /// hot path this targets.
+    /// Directories aren't prefetched: after the known-directory no-op in
+    /// [`upsert`] they walk only for genuinely new subtrees, which is
+    /// rare. A file `stat` per change is the hot path this targets.
     pub fn prefetch(batch: &[FsDelta]) -> Self {
         let mut map = std::collections::HashMap::new();
         for delta in batch {
@@ -203,10 +194,9 @@ fn stat_meta(path: &Path) -> Option<(u64, i64)> {
         .map(|meta| (meta.len(), super::mtime_secs(&meta)))
 }
 
-/// Apply one delta to the index, stat-ing inline. Idempotent: replaying an
-/// event whose effect is already reflected (e.g. an Upsert raced by the
-/// bootstrap walk) is a no-op, so watchers may start before bootstrap
-/// without double-counting.
+/// Apply one delta to the index, stat-ing inline. Idempotent — replaying
+/// an event already reflected (an Upsert raced by the bootstrap walk) is a
+/// no-op, so watchers may start before bootstrap.
 pub fn apply(index: &mut VolumeIndex, delta: &FsDelta) -> Result<()> {
     apply_prepared(index, delta, &MetaSource::Inline)
 }
@@ -249,11 +239,10 @@ fn native_upsert(
     match (existing, parent) {
         // A move out of the indexed subtree: the entry leaves the index.
         (Some(id), None) => index.remove(id),
-        // Rename/move within the subtree: re-point the entry; children
+        // Rename/move within the subtree: re-point the entry, children
         // follow via parent links. A type flip means the FRN was recycled
-        // mid-window — rebuild the entry instead. Either way, refresh
-        // size/mtime (a USN data-change reason also arrives as a
-        // NativeUpsert — the freshness path on Windows).
+        // mid-window, so rebuild instead. Either way refresh size/mtime —
+        // a USN data-change reason also arrives as a NativeUpsert.
         (Some(id), Some(parent)) => {
             if index.is_dir(id) == Some(is_dir) {
                 index.rename(id, parent, name)?;
@@ -307,26 +296,21 @@ fn upsert(index: &mut VolumeIndex, path: &Path, is_dir: bool, meta: &MetaSource)
     if let Some(existing) = index.resolve_child(parent, name) {
         if index.is_dir(existing) == Some(is_dir) {
             if !is_dir {
-                // File already known. The name is unchanged, but a modify
-                // event brings us here to refresh size/mtime (the freshness
-                // path for `size:`/`modified:` — an in-place edit changes
-                // neither name nor existence, so this is the only signal).
+                // File already known and unchanged in name, but a modify
+                // event lands here to refresh size/mtime — an in-place edit
+                // changes neither name nor existence, so this is the only
+                // signal `size:`/`modified:` get.
                 populate_meta(index, existing, path, meta);
             }
-            // A directory we already know about is left alone. It is *not*
-            // dropped and re-walked: watchers report a directory whenever
-            // its contents change (writing a file bumps the parent's
-            // mtime), so re-walking here meant every write anywhere in the
-            // tree triggered a full recursive `jwalk` of its parent
-            // subtree, plus tombstoning every entry under it. Measured at
-            // 502 index mutations per event on a 500-file directory that
-            // had not changed at all — on a home directory this pins a
-            // core and grows the arena without bound.
+            // A known directory is left alone, not dropped and re-walked.
+            // Watchers report a directory whenever its contents change, so
+            // re-walking meant every write anywhere triggered a recursive
+            // `jwalk` of the parent subtree plus tombstoning everything
+            // under it — 502 mutations per event on an unchanged 500-file
+            // directory, pinning a core and growing the arena unbounded.
             //
-            // Nothing is lost by skipping it. Contents arrive as their own
-            // per-file events (macOS `kFSEventStreamCreateFlagFileEvents`,
-            // Windows ReadDirectoryChangesW), and the case those *can't*
-            // cover — coalesced or dropped events — is precisely what
+            // Nothing is lost: contents arrive as their own per-file
+            // events, and coalesced/dropped events are exactly what
             // `FsDelta::Rescan` exists for.
             return Ok(());
         }
@@ -395,14 +379,12 @@ fn rescan(index: &mut VolumeIndex, path: &Path, meta: &MetaSource) -> Result<()>
             }
             index_subtree(index, ROOT, path, false, None)
         }
-        // Drop what the index believes, so the `upsert` below takes its
-        // insert-and-walk path. The explicit removal is load-bearing:
-        // `upsert` deliberately leaves a directory it already knows
-        // untouched (that is the per-event hot path, see there), so
-        // without this a rescan of a known subtree would reconcile
-        // nothing. Doing the expensive rebuild *here* is the point —
-        // `Rescan` is the "we lost precision, resync from disk" signal,
-        // and it is rare, where an `Upsert` naming a directory is not.
+        // Drop what the index believes so the `upsert` below takes its
+        // insert-and-walk path. Load-bearing: `upsert` leaves a known
+        // directory untouched (the per-event hot path), so without this a
+        // rescan of a known subtree would reconcile nothing. The expensive
+        // rebuild belongs here — `Rescan` is the rare "lost precision,
+        // resync from disk" signal.
         Some(id) => {
             index.remove(id)?;
             upsert(index, path, true, meta)
@@ -411,10 +393,10 @@ fn rescan(index: &mut VolumeIndex, path: &Path, meta: &MetaSource) -> Result<()>
     }
 }
 
-/// Resolve `rel` under the root, creating any missing intermediate
-/// directory entries (events can arrive for paths deeper than anything
-/// indexed yet). An entry that exists as a file where a directory is needed
-/// is replaced — events told us the filesystem disagrees with the index.
+/// Resolve `rel` under the root, creating missing intermediate directory
+/// entries (events arrive for paths deeper than anything indexed yet). A
+/// file where a directory is needed is replaced — the events say the
+/// filesystem disagrees with the index.
 fn ensure_dirs(index: &mut VolumeIndex, rel: &Path) -> Result<EntryId> {
     let mut current = ROOT;
     for component in rel.components() {
@@ -439,11 +421,10 @@ fn ensure_dirs(index: &mut VolumeIndex, rel: &Path) -> Result<EntryId> {
     Ok(current)
 }
 
-/// Owns the thread that applies deltas to the shared index. The thread
-/// exits when every delta sender has been dropped, and Drop *joins* it:
-/// dropping the watcher(s) and then the writer guarantees every delta the
-/// watcher ever sent has been applied — which is what makes a
-/// checkpoint-then-save shutdown lose no events.
+/// Owns the thread that applies deltas to the shared index. It exits when
+/// every sender is dropped, and Drop *joins* it — so dropping watchers
+/// then writer guarantees every delta sent has been applied, which is what
+/// makes a checkpoint-then-save shutdown lose no events.
 pub struct IndexWriter {
     handle: Option<JoinHandle<()>>,
 }
@@ -460,12 +441,10 @@ const BATCH_WINDOW: Duration = Duration::from_millis(30);
 const MAX_BATCH: usize = 10_000;
 
 /// Minimum gap between snapshot publishes (optimization B). Publishing
-/// deep-clones the head, so under sustained churn the writer coalesces
-/// many small batches into one publish per interval — bounding clone cost
-/// to ~`1000/PUBLISH_INTERVAL_MS` per second — while a quiescent tick still
-/// flushes within this bound once churn stops. Readers are at most this
-/// stale, on top of the existing `BATCH_WINDOW`; for a file index that is
-/// imperceptible.
+/// deep-clones the head, so under churn the writer coalesces many batches
+/// into one publish per interval, bounding clone cost to
+/// ~`1000/PUBLISH_INTERVAL_MS` per second; a quiescent tick flushes once
+/// churn stops. Readers are at most this stale on top of `BATCH_WINDOW`.
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(150);
 
 impl IndexWriter {
@@ -479,13 +458,11 @@ impl IndexWriter {
             .name("filex-index-writer".into())
             .spawn(move || {
                 let root = index.load().root_path().to_path_buf();
-                // Optimization B: apply mutates the writer's private head in
-                // place (cheap); publishing an immutable snapshot for readers
-                // *clones* the head, so it is rate-limited to at most once
-                // per `PUBLISH_INTERVAL`. `dirty` tracks head changes not yet
-                // published; a quiescent tick (the outer `recv_timeout`
-                // firing) flushes them so readers always converge shortly
-                // after churn stops, even if the interval hadn't elapsed.
+                // Optimization B: apply mutates the private head cheaply,
+                // while publishing *clones* it — so publish is rate-limited
+                // to once per `PUBLISH_INTERVAL`. `dirty` tracks unpublished
+                // changes; a quiescent tick flushes them so readers converge
+                // shortly after churn stops.
                 let mut last_publish = std::time::Instant::now();
                 let mut dirty = false;
                 loop {
@@ -500,10 +477,9 @@ impl IndexWriter {
                             }
                             continue;
                         }
-                        // Every sender dropped: drain done. Flush any
-                        // deferred changes so the final snapshot reflects
-                        // every applied event — the shutdown save
-                        // (`LiveIndex::drop`) reads that snapshot.
+                        // Every sender dropped: drain done. Flush deferred
+                        // changes so the final snapshot — which the shutdown
+                        // save reads — reflects every applied event.
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                             if dirty {
                                 index.publish();
@@ -520,11 +496,10 @@ impl IndexWriter {
                         }
                     }
 
-                    // A whole-root rescan (startup reconcile, queue overflow)
-                    // is rebuilt off to the side, then swapped in atomically
-                    // via `replace` — readers keep answering from the old
-                    // snapshot during the walk. The rest of the batch is
-                    // dropped: the fresh walk already reflects those events.
+                    // A whole-root rescan is rebuilt off to the side then
+                    // swapped in via `replace`, so readers keep answering
+                    // from the old snapshot during the walk. The rest of the
+                    // batch is dropped — the fresh walk already covers it.
                     let root_rescan = batch
                         .iter()
                         .any(|d| matches!(d, FsDelta::Rescan { path } if *path == root));
@@ -544,10 +519,9 @@ impl IndexWriter {
                         continue;
                     }
 
-                    // A batch may carry a PersistNow marker; save with the
-                    // *last* one after applying everything else (deltas
-                    // after the marker being included only means the next
-                    // replay re-applies a few events idempotently).
+                    // Save with the *last* PersistNow marker in the batch,
+                    // after applying everything else — deltas past the marker
+                    // just mean the next replay re-applies a few idempotently.
                     let mut pending_save = None;
                     let mut applied_any = false;
                     // Optimization A: stat every file upsert in the batch
@@ -579,10 +553,9 @@ impl IndexWriter {
                     let mutations = after - before;
                     dirty |= applied_any;
                     // `mutations` far exceeding `deltas` means events are
-                    // triggering subtree rebuilds rather than point updates;
-                    // `hold_ms` is now pure in-memory mutation (readers no
-                    // longer contend for it). Warn only if it is surprisingly
-                    // long — a heavy walk still to be moved off the head.
+                    // triggering subtree rebuilds rather than point updates.
+                    // `hold_ms` is pure in-memory mutation now, so warn only
+                    // if it is surprisingly long.
                     if hold_ms >= 200 {
                         tracing::warn!(
                             deltas = batch.len(),

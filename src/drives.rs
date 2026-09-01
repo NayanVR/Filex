@@ -1,16 +1,13 @@
 //! Mounted-volume enumeration with capacity, behind a per-OS boundary.
 //!
-//! Each platform reports its mount points differently — macOS lists
-//! `/Volumes/*`, Linux parses `/proc/mounts` for real block devices,
-//! Windows walks the logical drive letters — but they converge on the
-//! same [`Drive`] shape (name, mount path, total/free bytes) so the
-//! sidebar renders one way everywhere. The syscalls block, so the app
-//! calls [`list_drives`] on a background executor, not per frame.
+//! Each platform reports mounts differently — macOS lists `/Volumes/*`,
+//! Linux parses `/proc/mounts` for real block devices, Windows walks the
+//! drive letters — converging on one [`Drive`] shape so the sidebar
+//! renders identically. The syscalls block, so [`list_drives`] runs on a
+//! background executor, not per frame.
 //!
-//! Platform assumptions live next to each implementation. The pure
-//! parsing/derivation bits (`/proc/mounts` filtering, the used
-//! fraction) are factored out and unit-tested; the raw `statvfs` /
-//! Win32 calls are exercised on the dev machines and CI runners.
+//! Platform assumptions live next to each implementation; the pure
+//! parsing bits are factored out and unit-tested.
 
 use std::path::PathBuf;
 
@@ -43,13 +40,11 @@ pub fn list_drives() -> Vec<Drive> {
     platform::list_drives()
 }
 
-/// The roots to index on a fresh install, before the user has configured
-/// any. Windows returns every *fixed* (non-removable, non-network) drive —
-/// the Everything-style whole-machine default. macOS/Linux stay scoped to
-/// the home directory: indexing all of `/` there needs elevated/full-disk
-/// access and would pull in the OS itself, which is not an expected
-/// default. Each platform's indexer sits behind the same trait, so the
-/// rest of the app treats these roots identically.
+/// The roots to index on a fresh install. Windows returns every *fixed*
+/// drive — the Everything-style whole-machine default. macOS/Linux stay
+/// scoped to home: indexing all of `/` needs full-disk access and would
+/// pull in the OS itself. Every platform's indexer is behind the same
+/// trait, so the rest of the app treats these roots identically.
 pub fn default_index_roots() -> Vec<PathBuf> {
     platform::default_index_roots()
 }
@@ -182,11 +177,10 @@ mod platform {
     /// in, and its value (3) is stable Win32 ABI.
     const DRIVE_FIXED: u32 = 3;
 
-    /// Fresh-install default on Windows: every *fixed* drive (internal
-    /// disks), skipping removable and network drives so plugging in a USB
-    /// stick or mapping a share doesn't kick off a whole-volume re-index.
-    /// `GetDriveTypeW` classifies each letter; `DRIVE_FIXED` is the local
-    /// hard-drive case.
+    /// Fresh-install default on Windows: every *fixed* drive, skipping
+    /// removable and network ones so a USB stick or mapped share doesn't
+    /// kick off a whole-volume re-index. `GetDriveTypeW` classifies each
+    /// letter; `DRIVE_FIXED` is the local hard-drive case.
     pub fn default_index_roots() -> Vec<PathBuf> {
         let mask = unsafe { GetLogicalDrives() };
         let mut roots = Vec::new();

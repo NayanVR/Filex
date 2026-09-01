@@ -1,13 +1,10 @@
-//! Persisted application settings.
+//! Persisted application settings: one JSON file at
+//! `<config_dir>/filex/settings.json`. It folds in the legacy
+//! `roots.list` — a missing settings file migrates roots from there on
+//! first load, and the old file stays a read-only fallback for a version.
 //!
-//! One JSON file at `<config_dir>/filex/settings.json` is the single
-//! source of truth (decision in docs/roadmap.md: JSON, not TOML). It
-//! folds in the legacy `roots.list`: a missing settings file migrates
-//! roots from there on first load, and the old file keeps working as a
-//! read-only fallback for one version.
-//!
-//! This module is pure I/O + serde — no GPUI. The app wraps it in an
-//! entity that emits change events; the index daemon reads it directly.
+//! Pure I/O + serde, no GPUI. The app wraps it in an entity that emits
+//! change events; the index daemon reads it directly.
 
 use std::path::{Path, PathBuf};
 
@@ -34,11 +31,10 @@ pub struct Settings {
     /// Indexed roots (absolute paths). Replaces the legacy roots.list.
     pub roots: Vec<PathBuf>,
     pub show_hidden_files: bool,
-    /// Index OS/system folders (`C:\Windows`, `Program Files`, …). Off by
-    /// default: on Windows these dominate the whole-machine index and no one
-    /// searches them, so excluding them is a large memory win. They stay
-    /// browsable regardless (browse reads the live directory, not the
-    /// index). A change takes full effect on the next index rebuild.
+    /// Index OS/system folders. Off by default — on Windows they dominate
+    /// the index and nobody searches them, so excluding them is a large
+    /// memory win, and they stay browsable either way. Takes full effect on
+    /// the next index rebuild.
     pub index_system_files: bool,
     pub sort: SortSettings,
     pub confirm_delete: bool,
@@ -65,13 +61,12 @@ pub struct Settings {
     pub favorites: Vec<PathBuf>,
     /// Ids of sidebar sections the user has collapsed (e.g. "recents").
     pub collapsed_sections: Vec<String>,
-    /// Consent for Sentry diagnostics (Phase 2c): scrubbed crash reports plus
-    /// anonymous performance measurements and release-health sessions. On by
-    /// default (opt-out); a Settings toggle turns it off. Data carries only
-    /// crash/metric details — never file names, paths, tags, or queries — and
-    /// nothing is sent unless the build embeds a Sentry DSN. The serde key
-    /// stays `crash_reports` for settings-file back-compat even though it now
-    /// governs the whole `observability` transport.
+    /// Consent for Sentry diagnostics: scrubbed crash reports, anonymous
+    /// measurements, release-health sessions. On by default (opt-out). Data
+    /// carries only crash/metric details — never file names, paths, tags or
+    /// queries — and nothing sends without an embedded DSN. The serde key
+    /// stays `crash_reports` for back-compat though it now governs the
+    /// whole `observability` transport.
     pub crash_reports: bool,
 }
 
@@ -98,10 +93,9 @@ pub enum ThemeMode {
 }
 
 /// The accent color the user picked. `Default` keeps each palette's
-/// built-in accent (tuned per light/dark for contrast); the rest override
-/// it, and the app derives the matching ink and selection tints. Named
-/// presets (not a raw hex) so the on-disk value is always valid and the
-/// picker stays a small swatch grid.
+/// built-in accent (tuned per light/dark); the rest override it, and the
+/// app derives the matching ink and selection tints. Named presets rather
+/// than raw hex, so the on-disk value is always valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AccentColor {
@@ -184,11 +178,10 @@ pub enum SortBy {
 
 impl Settings {
     /// Load settings from `file`. A missing file is first launch, not an
-    /// error: returns defaults, with roots migrated from the legacy
-    /// `roots.list` (`legacy_roots_file`) when that exists. A file that
-    /// exists but doesn't parse is an error — the caller decides
-    /// (typically: log it and run on defaults rather than silently
-    /// overwriting a file the user may want to fix).
+    /// error: defaults, with roots migrated from the legacy `roots.list`.
+    /// A file that exists but doesn't parse *is* an error, so the caller
+    /// can log and run on defaults rather than silently overwriting a file
+    /// the user may want to fix.
     pub fn load(file: &Path, legacy_roots_file: Option<&Path>) -> Result<Self> {
         let contents = match std::fs::read_to_string(file) {
             Ok(contents) => contents,

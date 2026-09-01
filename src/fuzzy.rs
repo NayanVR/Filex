@@ -1,57 +1,36 @@
 //! Subsequence ("fuzzy") filename matching — `dsr` → `Design System
-//! Review.pdf`.
+//! Review.pdf`. See `docs/design-search-ranking.md`.
 //!
-//! Pure logic, no index and no GPUI, so it is unit-tested in isolation.
-//! See `docs/design-search-ranking.md`; the two rules that shape
-//! everything here:
-//!
-//! 1. **This never runs on the common keystroke.** The index only falls
-//!    back to fuzzy matching when literal matching found fewer than
-//!    `limit` hits, so the cost is paid exactly when the user is looking
-//!    at a near-empty result list.
-//! 2. **Greedy, not optimal.** Real fzf-style scoring aligns needle to
-//!    haystack with an O(n·m) DP. Even behind the gate that is too much
-//!    over a whole arena, so this makes two O(n) greedy passes and
-//!    accepts slightly worse alignment on adversarial names.
-//!
-//! The two passes are what deliver the headline case: an **acronym pass**
-//! that may only match at word starts (so `dsr` hits `Design System
-//! Review`, and cannot hit `dadsrock.mp3`, which has no interior word
-//! starts), then a plain **greedy pass** anywhere. Acronym matches score
-//! strictly better than greedy ones.
+//! Two greedy O(n) passes, best score wins: an **acronym pass** that may
+//! only match at word starts (so `dsr` hits `Design System Review` but
+//! not `dadsrock.mp3`), then a plain greedy pass anywhere. Not the
+//! optimal O(n·m) DP fzf uses — worse alignment on adversarial names is
+//! the accepted trade. Only runs when literal matching found fewer than
+//! `limit` hits.
 
-/// Credit for a needle char landing on a word start (`dsr` on **D**esign
-/// **S**ystem **R**eview) or immediately after the previous match (`abc`
-/// on **abc**.txt). A char gets this once, not twice — the two signals
-/// are alternatives, not additive.
-///
-/// This is the dominant term, and it is why an acronym hit outranks a
-/// name that merely contains the letters. It is deliberately *not* a
-/// separate ranking tier: an early experiment scored every acronym above
-/// every non-acronym, which ranked `a_x_b_x_c.txt` above `abc.txt` for
-/// `abc`. One scale, two candidate alignments, best score wins.
+/// Credit for a needle char landing on a word start or immediately after
+/// the previous match. Awarded once, not twice — the two signals are
+/// alternatives. The dominant term: it is why an acronym hit outranks a
+/// name that merely contains the letters.
 const MATCH_BONUS: i32 = 30;
 
 /// Cost per character skipped *between* matched characters. Much smaller
-/// than [`MATCH_BONUS`], since an acronym match over a long name is
-/// mostly gap and must still beat a dense match on junk.
+/// than [`MATCH_BONUS`] so a gappy acronym still beats a dense junk match.
 const GAP_COST: i32 = 2;
 
 /// Cost per character before the match starts — a mild preference for
 /// matches near the front of the name.
 const START_COST: i32 = 1;
 
-/// Cost per unmatched trailing character. Stands in for the name-length
-/// tiebreak, so a short name wins an otherwise equal match.
+/// Cost per unmatched trailing character — the name-length tiebreak.
 const TAIL_COST: i32 = 1;
 
-/// Score subtracted from to produce the "lower is better" penalty. Above
-/// any achievable score, so penalties stay non-negative in practice.
+/// Subtracted from to produce the "lower is better" penalty. Above any
+/// achievable score, so penalties stay non-negative.
 const SCORE_BASELINE: i32 = 10_000;
 
-/// Case-fold one char. ASCII fast path; the fallback takes the first
-/// char of the Unicode lowercase mapping, which is right for the
-/// alphabets filenames actually use and never panics on the rest.
+/// Case-fold one char. ASCII fast path; the fallback takes the first char
+/// of the Unicode lowercase mapping.
 fn fold(c: char) -> char {
     if c.is_ascii() {
         c.to_ascii_lowercase()
@@ -60,17 +39,13 @@ fn fold(c: char) -> char {
     }
 }
 
-/// Does a char at this position start a word?
-///
-/// True at the name start, after a separator (`_ - . space /` and any
-/// other non-alphanumeric), at a camelCase hump (`fileName`), and at a
-/// letter→digit transition (`report2024`). Deliberately generous: a
+/// Does a char at this position start a word? True at the name start,
+/// after any non-alphanumeric, at a camelCase hump (`fileName`), and at a
+/// letter→digit transition (`report2024`). Deliberately generous — a
 /// missed boundary silently costs an acronym match.
 fn is_boundary(prev: Option<char>, cur: char) -> bool {
     match prev {
         None => true,
-        // After a separator, at a camelCase hump, or at a letter→digit
-        // transition.
         Some(prev) => {
             !prev.is_alphanumeric()
                 || (prev.is_lowercase() && cur.is_uppercase())
@@ -82,10 +57,8 @@ fn is_boundary(prev: Option<char>, cur: char) -> bool {
 /// Greedily match every char of `needle` (already case-folded) against
 /// `haystack`, taking the first acceptable position for each, and score
 /// the alignment. With `boundary_only`, a char may only match where
-/// [`is_boundary`] holds — that pass is what *finds* the acronym
-/// alignment a purely greedy walk would miss.
-///
-/// Returns `None` if the needle cannot be completed. Higher is better.
+/// [`is_boundary`] holds. `None` if the needle can't be completed.
+/// Higher is better.
 fn align(haystack: &str, needle: &str, boundary_only: bool) -> Option<i32> {
     let mut wanted = needle.chars();
     let mut want = wanted.next()?;
@@ -105,7 +78,6 @@ fn align(haystack: &str, needle: &str, boundary_only: bool) -> Option<i32> {
             }
             match first {
                 None => first = Some(ix),
-                // Chars skipped since the previous matched char.
                 Some(_) => score -= (ix - last - 1) * GAP_COST,
             }
             last = ix;
@@ -125,20 +97,16 @@ fn align(haystack: &str, needle: &str, boundary_only: bool) -> Option<i32> {
     Some(score - first.unwrap_or(0) * START_COST - tail * TAIL_COST)
 }
 
-/// Fuzzy-match `needle` against `haystack`, returning a **penalty**
-/// (lower is better) that composes with the index's "lower wins" ranking
-/// key, or `None` if `needle` is not a subsequence of `haystack`.
-///
-/// `needle` must already be case-folded (the index lowercases the query
-/// once per search); `haystack` is the name in its original case, since
-/// camelCase humps are one of the word-boundary signals.
+/// Fuzzy-match `needle` against `haystack`, returning a **penalty** (lower
+/// is better, composing with the index's "lower wins" key), or `None` if
+/// `needle` is not a subsequence. `needle` must already be case-folded;
+/// `haystack` keeps its original case, since camelCase humps are a
+/// word-boundary signal.
 pub fn penalty(haystack: &str, needle: &str) -> Option<u16> {
     if needle.is_empty() {
         return None;
     }
-    // Both alignments, best score wins. The boundary pass usually fails
-    // fast (few candidate positions), so this is not two full scans in
-    // the common case.
+    // Boundary pass usually fails fast, so this is rarely two full scans.
     let boundary = align(haystack, needle, true);
     let greedy = align(haystack, needle, false);
     let score = boundary.into_iter().chain(greedy).max()?;

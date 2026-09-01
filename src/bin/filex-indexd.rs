@@ -2,18 +2,14 @@
 //!
 //! Runs the volume indexes (USN fast path when elevated on volume roots,
 //! walk+RDCW otherwise) and serves search/status to unelevated filex
-//! instances over the named pipe `\\.\pipe\filex-index`. This is the
-//! "Everything" split: install once with admin consent, and every
-//! standard-user session gets instant whole-volume search.
+//! instances over `\\.\pipe\filex-index`. The "Everything" split:
+//! install once with admin consent, and every standard-user session gets
+//! instant whole-volume search.
 //!
-//! Runs either as a real SCM service (installed by the MSI — the normal
-//! path) or, when *not* launched by the Service Control Manager (a dev run
-//! or the legacy Task Scheduler registration), as a plain console process
-//! that serves until killed. A service Stop/Shutdown drops the LiveIndexes
-//! so their snapshots save cleanly.
-//!
-//! Roots come from the command line, or the shared settings/roots.list
-//! when no arguments are given.
+//! Runs as a real SCM service (the MSI's path) or, when not launched by
+//! the SCM, as a plain console process serving until killed. A service
+//! Stop/Shutdown drops the LiveIndexes so snapshots save cleanly. Roots
+//! come from the command line, else the shared settings/roots.list.
 
 #[cfg(target_os = "windows")]
 fn main() -> anyhow::Result<()> {
@@ -47,13 +43,11 @@ mod service {
     /// SCM, i.e. it's a console/dev run.
     const NOT_STARTED_BY_SCM: i32 = 1063;
 
-    /// Where the SCM service should write logs. LocalSystem's local data
-    /// dir is `C:\Windows\System32\config\systemprofile\AppData\Local` —
-    /// invisible to an admin looking for service logs — so point the
-    /// service at `C:\ProgramData\filex\logs` instead, which is
-    /// machine-wide and discoverable. `None` (falls back to the user dir)
-    /// only if `ProgramData` is unset, which doesn't happen on a normal
-    /// Windows install.
+    /// Where the SCM service writes logs. LocalSystem's local data dir is
+    /// buried under `System32\config\systemprofile`, invisible to an admin
+    /// looking for service logs, so point at machine-wide
+    /// `C:\ProgramData\filex\logs` instead. `None` only if `ProgramData`
+    /// is unset, which doesn't happen on a normal install.
     fn service_log_base() -> Option<PathBuf> {
         std::env::var_os("ProgramData").map(PathBuf::from)
     }
@@ -133,15 +127,13 @@ mod service {
         #[cfg(feature = "updater")]
         spawn_update_check(update_cancel.clone());
 
-        // The SCM only hands ServiceMain the arguments from an explicit
-        // StartService call — NOT the arguments baked into the service's
-        // ImagePath. The MSI registers the service with its roots in the
-        // ImagePath (`filex-indexd.exe C:\`), so those arrive on the
-        // process command line instead. Prefer ServiceMain args (a manual
-        // `sc start filex-indexd D:\`), then the ImagePath/process args,
+        // The SCM hands ServiceMain only the arguments from an explicit
+        // StartService call, NOT the ones baked into the service ImagePath
+        // — and the MSI puts the roots there, so they arrive on the process
+        // command line instead. Prefer ServiceMain args, then process args,
         // then settings.json. Falling straight through to an empty
-        // settings.json is what made the service start and immediately
-        // stop with "no roots to index".
+        // settings.json is what made the service start and immediately stop
+        // with "no roots to index".
         let scm_args: Vec<PathBuf> = arguments.into_iter().skip(1).map(PathBuf::from).collect();
         let path_args = if scm_args.is_empty() {
             env_root_args()
@@ -164,12 +156,11 @@ mod service {
         std::env::args_os().skip(1).map(PathBuf::from).collect()
     }
 
-    /// The roots to index: explicit `path_args` if given, else the shared
-    /// settings.json (with the legacy roots.list as first-launch fallback)
-    /// — the same sources the UI uses. When nothing is configured, fall
-    /// back to the platform default (all fixed drives on Windows) instead
-    /// of an empty set, which is what previously made the service start and
-    /// immediately stop with "no roots to index" on a fresh install.
+    /// The roots to index: explicit `path_args`, else the shared
+    /// settings.json (legacy roots.list as first-launch fallback) — the
+    /// same sources the UI uses. With nothing configured, fall back to the
+    /// platform default rather than an empty set, which is what made a
+    /// fresh install start and immediately stop with "no roots to index".
     fn resolve_roots(path_args: Vec<PathBuf>) -> Vec<PathBuf> {
         if !path_args.is_empty() {
             return path_args;
@@ -261,12 +252,10 @@ mod service {
 
     // --- Self-update (Windows, `updater` feature) --------------------------
     //
-    // The service is LocalSystem, so it can apply an MSI silently: no UAC,
-    // and (because the download comes via our own HTTPS client, not a
-    // browser) no SmartScreen. The verify gate in `filex::update` is the
-    // hard boundary — an MSI is only ever handed to msiexec after
-    // `check_for_update` returns `Apply`, i.e. after signature verification.
-    // See docs/design-distribution.md §3, §4.
+    // LocalSystem can apply an MSI silently: no UAC, and no SmartScreen
+    // since the download comes through our own HTTPS client. The verify
+    // gate in `filex::update` is the hard boundary — msiexec only ever sees
+    // an MSI after `check_for_update` returns `Apply`.
 
     /// Where the Windows update manifest lives. **Empty until release infra
     /// (block 5) fills it** — an empty URL disables the self-updater, so the
@@ -337,13 +326,11 @@ mod service {
         Ok(path)
     }
 
-    /// Launch `msiexec` to apply the staged MSI, detached so it OUTLIVES
-    /// this service.
-    ///
-    /// The MSI's `ServiceControl` stops filex-indexd mid-upgrade, so we must
-    /// spawn without waiting and let the SCM stop us cleanly while msiexec
-    /// swaps both binaries and starts the new service. `DETACHED_PROCESS`
-    /// plus not waiting means dropping the `Child` here does not kill it.
+    /// Launch `msiexec` to apply the staged MSI, detached so it **outlives**
+    /// this service. The MSI's `ServiceControl` stops filex-indexd
+    /// mid-upgrade, so spawn without waiting and let the SCM stop us while
+    /// msiexec swaps both binaries and starts the new service.
+    /// `DETACHED_PROCESS` plus not waiting keeps dropping `Child` harmless.
     #[cfg(feature = "updater")]
     fn spawn_msiexec(msi_path: &std::path::Path) -> Result<()> {
         use std::os::windows::process::CommandExt;

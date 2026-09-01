@@ -1,17 +1,15 @@
-//! Crash capture core (Phase 2c — see `docs/design-telemetry.md`).
+//! Crash capture core — see `docs/design-telemetry.md`.
 //!
-//! A panic is captured into a [`CrashReport`], **scrubbed** of any
-//! path-shaped data (the privacy backstop — filenames are private), and
-//! written to a local queue directory. A later launch, *only with the
-//! user's consent*, drains the queued reports to Sentry (see
-//! [`crate::observability`]). This module is the pure, SDK-free core — the
-//! report model, the [`scrub`] redactor, the panic-hook capture, and the
-//! queue read/write/prune/drain — with no telemetry SDK, no UI, and no
-//! network of its own, so it is unit-tested in isolation and can also be
-//! linked into the elevated `filex-indexd` service (which must not link a
-//! telemetry SDK). The transport is supplied by the caller: the durable
-//! queue is Sentry's offline buffer, not an independent uploader (the
-//! legacy `FILEX_CRASH_ENDPOINT` POST path was removed).
+//! A panic becomes a [`CrashReport`], **scrubbed** of path-shaped data,
+//! written to a local queue directory. A later launch drains the queue to
+//! Sentry *only with consent* (see [`crate::observability`]).
+//!
+//! The pure, SDK-free core: report model, [`scrub`] redactor, panic-hook
+//! capture, queue read/write/prune/drain. No SDK, no UI, no network of its
+//! own — so it unit-tests in isolation and can link into the elevated
+//! `filex-indexd` service, which must not link a telemetry SDK. The
+//! caller supplies the transport; the durable queue is Sentry's offline
+//! buffer, not an independent uploader.
 
 use std::path::{Path, PathBuf};
 
@@ -51,11 +49,10 @@ pub struct CrashReport {
     pub backtrace: String,
 }
 
-/// Install a panic hook that captures every panic into a scrubbed
-/// [`CrashReport`] in the default queue directory, then chains the
-/// previously-installed hook (so the normal message/abort still happens).
-/// `app` names the binary (`"filex"` / `"filex-indexd"`). Call once at
-/// startup, after logging is initialised.
+/// Install a panic hook capturing every panic into a scrubbed
+/// [`CrashReport`] in the default queue directory, then chaining the
+/// previous hook so the normal message/abort still happens. `app` names
+/// the binary. Call once at startup, after logging is initialised.
 pub fn install_panic_hook(app: &'static str) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -110,10 +107,9 @@ fn payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Redact path-shaped data from `text` — the privacy backstop applied to
-/// every report before it can be queued. The user's home directory
-/// becomes `~`; whitespace-delimited tokens that look like absolute paths
-/// (Unix `/a/b…`, Windows `X:\a\b…`) become `<path>`. Symbol names
+/// Redact path-shaped data from `text` — the privacy backstop every report
+/// passes before queueing. Home becomes `~`; whitespace-delimited tokens
+/// shaped like absolute paths become `<path>`. Symbol names
 /// (`filex::index::…`) and single-segment roots (`/etc`) are left alone.
 /// Over-redaction is deliberate: losing a `file:line` beats leaking a path.
 pub fn scrub(text: &str) -> String {
@@ -202,10 +198,10 @@ pub fn load(path: &Path) -> Result<CrashReport> {
 }
 
 /// Send every queued report through `send`, deleting each on success; a
-/// failed send stays queued for the next launch (at-least-once). An
-/// unparseable file is dropped. Returns how many were sent. Transport is a
-/// closure (`true` = delivered) so the drain is unit-tested without a
-/// network. Call off the UI thread, only when consent is granted.
+/// failed send stays queued for next launch (at-least-once), and an
+/// unparseable file is dropped. Transport is a closure (`true` =
+/// delivered) so this unit-tests without a network. Off the UI thread,
+/// only with consent.
 pub fn drain(dir: &Path, mut send: impl FnMut(&CrashReport) -> bool) -> usize {
     let mut sent = 0;
     for path in queued(dir) {

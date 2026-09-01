@@ -1,28 +1,17 @@
 //! Natural-language phrases → the existing `key:value` filter grammar.
-//!
 //! `photos from last week` becomes `kind:image` + `modified:…`, reusing
-//! [`crate::search_filter`]'s [`Filter`] rather than inventing a parallel
-//! query path. Strictly rule-based — no model, no inference, no runtime
-//! cost worth measuring. This is block 4 of `docs/design-search-ranking.md`.
+//! [`crate::search_filter`]'s [`Filter`] rather than a parallel query
+//! path. Strictly rule-based (`docs/design-search-ranking.md` block 4).
 //!
-//! Three rules keep it from feeling like magic that hides files:
+//! Three rules keep it from hiding files: every expansion is a removable
+//! chip ([`Phrase::source`] is the exact text to strip); a single word
+//! that is the whole query never expands (`photos` searches for the name,
+//! `photos from last week` expands); explicit `key:value` tokens always
+//! win.
 //!
-//! 1. **Every expansion is visible and removable.** The caller renders
-//!    each [`Phrase`] as a chip; [`Phrase::source`] is the exact text to
-//!    strip from the query to undo it.
-//! 2. **A single word that is the whole query never expands.** Typing
-//!    `photos` searches for files named "photos", because that is far
-//!    more likely to be what a file explorer's user meant. `photos from
-//!    last week` expands, because nobody names a file that.
-//! 3. **Existing `key:value` tokens are untouched.** An explicit
-//!    `kind:video` always wins; phrases never rewrite what the user
-//!    spelled out.
-//!
-//! Deliberately **not** supported: seasons (`last summer`). They are
-//! hemisphere- and culture-dependent — June is summer in Berlin and
-//! monsoon season in Mumbai — so a fixed mapping would be quietly wrong
-//! for half its users. Month names and years cover the same need without
-//! guessing.
+//! Deliberately unsupported: seasons. June is summer in Berlin and monsoon
+//! in Mumbai, so a fixed mapping is quietly wrong for half its users.
+//! Month names and years cover the need without guessing.
 
 use crate::listing::FileKind;
 use crate::search_filter::{
@@ -62,10 +51,10 @@ impl Expansion {
 }
 
 /// `raw` with the first consecutive run of words equal to `source`
-/// removed (case-insensitively) — the effect of removing an inferred
-/// chip. The counterpart of
-/// [`without_token`](crate::search_filter::without_token), which only
-/// handles single `key:value` words.
+/// removed (case-insensitively) — what removing an inferred chip does.
+/// The counterpart of
+/// [`without_token`](crate::search_filter::without_token), which handles
+/// only single `key:value` words.
 pub fn without_phrase(raw: &str, source: &str) -> String {
     let words: Vec<&str> = raw.split_whitespace().collect();
     let target: Vec<String> = source
@@ -89,12 +78,10 @@ pub fn without_phrase(raw: &str, source: &str) -> String {
     words.join(" ")
 }
 
-/// A short, honest label for a filter an expansion produced.
-///
-/// Kinds and extensions get their canonical `key:value` spelling, which
-/// is what makes the expansion explainable ("my words became this
-/// filter"). Sizes and dates fall back to the words the user actually
-/// typed, since a raw [`Bound`] has no compact readable form.
+/// A short, honest label for a filter an expansion produced. Kinds and
+/// extensions get their canonical `key:value` spelling, which is what
+/// makes the expansion explainable; sizes and dates fall back to the words
+/// the user typed, since a raw [`Bound`] has no compact readable form.
 pub fn label_for(filter: &Filter, source: &str) -> String {
     match filter {
         Filter::Kind(kind) => format!("kind:{}", kind_word(*kind)),
@@ -117,13 +104,11 @@ fn kind_word(kind: FileKind) -> &'static str {
     }
 }
 
-/// Words that carry no meaning on their own but glue phrases together.
-/// Dropped only when adjacent to something that matched, so a file named
-/// `my` or `all` is still findable.
-///
-/// The tail of the list is the verbs that introduce a date — "photos
-/// *modified* last week". They are only ever dropped next to a phrase
-/// that did match, so a search for `modified config` keeps both words.
+/// Words that glue phrases together but carry no meaning alone. Dropped
+/// only when adjacent to something that matched, so a file named `my` or
+/// `all` stays findable. The tail is the verbs that introduce a date
+/// ("photos *modified* last week"), which is why `modified config` keeps
+/// both words.
 const FILLER: &[&str] = &[
     "from", "my", "the", "of", "on", "at", "a", "an", "some", "any", "modified", "created",
     "changed",
@@ -145,28 +130,19 @@ const MONTHS: [&str; 12] = [
 ];
 
 /// Read `raw` as natural language, returning the residual filename text
-/// and the phrases recognized. `now` (unix seconds) anchors every
-/// relative date, so the function is pure and deterministic.
-///
-/// Words are matched greedily longest-first at each position, so
+/// and the phrases recognized. `now` (unix seconds) anchors relative
+/// dates, keeping this pure. Words match greedily longest-first, so
 /// `last month` wins over a bare `month`.
 pub fn expand(raw: &str, now: i64) -> Expansion {
     expand_inner(raw, now, true)
 }
 
-/// [`expand`], minus rule 2 — a lone word is read as a *description*
-/// ("screenshots" ⇒ `kind:image`), not as a filename.
-///
-/// Rule 2 exists because a bare `photos` typed into a search box is far
-/// more likely to be a file's name than a description of a set. That
-/// reasoning is specific to the search bar: once a verb has established
-/// the intent, as in `delete screenshots`, the object of that verb is
-/// unambiguously a description, and applying rule 2 there makes
-/// `delete screenshots` mean "delete files *named* screenshots" — a
-/// quietly much narrower plan than the one the user asked for.
-///
-/// Only [`crate::magic`] should need this; ordinary search wants
-/// [`expand`].
+/// [`expand`], minus the single-word rule — a lone word reads as a
+/// *description* ("screenshots" ⇒ `kind:image`), not a filename. That rule
+/// is specific to the search bar: once a verb has established intent, the
+/// object of that verb is unambiguously a description, and applying it
+/// would make `delete screenshots` mean "delete files *named*
+/// screenshots". Only [`crate::magic`] needs this.
 pub fn expand_as_description(raw: &str, now: i64) -> Expansion {
     expand_inner(raw, now, false)
 }
@@ -208,10 +184,9 @@ fn expand_inner(raw: &str, now: i64, lone_word_is_filename: bool) -> Expansion {
                 });
                 i += len;
                 // ...and filler immediately after it ("photos *from*
-                // meeting"): adjacency on either side is what makes a
-                // word noise rather than a filename. But a filler word
-                // that *starts* a phrase is not filler — "photos from
-                // june" needs its "from" to read the date.
+                // meeting") — adjacency is what makes a word noise rather
+                // than a filename. But filler that *starts* a phrase isn't
+                // filler: "photos from june" needs its "from".
                 while words.get(i).is_some_and(|w| is_filler(w))
                     && match_at(&words[i..], now).is_none()
                 {
@@ -220,11 +195,10 @@ fn expand_inner(raw: &str, now: i64, lone_word_is_filename: bool) -> Expansion {
             }
             None => {
                 // A comparative whose operand didn't parse ("older than
-                // yesterday"). Its operand must not then be read as a
-                // phrase in its own right: here "yesterday" is the thing
-                // being compared *against*, so expanding it to "modified
-                // during yesterday" would mean the near-opposite of what
-                // was typed. The whole failed attempt stays literal text.
+                // yesterday"). The operand must not then expand on its own:
+                // "yesterday" is what's being compared *against*, so
+                // "modified during yesterday" is the near-opposite. The
+                // whole failed attempt stays literal text.
                 let failed_comparative = is_comparative_lead(words[i])
                     && words
                         .get(i + 1)
@@ -332,13 +306,10 @@ fn lookup(phrase: &str, now: i64) -> Option<Vec<Filter>> {
     time_phrase(phrase, now).map(|bound| vec![Filter::Modified(bound)])
 }
 
-/// Comparative phrases carrying an operand: `older than 30 days`,
-/// `bigger than 10mb`. These can't live in the fixed table above because
-/// the operand is open-ended, so they are parsed instead of looked up.
-///
-/// The literal `than` is required. `older 30 days` is not something a
-/// person types, and matching the comparative loosely would start
-/// claiming words out of filenames.
+/// Comparative phrases carrying an open-ended operand: `older than 30
+/// days`, `bigger than 10mb` — parsed rather than looked up in the table
+/// above. The literal `than` is required: nobody types `older 30 days`,
+/// and matching loosely would start claiming words out of filenames.
 fn comparative(phrase: &str, now: i64) -> Option<Vec<Filter>> {
     let (word, operand) = phrase.split_once(" than ")?;
     let filter = match word {
@@ -355,11 +326,9 @@ fn comparative(phrase: &str, now: i64) -> Option<Vec<Filter>> {
 }
 
 /// A spoken duration — `30 days`, `2 weeks`, `1 year` — or the compact
-/// `30d` the `modified:` grammar already accepts, in seconds.
-///
-/// Months and years are the same rounded 30/365 days the rest of the
-/// phrase table uses; nobody typing "older than 6 months" means a
-/// calendar-exact boundary.
+/// `30d` the `modified:` grammar accepts, in seconds. Months and years are
+/// the same rounded 30/365 days used throughout; nobody typing "older than
+/// 6 months" means a calendar-exact boundary.
 fn duration_secs(text: &str) -> Option<i64> {
     let (number, unit) = match text.split_once(' ') {
         Some(split) => split,
@@ -381,12 +350,10 @@ fn duration_secs(text: &str) -> Option<i64> {
     count.checked_mul(secs)
 }
 
-/// Date phrases → an mtime bound.
-///
-/// "week"/"month"/"year" are **rolling windows**, matching the existing
-/// `modified:week` keyword rather than inventing a second meaning for the
-/// same word. Named months and years are true calendar ranges, since
-/// that is unambiguously what "in June" means.
+/// Date phrases → an mtime bound. "week"/"month"/"year" are **rolling
+/// windows**, matching the existing `modified:week` keyword rather than
+/// giving the same word a second meaning. Named months and years are true
+/// calendar ranges, which is unambiguously what "in June" means.
 fn time_phrase(phrase: &str, now: i64) -> Option<Bound<i64>> {
     let today = start_of_day(now);
     match phrase {

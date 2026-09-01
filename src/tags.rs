@@ -1,17 +1,15 @@
-//! File tags (Phase 2d, block 8 — see `docs/design-tags.md`).
+//! File tags — see `docs/design-tags.md`.
 //!
-//! A [`Tag`] is a name plus an optional [`TagColor`] drawn from Finder's
-//! 0–7 palette (so a color set in filex round-trips into Finder on
-//! macOS). [`TagStore`] is the read/write interface; [`SidecarTags`] is
-//! the portable backend — a single JSON map from absolute path to tags,
-//! kept in the data dir. It is the enumeration index on every platform;
-//! a macOS xattr backend (added later) layers Finder interop on top for
-//! single-file reads/writes.
+//! A [`Tag`] is a name plus an optional [`TagColor`] from Finder's 0–7
+//! palette, so a color set here round-trips into Finder. [`TagStore`] is
+//! the interface; [`SidecarTags`] is the portable backend (one JSON map
+//! from absolute path to tags in the data dir) and the enumeration index
+//! on every platform. The macOS xattr backend layers Finder interop on
+//! top for single-file reads/writes.
 //!
-//! Pure I/O + map logic, no GPUI, so it is unit-tested in isolation. The
-//! app calls it on a background executor (the I/O blocks) and migrates
-//! path keys through the same [`filex::ops`](crate::ops) hooks that move
-//! files, so tags follow a filex-side rename/move/copy/delete.
+//! Pure I/O + map logic, no GPUI. The app calls it on a background
+//! executor and migrates path keys through the same
+//! [`filex::ops`](crate::ops) hooks that move files, so tags follow.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -109,12 +107,10 @@ impl Tag {
     }
 }
 
-/// Encode tags into the payload of Finder's `_kMDItemUserTags` extended
-/// attribute: a binary property list holding an array of `"Name\n<idx>"`
-/// strings, where `<idx>` is the Finder color index (0 = none). This is
-/// Finder's exact on-disk format, so a value written here appears in
-/// Finder with its color, and vice-versa. Portable (no macOS APIs) so the
-/// format is testable on CI; the actual xattr I/O is macOS-only.
+/// Encode tags into Finder's `_kMDItemUserTags` xattr payload: a binary
+/// plist array of `"Name\n<idx>"` strings, `<idx>` being the Finder color
+/// index (0 = none). Finder's exact on-disk format, so values round-trip
+/// both ways. Portable (no macOS APIs) so it is testable on CI.
 pub fn encode_finder_tags(tags: &[Tag]) -> Result<Vec<u8>> {
     let array = tags
         .iter()
@@ -130,11 +126,10 @@ pub fn encode_finder_tags(tags: &[Tag]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Decode the payload of Finder's `_kMDItemUserTags` xattr (see
-/// [`encode_finder_tags`]). A malformed plist or unexpected shape yields
-/// no tags rather than an error — a file's tags are never worth failing
-/// over. Each element is `"Name"` or `"Name\n<idx>"`; a trailing
-/// `\n<0-7>` is read as the color, anything else is part of the name.
+/// Decode Finder's `_kMDItemUserTags` xattr payload (see
+/// [`encode_finder_tags`]). A malformed plist yields no tags rather than
+/// an error. Each element is `"Name"` or `"Name\n<idx>"`; a trailing
+/// `\n<0-7>` is the color, anything else is part of the name.
 pub fn decode_finder_tags(bytes: &[u8]) -> Vec<Tag> {
     let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(bytes)) else {
         return Vec::new();
@@ -149,12 +144,10 @@ pub fn decode_finder_tags(bytes: &[u8]) -> Vec<Tag> {
         .collect()
 }
 
-/// Fold `new` into a tag set for the details-panel editor. When
-/// `replacing` names an existing tag it is swapped out **in place**
-/// (preserving order); otherwise `new` is appended. Either way the result
-/// holds at most one tag per name — a collision with `new.name` is
-/// dropped so re-adding a name just updates its color. Pure so the
-/// editor's add/rename/recolor rule is unit-tested off the GPUI layer.
+/// Fold `new` into a tag set for the details-panel editor. `replacing`
+/// swaps an existing tag **in place** (preserving order); otherwise `new`
+/// is appended. Either way at most one tag per name survives, so re-adding
+/// a name just updates its color.
 pub fn upsert_tag(tags: &[Tag], replacing: Option<&str>, new: Tag) -> Vec<Tag> {
     let mut out = Vec::with_capacity(tags.len() + 1);
     let mut inserted = false;
@@ -176,11 +169,9 @@ pub fn upsert_tag(tags: &[Tag], replacing: Option<&str>, new: Tag) -> Vec<Tag> {
     out
 }
 
-// The `tag:` splitter that used to live here (`parse_tag_query`) is
-// superseded by the general `key:value` tokenizer in
-// [`crate::search_filter::parse_query`], which emits `tag:` as
-// `Filter::Tag`. The pieces below stay: they serve the sidecar intersect
-// and the sidebar list, which operate on the store, not the query string.
+// `tag:` parsing lives in [`crate::search_filter::parse_query`] now, which
+// emits `Filter::Tag`. What follows serves the sidecar intersect and the
+// sidebar list, which operate on the store rather than the query string.
 
 /// The distinct tags across an index, for the sidebar TAGS list:
 /// de-duplicated by name (case-insensitive, first spelling/color wins)
@@ -332,11 +323,10 @@ impl SidecarTags {
         self.persist()
     }
 
-    /// Absolute paths carrying every tag in `required` (lowercased,
-    /// matched case-insensitively) — the data source for the `tag:`
-    /// filter. Scans the in-memory index under the read lock, cloning only
-    /// the matching paths, so it stays cheap even at 100k tagged entries
-    /// (see `benches/tag_bench.rs`). Empty `required` returns nothing.
+    /// Absolute paths carrying every tag in `required` (case-insensitive)
+    /// — the `tag:` filter's data source. Scans the in-memory index under
+    /// the read lock, cloning only matches, so it stays cheap at 100k
+    /// tagged entries. Empty `required` returns nothing.
     pub fn paths_with_all_tags(&self, required: &[String]) -> Vec<PathBuf> {
         if required.is_empty() {
             return Vec::new();
@@ -365,12 +355,10 @@ impl SidecarTags {
         Ok(removed.len())
     }
 
-    /// Migrate the sidecar index to reflect a just-completed file op,
-    /// keeping tags attached to their file across a filex-side
-    /// move/rename/copy/delete (see `docs/design-tags.md`). For a delete
-    /// the removed tags are written back into `op` ([`AppliedOp::Deleted`]'s
-    /// `removed_tags`) so [`undo_applied`] can reinstate them. Blocking I/O
-    /// (persists) — call on a background executor, after the op succeeds.
+    /// Migrate the sidecar index for a just-completed file op, keeping tags
+    /// attached across a filex-side move/rename/copy/delete. A delete
+    /// writes the removed tags back into `op` so [`undo_applied`] can
+    /// reinstate them. Blocking I/O — background executor, after success.
     ///
     /// [`undo_applied`]: Self::undo_applied
     pub fn apply_applied(&self, op: &mut AppliedOp) -> Result<()> {
@@ -390,10 +378,9 @@ impl SidecarTags {
         }
     }
 
-    /// Reverse [`apply_applied`] for an op being undone: move/rename put
-    /// the key back `to → from`, an undone copy drops the copy's key, and
-    /// an undone delete restores the tags carried on the op. Blocking I/O
-    /// — call on a background executor.
+    /// Reverse [`apply_applied`]: move/rename put the key back `to → from`,
+    /// an undone copy drops the copy's key, an undone delete restores the
+    /// tags carried on the op. Blocking I/O — background executor.
     ///
     /// [`apply_applied`]: Self::apply_applied
     pub fn undo_applied(&self, op: &AppliedOp) -> Result<()> {
@@ -448,12 +435,11 @@ pub type PlatformTags = macos::MacosTags;
 #[cfg(not(target_os = "macos"))]
 pub type PlatformTags = SidecarTags;
 
-/// macOS backend: Finder-interop tag xattr on the file itself, layered
+/// macOS backend: the Finder-interop xattr on the file itself, layered
 /// over a [`SidecarTags`] that stays the enumeration index. `set_tags`
-/// writes both; `tags` prefers the xattr so Finder-side edits win;
-/// `all`/`prune`/most migration delegate to the sidecar. Only a copy
-/// needs extra work — the byte-level copy doesn't carry the xattr, so we
-/// write it onto the new file ("Option B", `docs/design-tags.md`).
+/// writes both, `tags` prefers the xattr so Finder-side edits win, and the
+/// rest delegates. Only a copy needs extra work — the byte copy doesn't
+/// carry the xattr, so it is written onto the new file.
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::CString;
@@ -492,10 +478,9 @@ mod macos {
         }
 
         /// Migrate stores for a completed file op. Move/rename/delete only
-        /// touch the sidecar key — the xattr rides along with the file (or
-        /// is gone with a trashed one). A copy additionally gets the
-        /// source's tags written onto the new file's xattr so Finder shows
-        /// the copy tagged too.
+        /// touch the sidecar key — the xattr rides with the file. A copy
+        /// additionally gets the source's tags written onto the new file's
+        /// xattr, so Finder shows the copy tagged too.
         pub fn apply_applied(&self, op: &mut AppliedOp) -> Result<()> {
             if let AppliedOp::Copied { from, to } = op {
                 let tags = self.tags(from);

@@ -1,19 +1,12 @@
-//! Reversible file operations (Phase 2a block 3).
+//! Reversible file operations.
 //!
-//! Architecture (docs/roadmap.md): operations touch only the
-//! filesystem, never the index — the platform watchers observe the
-//! changes and feed the index as ordinary deltas, so there is nothing
-//! to keep consistent here.
+//! Operations touch only the filesystem, never the index — the platform
+//! watchers observe the changes and feed the index as ordinary deltas, so
+//! there is nothing to keep consistent here.
 //!
-//! [`apply`] executes a [`FileOp`] and returns the [`AppliedOp`]
-//! carrying exactly what [`undo`] needs to reverse it; the [`Journal`]
-//! is the bounded undo stack the app records into. Everything here is
-//! blocking I/O — call it on a background executor, never the UI
-//! thread.
-//!
-//! Not yet here (later block-3 slices): conflict resolution (a
-//! destination that exists is an error, not a prompt) and
-//! progress/cancellation for long copies.
+//! [`apply`] executes a [`FileOp`] and returns the [`AppliedOp`] carrying
+//! what [`undo`] needs to reverse it; [`Journal`] is the bounded undo
+//! stack. All blocking I/O — background executor, never the UI thread.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -209,11 +202,10 @@ pub fn apply(op: &FileOp) -> Result<AppliedOp> {
     apply_with_progress(op, &OpProgress::default())
 }
 
-/// Execute `op`, reporting byte progress and honoring cancellation for
-/// the copying paths (copy, and cross-device move). A canceled or
-/// failed copy removes its partial destination; a canceled cross-
-/// device move additionally leaves the source untouched. Blocking —
-/// run on a background executor.
+/// Execute `op`, reporting byte progress and honoring cancellation on the
+/// copying paths (copy, cross-device move). A canceled or failed copy
+/// removes its partial destination; a canceled cross-device move also
+/// leaves the source untouched. Blocking — background executor.
 pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<AppliedOp> {
     match op {
         FileOp::Move { from, to } => {
@@ -406,10 +398,8 @@ fn tree_size(path: &Path) -> Result<u64> {
 }
 
 /// Copy a file or directory tree, counting bytes into `progress` and
-/// stopping (with [`OpCanceled`]) when cancellation is requested.
-/// Symlinks are followed (their targets are copied) — same as
-/// `std::fs::copy`; preserving links is a later refinement if it ever
-/// matters in practice.
+/// stopping with [`OpCanceled`] on cancellation. Symlinks are followed
+/// (targets copied), same as `std::fs::copy`.
 fn copy_recursively(from: &Path, to: &Path, progress: &OpProgress) -> Result<()> {
     if progress.canceled() {
         return Err(anyhow::Error::new(OpCanceled));
@@ -479,12 +469,11 @@ fn remove_any(path: &Path) {
     }
 }
 
-/// macOS trash backend. Calls NSFileManager's `trashItemAtURL` with
-/// the `resultingItemURL` out-parameter — the OS reports exactly where
-/// the item landed in the Trash, so restore is a plain rename back.
-/// (The `trash` crate was evaluated first, per the roadmap: its
-/// NSFileManager path discards that URL and its Finder path shells out
-/// to osascript with permission prompts — neither can undo.)
+/// macOS trash backend: NSFileManager's `trashItemAtURL` with the
+/// `resultingItemURL` out-parameter, so the OS reports where the item
+/// landed and restore is a plain rename back. The `trash` crate can't do
+/// this — its NSFileManager path discards that URL and its Finder path
+/// shells out to osascript with permission prompts.
 #[cfg(target_os = "macos")]
 mod trash_backend {
     use super::*;
@@ -528,12 +517,10 @@ mod trash_backend {
 }
 
 /// Windows / Linux trash backend via the `trash` crate: Recycle Bin
-/// (IFileOperation) and the freedesktop trash spec respectively. After
-/// deleting, the item is looked up in the OS trash listing (newest
-/// entry whose original path matches) so undo can restore it through
-/// the OS. Paths are assumed absolute — the app always browses
-/// absolute paths, and canonicalizing here would wrongly resolve a
-/// symlink to its target before trashing.
+/// (IFileOperation) and the freedesktop spec. After deleting, the item is
+/// found in the OS trash listing (newest entry whose original path
+/// matches) so undo restores through the OS. Paths must be absolute —
+/// canonicalizing here would resolve a symlink before trashing it.
 #[cfg(not(target_os = "macos"))]
 mod trash_backend {
     use super::*;

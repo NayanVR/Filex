@@ -1,38 +1,18 @@
 //! Magic mode — a command-shaped query becomes a reviewable plan of file
-//! operations (`docs/design-magic-mode.md`, phase 2 of its phasing).
+//! operations. See `docs/design-magic-mode.md`.
 //!
-//! `delete screenshots older than 30 days` parses into a [`Command`]: a
-//! verb, the [`Selection`] describing *which* files it targets, and the
-//! [`Action`] to take on each. Resolving that against the concrete files
-//! the search matched produces a [`Plan`] — a `Vec<`[`FileOp`]`>` the UI
-//! shows for review and only executes on explicit confirm.
+//! `delete screenshots older than 30 days` parses into a [`Command`]
+//! (verb + [`Selection`] + [`Action`]); resolving it against the files
+//! the search matched produces a [`Plan`] the UI shows for review.
+//! Strictly rule-based — no model. The selection half runs through
+//! [`parse_query`] and [`phrases::expand`], the same two passes the
+//! search bar uses.
 //!
-//! Strictly rule-based, exactly like [`crate::phrases`] — no model, no
-//! inference. The selection half is not a new query language: it runs the
-//! words through [`parse_query`] and [`phrases::expand`], the same two
-//! passes the ordinary search bar already uses, so anything you can type
-//! into search you can type after a verb.
-//!
-//! Three rules keep this from being a footgun:
-//!
-//! 1. **Incomplete input produces no plan at all.** A missing
-//!    destination, an unparseable rename pattern, a verb with nothing to
-//!    act on — every one of these returns `None` rather than a partial or
-//!    best-guess plan. Showing no Magic card is always an option; showing
-//!    a wrong one is not.
-//! 2. **Nothing here executes anything.** This module builds `FileOp`
-//!    values and stops. Execution goes through the existing
-//!    [`apply_with_progress`](crate::ops::apply_with_progress) +
-//!    [`Journal`](crate::ops::Journal) path, so a Magic plan is undoable
-//!    with the same Ctrl+Z as a drag-and-drop.
-//! 3. **A plan too big to review is refused.** See [`MAX_PLAN_OPS`].
-//!
-//! Conflict handling is deliberately *not* duplicated here. A plan may
-//! name a destination that is already occupied; [`crate::ops`] already
-//! has one answer for that (refuse, or retarget via
-//! [`next_free_name`](crate::ops::next_free_name)), and the paste and
-//! drag paths already drive it. Growing a second conflict story inside
-//! Magic mode would mean two behaviors for one situation.
+//! Three invariants: incomplete input produces `None` rather than a
+//! best-guess plan; nothing here executes (plans go through
+//! [`apply_with_progress`](crate::ops::apply_with_progress), so Ctrl+Z
+//! undoes them); a plan over [`MAX_PLAN_OPS`] is refused. Destination
+//! conflicts are [`crate::ops`]'s job, not duplicated here.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -41,18 +21,11 @@ use crate::ops::FileOp;
 use crate::phrases;
 use crate::search_filter::{Filter, parse_query};
 
-/// The most operations one Magic plan may contain.
-///
-/// The bound is about *review*, not about what the executor could
-/// manage: the preview card is the first line of defense against a
-/// mis-parse, and nobody reads ten thousand rows before clicking
-/// confirm. A query matching more than this reports how many it matched
-/// so the user can narrow it, rather than offering one-click mass
-/// action on a set they cannot inspect.
+/// The most operations one Magic plan may contain. The bound is about
+/// *review* — nobody reads ten thousand rows before clicking confirm.
 pub const MAX_PLAN_OPS: usize = 1_000;
 
-/// The recognized v1 verbs. Each maps onto an existing [`FileOp`]
-/// variant — Magic mode adds no new kind of operation.
+/// The recognized verbs. Each maps onto an existing [`FileOp`] variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
     Delete,
@@ -72,8 +45,7 @@ impl Verb {
         }
     }
 
-    /// Past-tense verb for the completion notice ("deleted 3 items"),
-    /// where the imperative `label` would read as an unfinished command.
+    /// Past-tense for the completion notice ("deleted 3 items").
     pub fn past_tense(self) -> &'static str {
         match self {
             Self::Delete => "deleted",
@@ -84,23 +56,20 @@ impl Verb {
     }
 }
 
-/// Which files a command targets — the search half of the command,
-/// carried in exactly the shape [`crate::index`]'s search already takes.
+/// Which files a command targets, in the shape [`crate::index`]'s search
+/// already takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
-    /// The words that described the target, verbatim — what the card
-    /// echoes back so the user can see what was understood.
+    /// The target words verbatim — what the card echoes back.
     pub source: String,
     /// Residual filename text to match (may be empty).
     pub text: String,
-    /// Structured filters, from `key:value` tokens and recognized
-    /// phrases alike. All of them AND, as everywhere else.
+    /// Filters from `key:value` tokens and phrases alike. All AND.
     pub filters: Vec<Filter>,
 }
 
-/// Where a move or copy is headed, as the user spelled it — resolved to
-/// a real directory later by [`resolve_destination`], since that needs
-/// the filesystem and the parse stays pure.
+/// Where a move or copy is headed, as spelled. [`resolve_destination`]
+/// turns it into a real directory later, keeping the parse pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     /// The cleaned-up folder name ("documents", "project archive").
@@ -128,19 +97,16 @@ pub struct Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub verb: Verb,
-    /// One operation per file that has something to do. Files already in
-    /// the requested state (already in the destination folder, already
-    /// carrying the requested name) are absent — see [`build`].
+    /// One op per file that has something to do; files already in the
+    /// requested state are absent (see [`build`]).
     pub ops: Vec<FileOp>,
-    /// How many matched files were left out for that reason. The card
-    /// says so rather than quietly showing a shorter list than the
-    /// search did.
+    /// How many matches were left out for that reason, so the card can
+    /// account for the difference against what the search found.
     pub skipped: usize,
 }
 
-/// Why a command that parsed could not become a plan. Every one of
-/// these suppresses the Magic card; the variants exist so the UI can say
-/// *why* instead of silently showing nothing.
+/// Why a parsed command could not become a plan. Each suppresses the
+/// card; the variants let the UI say *why*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
     /// The selection matched no files.
@@ -152,11 +118,9 @@ pub enum PlanError {
     /// No folder by that name in the current directory or among the
     /// user's known folders.
     UnknownDestination(String),
-    /// A rename pattern with no `{n}` or `{name}` renders one identical
-    /// name for every file, which only works on a single match.
+    /// A pattern with no `{n}`/`{name}` renders one name for every file.
     PatternNotUnique,
-    /// A rename pattern rendered something that is not a usable file
-    /// name (empty, or containing a path separator).
+    /// A pattern rendered an unusable name (empty, or a path separator).
     InvalidName(String),
     /// Two files in the plan would land on the same path.
     Collision(PathBuf),
@@ -166,11 +130,8 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoMatches => write!(f, "nothing matched"),
-            // Deliberately not "{count} files matched": callers fetch
-            // exactly one past the cap so this can fire at all, so the
-            // count is always MAX_PLAN_OPS + 1 and says nothing about how
-            // many really matched. Reporting it as exact would be a lie
-            // in the common case.
+            // Not "{count} matched": callers fetch exactly one past the
+            // cap, so the count is always MAX_PLAN_OPS + 1.
             Self::TooMany(_) => write!(
                 f,
                 "more than {MAX_PLAN_OPS} files matched — narrow the search to review them"
@@ -194,37 +155,22 @@ impl std::error::Error for PlanError {}
 // Parsing
 // ---------------------------------------------------------------------
 
-/// Read `raw` as a command with the delete gate **on** — the
-/// auto-switch reading. `None` means "this is not a command": either no
-/// verb, a verb that doesn't complete unambiguously, or a bare `delete`
-/// with no structured evidence (see [`clears_delete_gate`]).
+/// Read `raw` as a command with the delete gate **on** — the strict
+/// reading that decides whether a query typed in *normal* mode flips the
+/// app into magic mode. `None` means "not a command". Once the user has
+/// explicitly toggled magic mode on, use [`parse_with_gate`]`(.., false)`.
 ///
-/// This is the strict reading, used to decide whether a query typed in
-/// *normal* mode should flip the app into magic mode on its own. When the
-/// user has explicitly toggled magic mode on, call
-/// [`parse_with_gate`]`(.., false)` instead, which drops the delete gate.
-///
-/// `now` (unix seconds) anchors relative dates, so the parse is pure and
-/// deterministic — same contract as [`phrases::expand`].
+/// `now` (unix seconds) anchors relative dates, keeping the parse pure.
 pub fn parse(raw: &str, now: i64) -> Option<Command> {
     parse_with_gate(raw, now, true)
 }
 
-/// [`parse`], with control over the delete gate.
-///
-/// `require_delete_evidence` is the difference between the two entry
-/// paths into magic mode, per `docs/design-magic-mode.md` v2:
-///
-/// - `true` (auto-switch): a `delete` must carry a kind/date/size/ext
-///   filter, so `delete reminder` — indistinguishable from the filename
-///   `delete-reminder.js` — cannot silently arm a delete command. This is
-///   what `tests/magic_false_positives.rs` measures.
-/// - `false` (explicit toggle): the user has opted in, so `delete old
-///   logs` is taken at face value. The gate's whole job was guarding an
-///   *inference*; once the mode is chosen there is nothing to guard.
-///
-/// Everything else about the parse is identical either way — only the
-/// delete gate moves.
+/// [`parse`], with control over the delete gate — the only difference
+/// between the two entry paths into magic mode. `true` (auto-switch)
+/// requires a delete to carry a filter, so `delete reminder` can't arm a
+/// delete off a filename; `false` (explicit toggle) takes the user at
+/// their word. See `docs/design-magic-mode.md` §"Where the delete gate
+/// goes".
 pub fn parse_with_gate(raw: &str, now: i64, require_delete_evidence: bool) -> Option<Command> {
     let words: Vec<&str> = raw.split_whitespace().collect();
     let (first, rest) = words.split_first()?;
@@ -238,7 +184,7 @@ pub fn parse_with_gate(raw: &str, now: i64, require_delete_evidence: bool) -> Op
         Verb::Delete => (rest, Action::Delete),
         Verb::Move | Verb::Copy | Verb::Rename => {
             // Last separator wins, so a folder named "to" in the target
-            // half doesn't steal the split from the real destination.
+            // half can't steal the split.
             let at = rest.iter().rposition(|word| is_separator(word, verb))?;
             let (target, tail) = (&rest[..at], &rest[at + 1..]);
             if target.is_empty() || tail.is_empty() {
@@ -265,39 +211,16 @@ pub fn parse_with_gate(raw: &str, now: i64, require_delete_evidence: bool) -> Op
     })
 }
 
-/// The extra bar a **delete** command must clear: its selection has to
-/// carry at least one structured filter (kind, date, size, extension),
-/// not just free text.
+/// The extra bar a **delete** command must clear: at least one structured
+/// filter, not just free text. Move/copy/rename need a `to`/`into`
+/// separator *and* a resolvable destination, which is already an
+/// effectively perfect gate; delete has no separator, so
+/// `delete <anything>` parses. Filter vocabulary is how a person
+/// describes a **set**, where bare text names a **thing**.
 ///
-/// Why only delete. Move, copy and rename require a `to`/`into`
-/// separator *and* a resolvable destination, which turns out to be an
-/// almost perfect structural gate — measured over 329,767 queries
-/// derived from 123,559 real filenames (every word prefix, since search
-/// is incremental), they produced **zero** false positives. Delete has
-/// no separator, so `delete <anything>` parses, and the same corpus
-/// produced 58 — every one on the most destructive verb:
-///
-/// ```text
-/// delete reminder   <- delete-reminder.js
-/// remove prefix     <- remove-prefix.d.ts
-/// delete property   <- delete-property-or-throw.js
-/// ```
-///
-/// Why *this* gate rather than an intent classifier. Those false
-/// positives are command-shaped by any linguistic measure — verb plus
-/// object, exactly like `delete old logs`. What separates them is not in
-/// the text, so a text classifier is being asked to split two classes
-/// that genuinely overlap. Filter vocabulary is the signal that *is*
-/// present: it is how a person describes a **set**, where bare text is
-/// how they name a **thing**. Requiring it cuts the 58 to 2 while
-/// costing one phrasing (`delete old logs`) out of the sampled commands
-/// — see `tests/magic_false_positives.rs`, which is the harness those
-/// numbers come from.
-///
-/// The cost is real and deliberate: `delete old logs` shows no card, and
-/// the user has to say `delete logs older than 30 days` or
-/// `delete ext:log`. Erring toward no card is the module's stated rule 1,
-/// and it matters most precisely here.
+/// The cost is deliberate: `delete old logs` shows no card. Measurements
+/// and the corpus live in `docs/design-magic-mode.md` §"False positives"
+/// and `tests/magic_false_positives.rs`.
 fn clears_delete_gate(verb: Verb, selection: &Selection) -> bool {
     verb != Verb::Delete || !selection.filters.is_empty()
 }
@@ -312,9 +235,8 @@ fn verb_of(word: &str) -> Option<Verb> {
     })
 }
 
-/// The word separating a command's target from its destination. `into`
-/// reads naturally for move and copy ("move photos into Archive") but
-/// not for rename, where only `to` is English.
+/// The word separating target from destination. `into` reads naturally
+/// for move/copy but not rename, where only `to` is English.
 fn is_separator(word: &str, verb: Verb) -> bool {
     let word = word.to_ascii_lowercase();
     match verb {
@@ -324,11 +246,9 @@ fn is_separator(word: &str, verb: Verb) -> bool {
     }
 }
 
-/// Drop a leading quantifier: "delete **all** screenshots".
-///
-/// These live here rather than in [`crate::phrases`]'s filler list
-/// because they are command grammar, not search grammar — a plain search
-/// for `all hands notes` must keep its "all".
+/// Leading quantifiers to drop: "delete **all** screenshots". Here rather
+/// than in [`crate::phrases`]'s filler because they are command grammar —
+/// a plain search for `all hands notes` must keep its "all".
 const QUANTIFIERS: &[&str] = &["all", "every", "any", "my", "the"];
 
 fn strip_quantifier<'a, 'b>(words: &'a [&'b str]) -> &'a [&'b str] {
@@ -338,18 +258,15 @@ fn strip_quantifier<'a, 'b>(words: &'a [&'b str]) -> &'a [&'b str] {
     }
 }
 
-/// Run the target words through the ordinary search parse — `key:value`
-/// tokens first, then natural-language phrases over what's left — so a
-/// command's target supports precisely the vocabulary the search bar
-/// does. `None` when nothing survives to search on, which is the
-/// "verb with no target" case ("move to Documents").
+/// Run the target words through the ordinary search parse, so a command's
+/// target supports exactly the search bar's vocabulary. `None` when
+/// nothing survives — the "verb with no target" case.
 fn selection_from(words: &[&str], now: i64) -> Option<Selection> {
     let source = words.join(" ");
     let parsed = parse_query(&source, now);
-    // `expand_as_description`, not `expand`: the verb has already
-    // established that these words describe a set, so the single-word
-    // filename rule must not apply — otherwise `delete screenshots`
-    // silently means "delete files *named* screenshots".
+    // `expand_as_description`, not `expand`: the verb already established
+    // these words describe a set, so the single-word filename rule must
+    // not apply — else `delete screenshots` means files *named* that.
     let expansion = phrases::expand_as_description(&parsed.text, now);
 
     let mut filters: Vec<Filter> = Vec::new();
@@ -368,9 +285,8 @@ fn selection_from(words: &[&str], now: i64) -> Option<Selection> {
     })
 }
 
-/// Clean a destination phrase down to a folder name: drop leading filler
-/// ("to **my** Documents") and a trailing "folder"/"directory" ("to the
-/// Archive **folder**"). `None` if nothing is left.
+/// Clean a destination phrase to a folder name: drop leading filler and a
+/// trailing "folder"/"directory". `None` if nothing is left.
 fn parse_destination(words: &[&str]) -> Option<Destination> {
     let mut words = strip_quantifier(words);
     while let Some((last, rest)) = words.split_last() {
@@ -393,14 +309,10 @@ fn parse_destination(words: &[&str]) -> Option<Destination> {
 // Rename patterns
 // ---------------------------------------------------------------------
 
-/// The new-name template of a batch rename: literal text interleaved
-/// with `{n}` (position in the batch), `{name}` (the original stem) and
-/// `{ext}` (the original extension, no dot).
-///
-/// `{n}` is zero-padded to the width of the batch size — a rename of 5
-/// files numbers them `1..5`, one of 120 files numbers them `001..120`.
-/// That is what keeps the results sorting in the order they were
-/// numbered, and it needs no extra syntax to ask for.
+/// A batch rename's new-name template: literal text interleaved with
+/// `{n}` (position), `{name}` (original stem) and `{ext}` (extension, no
+/// dot). `{n}` is zero-padded to the batch size's width (5 files →
+/// `1..5`, 120 files → `001..120`) so results sort in numbered order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamePattern {
     segments: Vec<Segment>,
@@ -415,14 +327,10 @@ enum Segment {
 }
 
 impl NamePattern {
-    /// Parse a pattern. `None` on anything malformed — an unclosed
-    /// brace, or an unrecognized placeholder.
-    ///
-    /// An unknown `{whatever}` is rejected rather than kept as literal
-    /// text on purpose: it is far more likely a typo for a real
-    /// placeholder than a deliberate request to put braces in a hundred
-    /// filenames, and the cost of guessing wrong is a batch of files
-    /// literally named `shot-{nmae}.png`.
+    /// Parse a pattern. `None` on an unclosed brace or an unrecognized
+    /// placeholder — an unknown `{whatever}` is far likelier a typo than a
+    /// request for literal braces, and guessing wrong renames a hundred
+    /// files to `shot-{nmae}.png`.
     pub fn parse(text: &str) -> Option<Self> {
         let mut segments = Vec::new();
         let mut literal = String::new();
@@ -454,9 +362,8 @@ impl NamePattern {
         (!segments.is_empty()).then_some(Self { segments })
     }
 
-    /// Does this pattern render a different name per file? A pattern of
-    /// pure literals ("rename screenshots to shot.png") collapses every
-    /// match onto one name, which is only meaningful for a single file.
+    /// Does this render a different name per file? Pure literals collapse
+    /// every match onto one name, which only works for a single file.
     pub fn varies_per_file(&self) -> bool {
         self.segments
             .iter()
@@ -488,25 +395,21 @@ impl NamePattern {
 // ---------------------------------------------------------------------
 
 /// The user's well-known folders, by the names a person calls them.
-///
-/// Injected rather than read from the environment at use time so that
-/// plan building stays deterministic and testable against a tempdir —
-/// the same reason `now` is a parameter throughout this module.
+/// Injected rather than read at use time so plan building stays
+/// deterministic and testable against a tempdir.
 #[derive(Debug, Clone, Default)]
 pub struct UserDirs {
     by_name: HashMap<String, PathBuf>,
 }
 
 impl UserDirs {
-    /// Read the real ones from the OS. `dirs` resolves these per
-    /// platform (XDG user dirs on Linux, `NSSearchPathForDirectory` on
-    /// macOS, the Known Folder API on Windows), so no name here is
-    /// hard-coded to one platform's layout. Missing folders are simply
-    /// absent — a destination naming one then reports
+    /// Read the real ones from the OS. `dirs` resolves these per platform
+    /// (XDG, `NSSearchPathForDirectory`, Known Folder API), so nothing
+    /// here is hard-coded to one layout. Missing folders are absent, so a
+    /// destination naming one reports
     /// [`PlanError::UnknownDestination`] rather than inventing a path.
     ///
-    /// Does I/O-ish environment lookups; call once at startup, not per
-    /// keystroke.
+    /// Does environment lookups; call at startup, not per keystroke.
     pub fn from_os() -> Self {
         let sources: [(&[&str], Option<PathBuf>); 7] = [
             (&["documents", "docs"], dirs::document_dir()),
@@ -544,28 +447,21 @@ impl UserDirs {
 /// What a plan needs from the world beyond the command itself.
 #[derive(Debug, Clone, Copy)]
 pub struct PlanContext<'a> {
-    /// The folder being browsed. A destination is looked up here first —
-    /// a folder you can see beats one you can't.
+    /// The folder being browsed; destinations resolve here first.
     pub cwd: &'a Path,
     pub dirs: &'a UserDirs,
 }
 
-/// Turn a spelled destination into a real directory.
+/// Turn a spelled destination into a real directory. A subfolder of the
+/// folder on screen wins over a same-named known folder ("move these to
+/// Archive" means the one you're looking at); known folders are the
+/// fallback, which is what makes "to Documents" work from anywhere.
 ///
-/// Resolution order is deliberate: a subfolder of the folder currently
-/// on screen wins over a same-named known folder, because "move these to
-/// Archive" means the Archive you are looking at. Only if the current
-/// folder has no such child does it fall back to the user's known
-/// folders, which is what makes "to Documents" work from anywhere.
-///
-/// The current-folder lookup goes through a directory scan, preferring
-/// an exact-case hit, rather than probing `cwd.join(name)` first. That
-/// matters for cross-platform consistency: on the case-insensitive
-/// filesystems Windows and macOS default to, a join probe succeeds for
-/// "archive" and hands back a path spelled the way the user typed it,
-/// while the same probe resolves nothing on Linux — one command
-/// producing a differently-spelled destination per OS. Scanning yields
-/// the folder's true on-disk name everywhere.
+/// The current-folder lookup scans the directory preferring an exact-case
+/// hit, rather than probing `cwd.join(name)`. A join probe succeeds on
+/// case-insensitive Windows/macOS and hands back the user's spelling
+/// while resolving nothing on Linux — one command, a different
+/// destination per OS. Scanning yields the true on-disk name everywhere.
 pub fn resolve_destination(dest: &Destination, ctx: &PlanContext) -> Result<PathBuf, PlanError> {
     let mut case_insensitive: Option<PathBuf> = None;
     if let Ok(entries) = std::fs::read_dir(ctx.cwd) {
@@ -573,8 +469,7 @@ pub fn resolve_destination(dest: &Destination, ctx: &PlanContext) -> Result<Path
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            // Compare names before stat'ing: a folder with many entries
-            // shouldn't cost one metadata call per child.
+            // Compare names before stat'ing — no metadata call per child.
             let exact = name == dest.name;
             if (!exact && !name.eq_ignore_ascii_case(&dest.name)) || !entry.path().is_dir() {
                 continue;
@@ -588,8 +483,7 @@ pub fn resolve_destination(dest: &Destination, ctx: &PlanContext) -> Result<Path
     if let Some(path) = case_insensitive {
         return Ok(path);
     }
-    // A multi-segment destination ("into projects/archive") is not a
-    // single directory entry, so it needs a direct probe.
+    // A multi-segment destination isn't one directory entry.
     let nested = ctx.cwd.join(&dest.name);
     if nested.is_dir() {
         return Ok(nested);
@@ -605,17 +499,13 @@ pub fn resolve_destination(dest: &Destination, ctx: &PlanContext) -> Result<Path
 // Plan building
 // ---------------------------------------------------------------------
 
-/// Resolve `command` against the files the search actually matched.
+/// Resolve `command` against the files the search matched.
 ///
-/// `matches` is sorted by path before anything else, so a plan — and in
-/// particular a rename's `{n}` numbering — depends only on *which* files
-/// matched, never on the order the search happened to return them in.
-///
-/// Files with nothing to do are dropped rather than turned into
-/// operations that would fail at apply time: a file already in the
-/// destination folder, or already carrying the name the pattern renders.
-/// [`Plan::skipped`] counts them so the card can account for the
-/// difference between what the search found and what the plan does.
+/// `matches` is sorted by path first, so a plan — and a rename's `{n}`
+/// numbering in particular — depends only on *which* files matched, not
+/// the order search returned them. Files with nothing to do are dropped
+/// rather than becoming ops that fail at apply time; [`Plan::skipped`]
+/// counts them.
 pub fn build(command: &Command, matches: &[PathBuf], ctx: &PlanContext) -> Result<Plan, PlanError> {
     if matches.is_empty() {
         return Err(PlanError::NoMatches);
@@ -649,22 +539,14 @@ pub fn build(command: &Command, matches: &[PathBuf], ctx: &PlanContext) -> Resul
 
 /// Move/copy operations into a resolved destination directory.
 ///
-/// Two kinds of match are skipped rather than planned. A file already
-/// sitting in the destination has nothing to do. And a *directory* that
-/// contains the destination cannot be moved or copied into it — that is
-/// the classic "move a folder inside itself" recursion, and it is
-/// skipped here so one degenerate match doesn't void an otherwise fine
-/// plan.
+/// Skipped rather than planned: a file already in the destination, and a
+/// directory that *contains* the destination (moving a folder inside
+/// itself) — so one degenerate match doesn't void a fine plan.
 ///
-/// **Collisions are resolved, not refused.** Two matched files sharing a
-/// base name — `a/ROADMAP.md` and `b/ROADMAP.md` both moving to
-/// `Downloads` — would land on one path. Rather than void the whole plan
-/// (the old behaviour: "two files would both become …"), the second is
-/// retargeted to the first free `name 2` variant, exactly as the execute
-/// path, paste and drag already do. The destination folder is read once
-/// up front so this costs one `read_dir`, not a stat per file, and the
-/// preview then shows the real outcome (`… → Downloads/ROADMAP 2.md`)
-/// instead of a dead end.
+/// **Collisions are resolved, not refused.** Two matches sharing a base
+/// name retarget to the first free `name 2` variant, as the execute,
+/// paste and drag paths already do, so the preview shows the real
+/// outcome. One `read_dir` up front, not a stat per file.
 fn transfer_ops(
     matches: &[PathBuf],
     dest: &Destination,
@@ -672,9 +554,8 @@ fn transfer_ops(
     moving: bool,
 ) -> Result<Vec<FileOp>, PlanError> {
     let dir = resolve_destination(dest, ctx)?;
-    // Names already spoken for in `dir`: what is on disk now, plus what
-    // earlier ops in this plan have claimed. Checked in memory so the
-    // common no-collision plan does no per-file I/O.
+    // Names spoken for in `dir`: on disk now, plus what earlier ops in
+    // this plan claimed. In memory, so no per-file I/O.
     let mut taken: HashSet<String> = HashSet::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -709,9 +590,8 @@ fn transfer_ops(
     Ok(ops)
 }
 
-/// The first of `name`, `name 2`, `name 3`… (Finder's convention, split
-/// at the last dot so `x.tar.gz` → `x.tar 2.gz`) that is not already in
-/// `taken`. Returns `name` itself when it is free.
+/// The first of `name`, `name 2`, `name 3`… not in `taken` (Finder's
+/// convention, split at the last dot so `x.tar.gz` → `x.tar 2.gz`).
 fn free_variant(name: &str, taken: &HashSet<String>) -> String {
     if !taken.contains(name) {
         return name.to_owned();
@@ -728,8 +608,8 @@ fn free_variant(name: &str, taken: &HashSet<String>) -> String {
             return candidate;
         }
     }
-    // Pathological: 10k variants all taken. Fall back to the original —
-    // execute-time `next_free_name` gets one more chance to resolve it.
+    // 10k variants taken: fall back and let execute-time
+    // `next_free_name` have one more go.
     name.to_owned()
 }
 
@@ -744,8 +624,7 @@ fn rename_ops(matches: &[PathBuf], pattern: &NamePattern) -> Result<Vec<FileOp>,
         if !is_valid_file_name(&new_name) {
             return Err(PlanError::InvalidName(new_name));
         }
-        // Already called that — nothing to do, and renaming a file onto
-        // its own name would fail the "already exists" check.
+        // Already called that; renaming onto itself trips "already exists".
         if path
             .file_name()
             .is_some_and(|current| current == new_name.as_str())
@@ -760,14 +639,12 @@ fn rename_ops(matches: &[PathBuf], pattern: &NamePattern) -> Result<Vec<FileOp>,
     Ok(ops)
 }
 
-/// Reject a plan whose own operations would land two files on one path.
-/// This is the failure a bad rename pattern produces, and catching it
-/// here means the preview never shows a checklist that cannot complete.
+/// Reject a plan whose own ops would land two files on one path — what a
+/// bad rename pattern produces, caught before the preview shows it.
 fn check_collisions(ops: &[FileOp]) -> Result<(), PlanError> {
-    // A set, not a `Vec` + `contains`: this runs on the UI thread from
-    // `rebuild_magic_plan`, once per rebuild, and the linear scan made it
-    // quadratic — ~240k `PathBuf` comparisons for a 697-file plan and
-    // ~500k at `MAX_PLAN_OPS`.
+    // A set, not `Vec` + `contains`: this runs on the UI thread per
+    // rebuild, and the linear scan was quadratic (~240k `PathBuf`
+    // comparisons for a 697-file plan).
     let mut seen: HashSet<PathBuf> = HashSet::with_capacity(ops.len());
     for op in ops {
         if let Some(dest) = op.destination()
@@ -779,8 +656,7 @@ fn check_collisions(ops: &[FileOp]) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// The same name rules [`crate::ops`] enforces at apply time, checked
-/// early so a doomed rename never reaches the preview.
+/// [`crate::ops`]'s apply-time name rules, checked before the preview.
 fn is_valid_file_name(name: &str) -> bool {
     !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".."
 }

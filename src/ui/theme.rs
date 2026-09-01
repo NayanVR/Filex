@@ -1,13 +1,8 @@
-//! The color theme.
-//!
-//! A [`Theme`] is a flat set of semantic color slots (background, text,
-//! accent, …) that every component styles itself from — no component
-//! references a raw hex value. Two built-in palettes ship: [`Theme::dark`]
-//! (the original look) and [`Theme::light`] (the Finder-class light
-//! skin). The active theme lives in GPUI's global state, so any render
-//! method or element can reach it through [`ActiveTheme::theme`]; the
-//! workspace swaps the global when the `theme` setting or the OS
-//! appearance changes.
+//! The color theme: a flat set of semantic color slots every component
+//! styles itself from, so no component references a raw hex value. Two
+//! palettes ship, [`Theme::dark`] and [`Theme::light`]. The active theme
+//! lives in GPUI's global state, reachable via [`ActiveTheme::theme`]; the
+//! workspace swaps it when the setting or OS appearance changes.
 
 use gpui::{App, Global, Rgba, WindowAppearance, rgb, rgba};
 

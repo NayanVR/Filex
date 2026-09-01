@@ -1,20 +1,12 @@
-//! Recently-opened folders and files, and the visit history that feeds
-//! search frecency.
+//! Recently-opened folders and files, and the visit history feeding search
+//! frecency. A capped set of [`Visit`]s persisted as JSON in the local data
+//! dir; local-only by design, since filenames are private.
 //!
-//! A capped set of [`Visit`]s persisted as JSON in the local data dir.
-//! Local-only by design — filenames are private (the telemetry stance in
-//! docs/roadmap.md), so this never leaves the machine. Pure I/O + list
-//! logic, no GPUI, so it's unit-tested in isolation; the app records into
-//! it and persists off-thread.
-//!
-//! This store serves two consumers with different needs (see
-//! `docs/design-search-ranking.md`):
-//!
-//! - the **sidebar**, which wants the last [`DISPLAY`] paths in
-//!   most-recent-first order ([`Recents::recent_paths`]);
-//! - **search stage-B re-ranking**, which wants a decayed weight per path
-//!   ([`Recents::score_table`]) — hence [`CAP`] is far larger than what
-//!   the sidebar shows.
+//! Two consumers with different needs: the **sidebar** wants the last
+//! [`DISPLAY`] paths most-recent-first ([`Recents::recent_paths`]), while
+//! **stage-B re-ranking** wants a decayed weight per path
+//! ([`Recents::score_table`]) — hence [`CAP`] far exceeds what the sidebar
+//! shows.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,10 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::frecency;
 
-/// How many visits are kept. Sized for ranking, not for display: it is
-/// the pool search re-ranks against. Eviction is lowest-score-first (see
-/// [`Recents::record_at`]), so a long-lived favourite is not pushed out
-/// by a burst of one-offs.
+/// How many visits are kept — sized for ranking, not display. Eviction is
+/// lowest-score-first, so a long-lived favourite survives a burst of
+/// one-offs.
 pub const CAP: usize = 200;
 
 /// How many the sidebar shows.
@@ -45,13 +36,10 @@ pub struct Visit {
     pub path: PathBuf,
     pub weight: f32,
     pub last_opened: i64,
-    /// Whether the user ever opened this path itself, as opposed to it
-    /// only earning parent credit from a child. Ranking counts both;
-    /// the sidebar shows only the former, since a directory the user
-    /// never opened is not something they "recently opened".
-    ///
-    /// Defaults to `true` so pre-parent-credit records (and the legacy
-    /// migration, which only ever held opened paths) stay displayed.
+    /// Whether the user opened this path itself, as opposed to only
+    /// earning parent credit from a child. Ranking counts both; the sidebar
+    /// shows only the former. Defaults to `true` so pre-parent-credit and
+    /// legacy-migrated records stay displayed.
     #[serde(default = "default_true")]
     pub opened: bool,
 }
@@ -61,12 +49,9 @@ fn default_true() -> bool {
 }
 
 /// The parent directory worth crediting when `path` is opened, if any.
-///
-/// Filesystem roots are excluded: `/` (and `C:\`, and a UNC share root)
-/// is an ancestor of everything, so crediting it ranks nothing relative
-/// to anything else while adding a junk entry to the store. Detected as
-/// "a parent with no parent of its own", which holds on all three target
-/// platforms without a `#[cfg]`.
+/// Filesystem roots are excluded — an ancestor of everything ranks nothing
+/// relative to anything while adding a junk entry. Detected as "a parent
+/// with no parent of its own", which holds on all three platforms.
 fn creditable_parent(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     if parent == path || parent.parent().is_none() {
@@ -82,13 +67,10 @@ pub struct Recents {
 }
 
 impl Recents {
-    /// Load from `file`. A missing or unreadable/corrupt file is treated
-    /// as empty — recents are a convenience, never worth failing over.
-    ///
-    /// Also accepts the **legacy format** (a bare JSON array of paths,
-    /// what shipped before frecency): those migrate to weight 1 stamped
-    /// at load time, so an existing user's list survives the upgrade with
-    /// their most-recent entries ordered as they were.
+    /// Load from `file`. A missing or corrupt file reads as empty —
+    /// recents are a convenience, never worth failing over. Also accepts
+    /// the **legacy format** (a bare JSON array of paths), migrating those
+    /// to weight 1 stamped at load time so order survives the upgrade.
     pub fn load(file: &Path) -> Self {
         let Ok(contents) = std::fs::read_to_string(file) else {
             return Self::default();
@@ -146,13 +128,11 @@ impl Recents {
         self.record_at(path, frecency::now_secs());
     }
 
-    /// [`record`](Self::record) with an explicit clock.
-    ///
-    /// Adds a full open to `path` and [`PARENT_CREDIT`] to its parent
-    /// directory, decaying each existing weight to `now` first (the
-    /// decay-on-write model). The visited path moves to the front, so
-    /// stored order stays most-recent-first for the sidebar; eviction
-    /// past [`CAP`] drops the *lowest-scoring* visit, not the oldest.
+    /// [`record`](Self::record) with an explicit clock. Adds a full open to
+    /// `path` and [`PARENT_CREDIT`] to its parent, decaying each existing
+    /// weight to `now` first. The visited path moves to the front, keeping
+    /// stored order most-recent-first; eviction past [`CAP`] drops the
+    /// *lowest-scoring* visit, not the oldest.
     ///
     /// [`PARENT_CREDIT`]: crate::frecency::PARENT_CREDIT
     pub fn record_at(&mut self, path: PathBuf, now: i64) {
@@ -163,10 +143,9 @@ impl Recents {
         self.evict(now);
     }
 
-    /// Add `amount` to `path`'s decayed weight. `direct` distinguishes a
-    /// real open (moves to the front of the display list, marks the visit
-    /// [`opened`](Visit::opened)) from parent credit, which updates the
-    /// score without claiming the parent is what the user opened.
+    /// Add `amount` to `path`'s decayed weight. `direct` marks a real open
+    /// (moves to the front, sets [`opened`](Visit::opened)) versus parent
+    /// credit, which scores without claiming the user opened the parent.
     fn credit(&mut self, path: PathBuf, amount: f32, now: i64, direct: bool) {
         let existing = self.visits.iter().position(|v| v.path == path);
         let mut visit = match existing {
@@ -219,12 +198,10 @@ impl Recents {
         });
     }
 
-    /// Path → current frecency score, for search re-ranking (stage B).
-    ///
-    /// Owned so the app can cache it behind an `Arc` and hand it to a
-    /// background search task; it is rebuilt when visits change, not per
-    /// keystroke. Never consulted per scanned entry — resolving a path
-    /// inside the index scan is exactly what the design forbids.
+    /// Path → current frecency score, for stage-B search re-ranking. Owned
+    /// so the app can cache it behind an `Arc` for background tasks;
+    /// rebuilt when visits change, not per keystroke. Never consulted per
+    /// scanned entry — resolving a path inside the scan is forbidden.
     pub fn score_table(&self, now: i64) -> HashMap<PathBuf, f32> {
         self.visits
             .iter()

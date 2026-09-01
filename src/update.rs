@@ -1,27 +1,19 @@
 //! Update manifest parsing, version comparison, and payload verification.
-//!
-//! Pure and **network-free**: this module never touches the network or the
-//! filesystem. The downloader (network) and the platform apply paths live
-//! elsewhere (roadmap: distribution blocks 2 and 3). Here we only decide
-//! *whether* an update applies and *whether* an already-downloaded payload
-//! is authentic. Keeping the safety-critical verification logic pure makes
-//! it unit-testable against fixtures with no I/O.
+//! Decides *whether* an update applies and *whether* a downloaded payload
+//! is authentic; the platform apply paths live elsewhere.
 //!
 //! # Security model
 //!
 //! Filex ships without OS code signing, and on Windows the updater runs as
-//! **LocalSystem**. An unverified payload would therefore be a SYSTEM-level
-//! RCE vector on every user's machine. Every downloaded artifact MUST pass
-//! [`Manifest::verify_payload`] — an Ed25519 signature check over the
-//! artifact bytes — before any install step runs. The public key is
-//! embedded in the shipping binaries; the private key exists only in CI.
-//! See `docs/design-distribution.md` §4.
+//! **LocalSystem** — an unverified payload would be a SYSTEM-level RCE
+//! vector. Every artifact MUST pass [`Manifest::verify_payload`] (Ed25519
+//! over the artifact bytes) before any install step. The public key is
+//! embedded in shipping binaries; the private key exists only in CI. See
+//! `docs/design-distribution.md` §4.
 //!
-//! Wire encoding: the manifest is JSON, and the `sha256`, `signature`, and
-//! the embedded public key are all lowercase **hex**. We use a raw Ed25519
-//! detached signature over the full artifact bytes (not the minisign
-//! envelope) so verification needs no external tooling and fixtures are
-//! reproducible from a fixed seed.
+//! Wire encoding: JSON manifest; `sha256`, `signature` and the public key
+//! are lowercase hex. A raw detached Ed25519 signature (not the minisign
+//! envelope), so verification needs no external tooling.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,10 +31,8 @@ const ED25519_PUBLIC_KEY_LEN: usize = 32;
 const ED25519_SIGNATURE_LEN: usize = 64;
 
 /// A parsed update manifest (one per platform), served over HTTPS.
-///
-/// `minimum_version` is reserved for a future forced-reinstall path and is
-/// **not enforced in v1** (see `docs/design-distribution.md` decision 8) —
-/// it is parsed and preserved but no code acts on it yet.
+/// `minimum_version` is parsed and preserved but **not enforced** — it is
+/// reserved for a future forced-reinstall path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     /// Semver of the release this manifest describes, e.g. `"1.4.0"`.
@@ -60,10 +50,8 @@ pub struct Manifest {
 }
 
 /// Everything that can go wrong parsing a manifest or verifying a payload.
-///
-/// Variants are deliberately fine-grained so the updater — and the tests —
-/// can distinguish "this download was corrupted" from "this download was
-/// *tampered with*" from "the manifest was malformed".
+/// Fine-grained on purpose, so the updater and the tests can tell
+/// "corrupted" from "*tampered with*" from "malformed manifest".
 #[derive(Debug)]
 pub enum UpdateError {
     /// The manifest JSON did not parse.
@@ -139,12 +127,10 @@ impl Manifest {
         Ok(self.version()? > parse_version(current)?)
     }
 
-    /// Verify a downloaded artifact against this manifest.
-    ///
-    /// Runs the cheap SHA-256 corruption check first, then the
-    /// authoritative Ed25519 signature check. Returns `Ok(())` only if the
-    /// payload is authentic; **the caller must not install unless this
-    /// returns `Ok`**. `public_key_hex` is the embedded, trusted key.
+    /// Verify a downloaded artifact against this manifest: the cheap
+    /// SHA-256 corruption check, then the authoritative Ed25519 signature.
+    /// **The caller must not install unless this returns `Ok`.**
+    /// `public_key_hex` is the embedded, trusted key.
     pub fn verify_payload(&self, data: &[u8], public_key_hex: &str) -> Result<(), UpdateError> {
         // 1. Fast integrity pre-check: catch a truncated/corrupted download
         //    before spending a signature verification on it.
@@ -171,10 +157,10 @@ impl Manifest {
     }
 }
 
-/// Generate a fresh Ed25519 keypair for release signing, returned as
-/// `(public_hex, private_hex)`. Run **once** (via `filex-sign keygen`):
-/// embed the public key in the shipping binaries, store the private key as
-/// a CI secret and nowhere else. Uses OS randomness for the 32-byte seed.
+/// Generate a fresh Ed25519 keypair for release signing, as
+/// `(public_hex, private_hex)`. Run **once** via `filex-sign keygen`: embed
+/// the public key in shipping binaries, store the private key as a CI
+/// secret and nowhere else. OS randomness for the 32-byte seed.
 pub fn generate_keypair() -> Result<(String, String), UpdateError> {
     use ed25519_dalek::SigningKey;
     let mut seed = [0u8; 32];
@@ -186,10 +172,10 @@ pub fn generate_keypair() -> Result<(String, String), UpdateError> {
     ))
 }
 
-/// Sign a release artifact: returns its lowercase-hex SHA-256 and the hex
-/// Ed25519 signature over its bytes, from a hex-encoded private key. The
-/// exact counterpart to [`Manifest::verify_payload`] — living in the same
-/// module guarantees the wire format can't drift. Used by `filex-sign`.
+/// Sign a release artifact: its lowercase-hex SHA-256 and the hex Ed25519
+/// signature over its bytes. The counterpart to
+/// [`Manifest::verify_payload`], kept in the same module so the wire
+/// format can't drift. Used by `filex-sign`.
 pub fn sign_artifact(private_key_hex: &str, data: &[u8]) -> Result<(String, String), UpdateError> {
     use ed25519_dalek::{Signer, SigningKey};
     let seed = hex_decode(private_key_hex, "private_key")?;
@@ -246,12 +232,9 @@ fn hex_decode(s: &str, field: &'static str) -> Result<Vec<u8>, UpdateError> {
     Ok(out)
 }
 
-/// A shared, cheap cancellation flag for an in-flight download.
-///
-/// Cloneable (it's an `Arc<AtomicBool>` inside), so the update loop can
-/// hold one copy and hand another to the fetch. The concrete fetcher polls
-/// [`CancelFlag::is_cancelled`] between chunks so a large download aborts
-/// promptly when the user quits or a newer manifest supersedes it.
+/// A shared cancellation flag for an in-flight download. Cloneable, so the
+/// update loop keeps one copy and hands another to the fetch, which polls
+/// [`CancelFlag::is_cancelled`] between chunks.
 #[derive(Clone, Default)]
 pub struct CancelFlag(Arc<AtomicBool>);
 
@@ -308,18 +291,14 @@ pub enum UpdateAction {
     Apply { version: String, payload: Vec<u8> },
 }
 
-/// Fetch the manifest's artifact and return its bytes **only if authentic**.
+/// Fetch the manifest's artifact and return its bytes **only if
+/// authentic** — the integrity gate every platform's apply path goes
+/// through. The network is injected as `fetch`, keeping this unit-testable
+/// with a mock; the real HTTPS fetcher is [`http_fetch`].
 ///
-/// This is the integrity gate every platform's apply path goes through. The
-/// network is injected as `fetch` (keeping this function, and the library,
-/// network-free and unit-testable with a mock — mirroring the injected
-/// sender in `telemetry::drain`). The concrete HTTPS fetcher is
-/// [`http_fetch`], enabled by the `updater` feature.
-///
-/// Order is deliberate: cancellation is honoured before and after the
-/// fetch, and [`Manifest::verify_payload`] runs last. Bytes are returned
-/// **only** on `Ok`; a caller must never touch an installer with anything
-/// this function did not hand back.
+/// Order is deliberate: cancellation before and after the fetch,
+/// [`Manifest::verify_payload`] last. A caller must never touch an
+/// installer with anything this function did not hand back.
 pub fn download_and_verify<F>(
     fetch: F,
     manifest: &Manifest,
@@ -363,13 +342,10 @@ where
 #[cfg(feature = "updater")]
 const MAX_ARTIFACT_BYTES: usize = 500 * 1024 * 1024;
 
-/// Concrete HTTPS fetcher used by the app and the Windows index service.
-///
-/// Streams the body, polling `cancel` between chunks so an abort takes
-/// effect promptly, and refuses a body larger than [`MAX_ARTIFACT_BYTES`].
-/// Lives behind the `updater` feature so the default library build stays
-/// network-free (the `lib` invariant in Cargo.toml). Pass it straight to
-/// [`download_and_verify`].
+/// Concrete HTTPS fetcher for the app and the Windows index service.
+/// Streams the body polling `cancel` between chunks, and refuses one
+/// larger than [`MAX_ARTIFACT_BYTES`]. Behind the `updater` feature so the
+/// default library build stays network-free.
 #[cfg(feature = "updater")]
 pub fn http_fetch(url: &str, cancel: &CancelFlag) -> Result<Vec<u8>, String> {
     use std::io::Read;
@@ -398,14 +374,11 @@ pub fn http_fetch(url: &str, cancel: &CancelFlag) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// Run the full check → download → verify pipeline with the network
-/// injected as `fetch` (used for both the manifest and the artifact, keyed
-/// by URL). Returns [`UpdateAction::Apply`] **only** when a strictly-newer,
-/// authentic payload is in hand — so the platform apply path (staging +
-/// `msiexec`) can treat `Apply` as "safe to install" without re-checking.
-///
-/// Network-free and fully unit-testable: the real caller passes
-/// [`http_fetch`]; tests pass a mock that dispatches on URL.
+/// Run the full check → download → verify pipeline, network injected as
+/// `fetch` (keyed by URL, for both manifest and artifact). Returns
+/// [`UpdateAction::Apply`] **only** with a strictly-newer, authentic
+/// payload in hand, so the apply path can treat it as "safe to install".
+/// Tests pass a mock that dispatches on URL.
 pub fn check_for_update<F>(
     fetch: F,
     manifest_url: &str,
@@ -452,12 +425,10 @@ fn classify_fetch_error(cancel: &CancelFlag, msg: String) -> DownloadError {
     }
 }
 
-/// The `msiexec` arguments that silently apply a staged MSI.
-///
-/// `/qn` is fully silent (the SYSTEM service has no UI); `/norestart`
-/// forbids an unattended machine reboot — the service restart is the MSI's
-/// `ServiceControl` job, and the UI is coordinated separately (block 4).
-/// Pure string logic so it's unit-testable off-Windows.
+/// The `msiexec` arguments that silently apply a staged MSI. `/qn` is
+/// fully silent (the SYSTEM service has no UI); `/norestart` forbids an
+/// unattended reboot — the service restart is the MSI's `ServiceControl`
+/// job. Pure string logic, unit-testable off-Windows.
 pub fn msiexec_args(msi_path: &str) -> Vec<String> {
     vec![
         "/i".into(),
@@ -468,12 +439,10 @@ pub fn msiexec_args(msi_path: &str) -> Vec<String> {
 }
 
 /// A lightweight "is a newer version available?" check for platforms that
-/// do **not** self-install — macOS (`brew upgrade`) and Linux (re-download
-/// the tarball). It fetches and parses the manifest and compares versions
-/// only; it deliberately does **not** download or verify an artifact,
-/// because the UI just shows a notice and the package manager performs the
-/// actual (independently verified) install. Returns the new version string
-/// when one is available.
+/// do **not** self-install — macOS (`brew upgrade`) and Linux. Parses the
+/// manifest and compares versions only; deliberately does not download or
+/// verify an artifact, since the package manager performs the actual
+/// (independently verified) install.
 pub fn check_for_newer_version<F>(
     fetch: F,
     manifest_url: &str,
@@ -500,12 +469,10 @@ where
     }
 }
 
-// --- UI-facing status model (block 4) --------------------------------------
+// --- UI-facing status model ------------------------------------------------
 //
-// Kept here, GPUI-free, so the presentation is unit-testable and the same
-// model serves every platform's very different update UX (silent service +
-// restart on Windows, `brew upgrade` on macOS, re-download on Linux). The
-// GPUI banner (`src/ui/update_banner.rs`) only renders what these produce.
+// GPUI-free, so it is unit-testable and one model serves every platform's
+// very different update UX. `src/ui/update_banner.rs` only renders it.
 
 /// How the user acts on an available update — differs by platform.
 #[derive(Debug, Clone, PartialEq, Eq)]

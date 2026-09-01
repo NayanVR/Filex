@@ -1,9 +1,7 @@
-//! Multi-root coordination: the persisted root list, validation for
-//! adding roots, and merged search across several volume indexes.
-//!
-//! Each root is its own [`super::LiveIndex`] (own watcher, writer, and
-//! snapshot); this module only holds the logic that spans them, kept
-//! GUI-free so it's testable — the async orchestration lives in the app.
+//! Multi-root coordination: the persisted root list, add-root validation,
+//! and merged search across volume indexes. Each root is its own
+//! [`super::LiveIndex`]; this holds only the logic spanning them, GUI-free
+//! so it's testable. The async orchestration lives in the app.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,17 +14,13 @@ use super::{Score, SearchHit};
 use crate::search_filter::Filter;
 
 /// A rayon pool dedicated to search scans, isolated from the global pool
-/// the writer's directory walks (`jwalk`) use.
+/// the writer's `jwalk` directory walks use.
 ///
-/// Optimization B removed the reader/writer *lock* convoy, but reads and
-/// the writer's walks still shared rayon's global pool — so a big
-/// filesystem burst (a `jwalk` over a large moved-in tree) could saturate
-/// every worker and starve keystroke searches of threads, spiking search
-/// latency to ~1 s during the burst even with no lock involved. A separate
-/// pool guarantees a search always has threads of its own to run on; the
-/// two pools may briefly oversubscribe the cores during a burst, but the
-/// OS time-slices them, so search progresses instead of waiting behind the
-/// walk's tasks.
+/// Optimization B removed the lock convoy, but reads and walks still shared
+/// rayon's global pool — a big filesystem burst saturated every worker and
+/// starved keystroke searches, spiking latency to ~1 s with no lock
+/// involved. A separate pool guarantees search always has threads. The two
+/// may briefly oversubscribe the cores, but the OS time-slices them.
 fn search_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
@@ -127,14 +121,11 @@ const OVERFETCH: usize = 4;
 /// name-length tiebreak, exactly as the pre-frecency tuple ordering did.
 const PENALTY_SCALE: i64 = 1_024;
 
-/// The most a frecency boost can improve a hit's rank.
-///
-/// Applied *within* a [`MatchKind`] tier, never across tiers, so a
-/// frequently-opened file can win a near-tie but can never hijack a
-/// query it barely matches. Comfortably larger than any `name_len`
-/// (so frecency beats the name-length tiebreak between two equally good
-/// literal matches) and a few `PENALTY_SCALE` units (so among fuzzy hits
-/// it only overturns close calls).
+/// The most a frecency boost can improve a hit's rank. Applied *within* a
+/// [`MatchKind`] tier, never across, so a frequently-opened file wins
+/// near-ties but never hijacks a query it barely matches. Larger than any
+/// `name_len` (beating the length tiebreak) and a few `PENALTY_SCALE`
+/// units (so among fuzzy hits it only overturns close calls).
 const MAX_BOOST: i64 = 4 * PENALTY_SCALE;
 
 /// Frecency score at which a hit earns the full [`MAX_BOOST`]. Roughly
@@ -156,22 +147,17 @@ fn rank_of(score: Score, boost: i64) -> i64 {
     score.penalty as i64 * PENALTY_SCALE + score.name_len as i64 - boost
 }
 
-/// Rank penalty for files under an OS/system directory, applied as a
-/// negative boost. Like the frecency boost it acts *within* a match tier,
-/// never across tiers (the sort keys on [`Score::kind`] first): so a
-/// system file that is an exact match still beats a user file that only
-/// matches loosely — system files are de-prioritized among equals, not
-/// hidden. Sized at the full [`MAX_BOOST`] so it reliably sinks a system
-/// file below a user file of equal match quality, yet stays comparable to
-/// frecency so a genuinely often-opened system file isn't buried absurdly.
+/// Rank penalty for files under an OS/system directory, a negative boost.
+/// Acts *within* a match tier like frecency, so an exact-match system file
+/// still beats a loosely-matching user file — de-prioritized among equals,
+/// not hidden. Sized at [`MAX_BOOST`] to reliably sink a system file below
+/// an equal user file while staying comparable to frecency.
 const SYSTEM_PATH_PENALTY: i64 = MAX_BOOST;
 
 /// Whether `path` lives under a top-level OS/system directory. A cheap
-/// check on the first real component under the drive/root — case-
-/// insensitive because Windows paths are — run only for the overfetched
-/// candidate set whose paths the frecency stage already materializes, so
-/// it adds no measurable search latency. Pure, so it's unit-tested against
-/// fixture paths per the indexer testing rule.
+/// case-insensitive check on the first component under the drive/root, run
+/// only for the overfetched candidates whose paths the frecency stage
+/// already materializes, so it adds no measurable latency.
 fn is_system_path(path: &Path) -> bool {
     use std::path::Component;
     // The first "Normal" component skips the drive prefix (`C:`) and the
@@ -186,13 +172,10 @@ fn is_system_path(path: &Path) -> bool {
 }
 
 /// Search every index and merge by the same ranking a single index uses.
-/// Locks are taken one index at a time, read-only; a poisoned index still
-/// answers.
-///
-/// `frecency` is the path → score table from [`crate::recents`], applied
-/// as **stage B**: the scan overfetches, paths get resolved for those
-/// candidates only, and the boost reorders them. Pass an empty table to
-/// rank on match quality alone.
+/// Locks are taken one at a time, read-only; a poisoned index still
+/// answers. `frecency` (from [`crate::recents`]) is **stage B**: the scan
+/// overfetches, paths resolve for those candidates only, and the boost
+/// reorders. An empty table ranks on match quality alone.
 pub fn search_all(
     indexes: &[SharedIndex],
     query: &str,
@@ -211,21 +194,15 @@ pub fn search_all(
     )
 }
 
-/// [`search_all`], abortable mid-scan and optionally scoped to a
-/// directory ("Current Dir").
+/// [`search_all`], abortable mid-scan and optionally scoped to a directory
+/// ("Current Dir").
 ///
-/// A newer keystroke sets `cancel`, and both the arena scan and the path
-/// materialization below wind down — the latter matters because
-/// materializing paths for an overfetched (`limit * OVERFETCH`) candidate
-/// set walks a parent chain per hit under the read lock, which must not
-/// keep running once the query it belongs to is stale.
-///
-/// `scope_dir`, when set, limits results to that directory's subtree.
-/// Resolution happens *here*, under each index's read lock, rather than on
-/// the UI thread: an index whose root does not contain `scope_dir` is
-/// skipped, and within the containing index the directory resolves to the
-/// [`ScanCtl::scope`] entry. A `scope_dir` that no index has caught up to
-/// yet simply yields nothing — the folder is not searchable until indexed.
+/// A newer keystroke sets `cancel` and both the arena scan and the path
+/// materialization wind down — the latter matters because materializing an
+/// overfetched candidate set walks a parent chain per hit under the read
+/// lock. `scope_dir` resolves *here*, under each index's read lock rather
+/// than on the UI thread: an index not containing it is skipped, and one
+/// no index has caught up to yields nothing.
 pub fn search_all_scoped(
     indexes: &[SharedIndex],
     query: &str,

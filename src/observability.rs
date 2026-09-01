@@ -1,25 +1,19 @@
 //! Sentry integration (UI process only) — the sole network transport for
-//! crash/error reporting, performance measurements, and release-health
-//! sessions. On-by-default and opt-out: the `crash_reports` setting is
-//! consent (default true) and the only thing that turns this off short of
-//! building without the `observability` feature.
+//! crash/error reporting, measurements, and release-health sessions.
+//! On-by-default, opt-out: the `crash_reports` setting is consent.
 //!
-//! Everything here upholds the same privacy invariant as [`crate::telemetry`]:
-//! **no path-shaped data ever leaves the machine.** It is enforced twice —
-//! the crash reports drained here were already
-//! [`scrub`](crate::telemetry::scrub)bed at capture time, and the
-//! `before_send` / `before_breadcrumb` hooks scrub every live event
-//! (including anything the `sentry-tracing` layer feeds in from `error!` /
-//! `warn!` logs) as a backstop. Sentry is initialised only with the user's
-//! consent and only when a DSN is present in the environment; no DSN ships
-//! in a bare build, so a build without a CI-provided DSN phones home to
-//! nothing.
+//! Same privacy invariant as [`crate::telemetry`]: **no path-shaped data
+//! ever leaves the machine**, enforced twice — drained crash reports were
+//! [`scrub`](crate::telemetry::scrub)bed at capture, and the `before_send`
+//! / `before_breadcrumb` hooks scrub every live event (including what
+//! `sentry-tracing` feeds in) as a backstop. Init requires both consent and
+//! a DSN in the environment, so a build without a CI-provided DSN phones
+//! home to nothing.
 //!
-//! Panics are *not* delivered live here — Sentry's `panic` integration is
-//! deliberately disabled (see Cargo.toml). They are captured by
-//! [`crate::telemetry`]'s hook into a durable on-disk queue and drained via
-//! [`drain_crashes_to_sentry`] on the next launch, which survives aborts and
-//! SIGKILL where an in-process flush would be lost.
+//! Panics are *not* delivered live — Sentry's `panic` integration is
+//! disabled (see Cargo.toml). [`crate::telemetry`]'s hook queues them on
+//! disk and [`drain_crashes_to_sentry`] sends them next launch, which
+//! survives aborts and SIGKILL where an in-process flush would be lost.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -34,16 +28,11 @@ use crate::telemetry::{self, CrashReport};
 /// even with consent granted.
 const DSN_ENV: &str = "FILEX_SENTRY_DSN";
 
-/// The Sentry DSN, or `None` when unset/empty (which disables the whole
-/// integration).
-///
-/// Prefers the *runtime* env var (a dev override), falling back to the DSN
-/// baked in at **compile time** by CI via the same variable. The
-/// compile-time path is what makes shipped builds work: an end user has no
-/// `FILEX_SENTRY_DSN` in their environment, so the DSN must travel in the
-/// binary. A Sentry DSN is a public client key (like the embedded update
-/// public key), not a secret, so embedding it is expected. When CI hasn't
-/// set the variable, `option_env!` yields nothing and Sentry stays off.
+/// The Sentry DSN, or `None` when unset (which disables the integration).
+/// Prefers the runtime env var (a dev override), falling back to the DSN
+/// CI bakes in at compile time — an end user has no `FILEX_SENTRY_DSN`, so
+/// it must travel in the binary. A DSN is a public client key, not a
+/// secret. Without CI setting it, `option_env!` yields nothing.
 fn dsn() -> Option<String> {
     std::env::var(DSN_ENV)
         .ok()
@@ -51,14 +40,10 @@ fn dsn() -> Option<String> {
         .filter(|dsn| !dsn.trim().is_empty())
 }
 
-/// Initialise Sentry for the UI process. Returns the guard that must be
-/// held for the whole process lifetime (dropping it flushes pending events
-/// and disables the client); `None` when disabled by lack of consent or a
-/// missing DSN.
-///
-/// `consent` mirrors the `crash_reports` setting — this must never run
-/// without it. PII is off, no server name is sent, and both the event and
-/// breadcrumb hooks run the path scrubber.
+/// Initialise Sentry for the UI process. The returned guard must be held
+/// for the whole process lifetime (dropping it flushes pending events);
+/// `None` without consent or a DSN. `consent` mirrors the `crash_reports`
+/// setting. PII off, no server name, path scrubber on both hooks.
 pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<ClientInitGuard> {
     if !consent {
         return None;
@@ -75,10 +60,9 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
     } else {
         "release"
     }));
-    // Release health: start a session on init and close it on guard drop, so
-    // Sentry reports crash-free session/user rates and per-release adoption —
-    // the headline insight for a desktop app. Application mode = one session
-    // per process run (not per request).
+    // Release health: a session per process run (application mode), closed
+    // on guard drop, so Sentry reports crash-free rates and per-release
+    // adoption — the headline number for a desktop app.
     options.auto_session_tracking = true;
     options.session_mode = sentry::SessionMode::Application;
     // Attach a stack trace to error events raised via the tracing layer (not
@@ -108,12 +92,10 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
     Some(guard)
 }
 
-/// Scrub every free-text field of an outgoing event. Belt-and-suspenders:
-/// crash events drained from the queue are already scrubbed, but live
-/// events the tracing layer will produce (stage 2) are not — and a stack
-/// frame's `filename`/`abs_path` or an error `value` routinely carries a
-/// path. Losing a little context to over-redaction is the accepted trade,
-/// exactly as in [`crate::telemetry`].
+/// Scrub every free-text field of an outgoing event. Queue-drained crashes
+/// are already scrubbed, but live tracing-layer events are not, and a stack
+/// frame's `filename`/`abs_path` routinely carries a path. Over-redaction
+/// is the accepted trade, as in [`crate::telemetry`].
 fn scrub_event(event: &mut Event) {
     if let Some(message) = event.message.take() {
         event.message = Some(telemetry::scrub(&message));
@@ -178,15 +160,11 @@ fn crash_event(report: &CrashReport) -> Event<'static> {
     event
 }
 
-/// Drain the local crash queue into Sentry, replacing the raw HTTP POST in
-/// the old uploader. A live client and the user's consent are the caller's
-/// precondition. Returns how many reports were handed to the transport.
-///
-/// Fire-and-forget: Sentry's background transport acknowledges delivery
-/// asynchronously, so a report is removed from the queue once captured, not
-/// once confirmed on the wire. The init guard flushes on process exit; a
-/// crash report is best-effort, so a rare loss on immediate shutdown is an
-/// acceptable trade for reusing the durable queue as the offline buffer.
+/// Drain the local crash queue into Sentry. A live client and consent are
+/// the caller's precondition; returns how many reports reached the
+/// transport. Fire-and-forget — a report leaves the queue once captured,
+/// not once confirmed on the wire. The init guard flushes on exit, and a
+/// rare loss on immediate shutdown is acceptable for a best-effort report.
 pub fn drain_crashes_to_sentry(dir: &std::path::Path) -> usize {
     telemetry::drain(dir, |report| {
         sentry::capture_event(crash_event(report));
@@ -194,13 +172,12 @@ pub fn drain_crashes_to_sentry(dir: &std::path::Path) -> usize {
     })
 }
 
-// --- Measurements (stage 3) ------------------------------------------------
+// --- Measurements ----------------------------------------------------------
 //
-// Numeric samples are sent as scrubbed *info events* carrying the values in
-// `extra`, not as performance transactions: events are robust and need no
-// tracing-sampling setup, and they still answer the question ("what are the
-// numbers on real machines?"). The trade is Sentry's native Performance UI
-// — if that's wanted later, these become transaction measurements.
+// Numeric samples go as scrubbed *info events* with the values in `extra`,
+// not performance transactions: robust, no tracing-sampling setup, and they
+// still answer "what are the numbers on real machines?". The trade is
+// Sentry's Performance UI — these become transactions if that's wanted.
 
 /// Build a measurement event: an info-level event named `name` whose
 /// `extra` carries the numeric `fields`. Pure, so the shape is testable.

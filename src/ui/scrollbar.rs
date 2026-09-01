@@ -11,11 +11,10 @@
 //!     .with_decoration(scrollbar(handle, state, &theme))
 //! ```
 //!
-//! It reads its geometry straight from the decoration callback (viewport
-//! bounds, item height, item count) rather than re-measuring, and writes
-//! back through the scroll handle only while the thumb is dragged. So it
-//! adds no per-row work and no layout pass of its own — a hard requirement
-//! for the search-as-you-type / big-folder latency budget.
+//! Geometry comes straight from the decoration callback (viewport bounds,
+//! item height, item count) rather than re-measuring, and writes back only
+//! while the thumb is dragged — no per-row work, no layout pass of its
+//! own, which the big-folder latency budget requires.
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -150,11 +149,10 @@ struct ThumbGeometry {
     offset: f32,
 }
 
-/// Resolve the thumb's height and offset from the list metrics. All inputs
-/// and outputs are pixels; `track_height` is the drawable track (viewport
-/// minus padding). The thumb is proportional to how much of the content
-/// fits, floored at [`MIN_THUMB`] (but never taller than the track, which
-/// also avoids a `clamp` panic on very short viewports).
+/// Resolve the thumb's height and offset from the list metrics, in pixels.
+/// `track_height` is the drawable track (viewport minus padding). The
+/// thumb is proportional to the visible fraction, floored at [`MIN_THUMB`]
+/// and never taller than the track (which also avoids a `clamp` panic).
 fn thumb_geometry(
     viewport: f32,
     content: f32,
@@ -252,12 +250,12 @@ impl Element for Scrollbar {
         let active = inner.dragging || inner.hovered;
         let width = if active { HOVER_WIDTH } else { IDLE_WIDTH };
 
-        // GPUI hands decorations a *content-space* origin: as the list
-        // scrolls down, `bounds.origin.y` is pushed up above the viewport by
-        // the scroll offset (see gpui `uniform_list.rs`, where `bounds` is
-        // shadowed with `padded_bounds.origin + scroll_offset.y` right before
-        // `prepaint_at`). Adding `scroll_top` back recovers the fixed viewport
-        // top so the bar stays pinned instead of scrolling off the top edge.
+        // GPUI hands decorations a *content-space* origin: scrolling down
+        // pushes `bounds.origin.y` above the viewport by the scroll offset
+        // (gpui `uniform_list.rs` shadows `bounds` with
+        // `padded_bounds.origin + scroll_offset.y` before `prepaint_at`).
+        // Adding `scroll_top` back recovers the fixed viewport top, pinning
+        // the bar instead of letting it scroll off.
         let viewport_top = f32::from(bounds.origin.y) + self.scroll_top;
 
         let track_top = viewport_top + PAD;

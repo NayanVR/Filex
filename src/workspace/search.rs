@@ -39,16 +39,14 @@ impl Workspace {
             .update(cx, |input, cx| input.set_text(rewritten, cx));
     }
 
-    /// Run the checked ops as one undo batch — the same background
-    /// executor, `apply_with_progress` and `Journal::record` path that
-    /// paste and drag-and-drop already use, so a Magic plan undoes with
-    /// the same Ctrl+Z as anything else (`docs/design-magic-mode.md` §3).
+    /// Run the checked ops as one undo batch, through the same
+    /// `apply_with_progress` + `Journal::record` path paste and drag use,
+    /// so a Magic plan undoes with the same Ctrl+Z as anything else.
     ///
-    /// Conflicts are resolved the way a multi-item paste resolves them —
-    /// an occupied destination retargets to the next free "name 2"
-    /// variant rather than prompting per file. A plan is reviewed as a
-    /// whole; stopping midway to ask about file 40 of 200 would be a
-    /// worse experience than the batch being uniformly predictable.
+    /// Conflicts resolve as a multi-item paste does — an occupied
+    /// destination retargets to the next free "name 2" rather than
+    /// prompting per file. A plan is reviewed as a whole; stopping to ask
+    /// about file 40 of 200 would be worse than uniform predictability.
     pub(super) fn confirm_magic(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.magic.as_ref() else {
             return;
@@ -147,12 +145,11 @@ impl Workspace {
         });
     }
 
-    /// The search-bar toggle. Clicking it means "give me the other mode
-    /// than what I'm seeing": from any magic view (forced or auto) to a
-    /// forced-off normal search, and from any normal search to forced-on
-    /// magic. Without the forced-off state, clicking the toggle on an
-    /// auto-switched command would set `On` and look like a no-op, and
-    /// there'd be no way back to plain search without editing the query.
+    /// The search-bar toggle: "give me the other mode than what I'm
+    /// seeing". Any magic view → forced-off normal, any normal search →
+    /// forced-on magic. Without forced-off, toggling an auto-switched
+    /// command would set `On` and look like a no-op, with no way back to
+    /// plain search except editing the query.
     pub(super) fn toggle_magic_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.magic_mode = if self.in_magic_view() {
             MagicMode::Off
@@ -206,29 +203,24 @@ impl Workspace {
     }
 
     /// Schedule a search for the current query, coalescing keystrokes.
+    /// Every caller wanting results comes through here, not
+    /// [`run_search`](Self::run_search).
     ///
-    /// Every caller wanting results should come through here rather than
-    /// [`run_search`](Self::run_search). A search is a full parallel scan
-    /// of every root's arena, and it is **not cancellable once started**:
-    /// the generation check drops a stale scan's *results*, but the scan
-    /// itself still runs to completion on the shared rayon pool. So firing
-    /// one per keystroke meant a 12-character query launched 12 full
-    /// scans, 11 of them pure waste, all competing for the same cores —
-    /// measured at ~124 ms of scan work against a 1.2M-entry index, which
-    /// is latency the user waits through before seeing what they typed.
-    ///
+    /// A search is a full parallel scan of every root's arena and is **not
+    /// cancellable once started** — the generation check drops a stale
+    /// scan's *results*, but the scan still runs. One per keystroke meant
+    /// a 12-character query launched 12 scans, 11 of them waste, all
+    /// competing for the same cores: ~124 ms against a 1.2M-entry index.
     /// [`SEARCH_DEBOUNCE`] collapses that to one scan per settled query.
     pub(super) fn update_search(&mut self, cx: &mut Context<Self>) {
         // Bump now, not in `run_search`: a query that has already changed
         // must invalidate scans still in flight immediately, so their
         // results can't land under the newer query.
         self.search_generation += 1;
-        // Signal any scan already running on the pool to stop, then hand
-        // the next scan a fresh flag. The generation check discards a
-        // stale scan's *results*; this stops it spending CPU and holding
-        // the arena read lock to produce them. Without it, a burst of
-        // per-keystroke searches on a large index piles up and convoys
-        // with the FS writer — measured at multi-second stalls.
+        // Stop any scan already running, then hand the next one a fresh
+        // flag. The generation check discards a stale scan's *results*;
+        // this stops it burning CPU to produce them. Without it a burst of
+        // searches convoys with the FS writer — multi-second stalls.
         self.search_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.search_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -242,20 +234,16 @@ impl Workspace {
     }
 
     /// Run a merged query across every ready root on the background
-    /// executor. Stale completions are dropped by generation check.
+    /// executor; stale completions are dropped by generation check. Call
+    /// [`update_search`](Self::update_search) instead — this is the
+    /// debounced tail, and calling it directly restores a scan per
+    /// keystroke.
     ///
-    /// Call [`update_search`](Self::update_search) instead — this is the
-    /// debounced tail, and calling it directly puts a full scan on every
-    /// keystroke again.
-    ///
-    /// The raw query is split (a pure
-    /// [`parse_query`](filex::search_filter::parse_query)) into filename
-    /// text, index-evaluable filters (`kind:`/`ext:`/`size:`/`modified:`),
-    /// and `tag:` filters. The text + index filters run in the index scan
-    /// (`search_filtered`); the results are then intersected with the
-    /// paths carrying every named tag (the sidecar store). A query with no
-    /// filename text and no index filters — only `tag:` — lists the tagged
-    /// files straight from the sidecar, skipping the index scan.
+    /// [`parse_query`](filex::search_filter::parse_query) splits the raw
+    /// query into filename text, index-evaluable filters and `tag:`
+    /// filters. Text + index filters run in `search_filtered`; results are
+    /// then intersected with the sidecar's tagged paths. A `tag:`-only
+    /// query lists straight from the sidecar, skipping the scan.
     pub(super) fn run_search(&mut self, cx: &mut Context<Self>) {
         let generation = self.search_generation;
 
@@ -263,29 +251,24 @@ impl Workspace {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        // A command-shaped query searches for what it *targets*, not for
-        // its own words: "delete screenshots older than 30 days" as a
-        // literal search matches nothing, while the files the plan would
-        // act on are exactly what the user needs to see under the card.
-        //
-        // The gate follows the entry (`magic::parse_with_gate`):
-        // - On:   the user opted in, so `delete old logs` parses (gate off).
-        // - Auto: a command needs structured evidence before it may
-        //         auto-switch the app into magic mode (gate on).
-        // - Off:  the user forced normal search; don't read it as a command
-        //         at all.
+        // A command-shaped query searches for what it *targets*, not its
+        // own words: "delete screenshots older than 30 days" matches
+        // nothing literally, while the files the plan would act on are
+        // exactly what belongs under the card. The gate follows the entry
+        // (`magic::parse_with_gate`): On = user opted in (gate off), Auto =
+        // needs structured evidence to auto-switch (gate on), Off = don't
+        // read it as a command.
         let command = match self.magic_mode {
             MagicMode::Off => None,
             MagicMode::On => filex::magic::parse_with_gate(&self.query, now, false),
             MagicMode::Auto => filex::magic::parse_with_gate(&self.query, now, true),
         };
         // Re-searching the *same* command must not disturb the card. The
-        // live-update loop re-runs this on every filesystem event burst,
-        // and blanking `outcome` made the card flip back to "finding
-        // matches…" each time — a card on a busy home directory never
-        // settled. Worse, it is `checked` that must survive: resetting it
-        // silently re-ticks rows the user deliberately unticked, on a
-        // batch that is one click from being executed.
+        // live-update loop re-runs this on every FS event burst, so
+        // blanking `outcome` made the card flip back to "finding matches…"
+        // forever on a busy directory. Worse, `checked` must survive —
+        // resetting it silently re-ticks rows the user unticked, on a batch
+        // one click from executing.
         let previous = self.magic.take();
         self.magic = command.as_ref().map(|command| match previous {
             Some(state) if state.command == *command => state,
@@ -300,30 +283,27 @@ impl Workspace {
             Some(command) => (
                 command.selection.text.clone(),
                 command.selection.filters.clone(),
-                // Deliberately *not* SEARCH_RESULT_LIMIT. A plan is built
-                // from these rows, so a truncated search would silently
-                // become a partial delete — and `magic::build`'s
-                // too-many-to-review guard would never fire, because it
-                // would only ever see the truncated count. Fetching one
-                // past the cap is what lets that guard work.
+                // Deliberately *not* SEARCH_RESULT_LIMIT: the plan is
+                // built from these rows, so truncation would become a
+                // silent partial delete, and `magic::build`'s
+                // too-many-to-review guard would never fire on the
+                // truncated count. One past the cap is what arms it.
                 filex::magic::MAX_PLAN_OPS + 1,
             ),
             None => {
-                // Forced-on magic mode with no command yet (empty box, or a
-                // half-typed command): show nothing rather than a normal
-                // search. The magic view renders its own "type a command"
-                // hint — running a filename search here would repopulate
-                // exactly the results list the mode is meant to replace.
+                // Forced-on magic with no command yet: show nothing rather
+                // than a normal search. The magic view renders its own
+                // hint, and a filename search here would repopulate exactly
+                // the list the mode replaces.
                 if self.magic_mode == MagicMode::On {
                     self.results.clear();
                     self.search_selection.clear();
                     return;
                 }
                 let parsed = filex::search_filter::parse_query(&self.query, now);
-                // Natural-language phrases in whatever text the `key:value`
-                // parse left over ("photos from last week"). Pure and
-                // rule-based; the recognized phrases are shown as removable
-                // chips, never applied invisibly.
+                // Natural-language phrases in the text the `key:value`
+                // parse left over. Rule-based, and shown as removable chips
+                // rather than applied invisibly.
                 let expansion = filex::phrases::expand(&parsed.text, now);
                 let text = expansion.text.clone();
                 if text.is_empty() && parsed.filters.is_empty() && expansion.is_empty() {
@@ -392,10 +372,10 @@ impl Workspace {
             return;
         }
 
-        // Service mode: the text query + index filters go over IPC and are
-        // applied service-side (where the index with size/mtime lives); a
-        // failed roundtrip falls back to local indexing and re-runs. `tag:`
-        // stays client-side — the service has no sidecar.
+        // Service mode: text + index filters go over IPC and are applied
+        // service-side, where the index with size/mtime lives; a failed
+        // roundtrip falls back to local. `tag:` stays client-side — the
+        // service has no sidecar.
         #[cfg(target_os = "windows")]
         if let Some(client) = self.service.clone() {
             let store = self.tags.clone();
@@ -406,13 +386,10 @@ impl Workspace {
                 let result = cx
                     .background_executor()
                     .spawn(async move {
-                        // KNOWN GAP: unlike the local path below, these hits
-                        // carry no `MatchKind` over the wire, so
-                        // `usable_in_plan` cannot be applied and a command
-                        // query in service mode can still plan against fuzzy
-                        // matches. Closing it means adding the kind to the
-                        // IPC hit; until then Magic is only fully safe on
-                        // the local index.
+                        // KNOWN GAP: these hits carry no `MatchKind` over
+                        // the wire, so `usable_in_plan` can't apply and a
+                        // service-mode command can plan against fuzzy
+                        // matches. Fix is adding the kind to the IPC hit.
                         client
                             .search(&text, &index_filters, limit as u32)
                             .map(|hits| {
@@ -477,10 +454,8 @@ impl Workspace {
             let rows = cx
                 .background_executor()
                 .spawn(async move {
-                    // Per-scan latency, the number the CLAUDE.md
-                    // search-as-you-type rule is about. Invisible from
-                    // outside the process otherwise — run the app with
-                    // `RUST_LOG=filex=debug` to see it.
+                    // Per-scan latency — the search-as-you-type number.
+                    // Needs `RUST_LOG=filex=debug` to see.
                     let started = std::time::Instant::now();
                     let rows: Vec<SearchRow> = manager::search_all_scoped(
                         &indexes,
@@ -492,15 +467,12 @@ impl Workspace {
                         scope_dir.as_deref(),
                     )
                         .into_iter()
-                        // A command's plan is built from these rows, so a
-                        // fuzzy hit here becomes a file the batch acts on.
-                        // Subsequence matching is far too loose for that:
-                        // `rename gravloc to …` matched 148 files of which
-                        // 4 contained "gravloc" — the rest were things like
-                        // `xstate-graph.development.cjs.js`, which a plan
-                        // would happily have renamed. Fuzzy is a good way to
-                        // *find* something you then look at; it is not
-                        // evidence you meant to modify it.
+                        // The plan is built from these rows, so a fuzzy hit
+                        // becomes a file the batch acts on. Too loose for
+                        // that: `rename gravloc to …` matched 148 files, 4
+                        // of which contained "gravloc". Fuzzy helps you
+                        // *find* something; it is not evidence you meant to
+                        // modify it.
                         .filter(|hit| usable_in_plan(hit.score.kind, command_query))
                         .map(|hit| SearchRow {
                             name: hit.name.into(),
@@ -510,13 +482,11 @@ impl Workspace {
                         })
                         .collect();
                     let elapsed_ms = started.elapsed().as_millis() as u64;
-                    // A scan of even a 2M-entry arena is tens of
-                    // milliseconds (docs/design-search-ranking.md). Anything
-                    // near a second is not scan *work* — it is almost
-                    // certainly `search_all` blocked acquiring the read lock
-                    // while the writer holds it for a big rescan. Surfaced at
-                    // warn so it lands in the log with no `RUST_LOG` set,
-                    // which is the only way to see it in a shipped .app.
+                    // A 2M-entry scan is tens of milliseconds, so anything
+                    // near a second is not scan *work* — almost certainly
+                    // `search_all` blocked on the read lock during a big
+                    // rescan. At warn so it lands in a shipped .app's log
+                    // with no `RUST_LOG` set.
                     if elapsed_ms >= SLOW_OP_MS {
                         tracing::warn!(
                             query = %text,
@@ -551,12 +521,10 @@ impl Workspace {
     }
 
     /// Resolve the pending Magic command against the rows the search just
-    /// returned. No-op unless the query parsed as a command.
-    ///
-    /// Plans are built from `results`, which is why a Magic query raises
-    /// the search limit to `MAX_PLAN_OPS + 1` — see `update_search`. The
-    /// one-past-the-cap fetch is what lets `build` distinguish "1000
-    /// files, reviewable" from "more than we will act on blind".
+    /// returned. No-op unless the query parsed as a command. Plans build
+    /// from `results`, which is why a Magic query raises the limit to
+    /// `MAX_PLAN_OPS + 1` — that one past the cap is what lets `build`
+    /// tell "1000 files, reviewable" from "more than we act on blind".
     pub(super) fn rebuild_magic_plan(&mut self) {
         let Some(state) = self.magic.as_mut() else {
             return;
@@ -568,10 +536,9 @@ impl Workspace {
         };
         let outcome = filex::magic::build(&state.command, &matches, &ctx);
         // Only re-tick when the plan actually changed. This runs on every
-        // filesystem event burst, not just on a new query, so rebuilding
-        // `checked` unconditionally would keep restoring rows the user had
-        // unticked — silently re-arming a destructive batch under them.
-        // Comparing the ops (not just their count) is what makes "same
+        // FS event burst, so rebuilding `checked` unconditionally would
+        // restore rows the user unticked — silently re-arming a destructive
+        // batch. Comparing the ops, not their count, is what makes "same
         // plan" mean the same files in the same order.
         let unchanged = matches!(
             (&outcome, &state.outcome),

@@ -1,9 +1,7 @@
 //! The Filex application shell: the [`Workspace`] root view, its state
-//! types, and the `run` entry point. The `impl Workspace` surface is large
-//! enough that it is split across the sibling `workspace::*` modules by
-//! concern (rendering, navigation, search, file ops, tags, input); each is
-//! a plain `impl Workspace` block that reaches shared imports through
-//! `use super::*`.
+//! types, and the `run` entry point. The `impl Workspace` surface is split
+//! across the sibling `workspace::*` modules by concern; each is a plain
+//! `impl Workspace` block reaching shared imports via `use super::*`.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -57,11 +55,10 @@ actions!(
     ]
 );
 
-/// The payload of an in-app file drag: the paths being moved. It is both
-/// the value handed to a drop target (matched by type in `on_drop`) and,
-/// via its [`Render`] impl, the little pill that follows the cursor while
-/// dragging. `position` is the cursor offset gpui hands the drag
-/// constructor; the pill offsets itself by it so it sits under the mouse.
+/// The payload of an in-app file drag. Both the value a drop target
+/// matches by type in `on_drop` and, via [`Render`], the pill that follows
+/// the cursor. `position` is the cursor offset gpui hands the drag
+/// constructor; the pill offsets by it to sit under the mouse.
 #[derive(Clone)]
 struct DragItems {
     paths: Vec<PathBuf>,
@@ -151,10 +148,9 @@ fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     let mut command = {
         use std::os::windows::process::CommandExt as _;
-        // `start` is a cmd builtin; the empty string is the window title
-        // slot so paths with spaces aren't misparsed as a title.
-        // CREATE_NO_WINDOW keeps this transient cmd from flashing a
-        // console every time the user opens a file.
+        // `start` is a cmd builtin; the empty string fills the window
+        // title slot so paths with spaces aren't parsed as one.
+        // CREATE_NO_WINDOW stops a console flashing on every open.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut command = std::process::Command::new("cmd");
         command
@@ -166,10 +162,9 @@ fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     command.spawn().map(drop)
 }
 
-/// Whether this platform can show an OS "Open with…" application chooser.
-/// macOS has no CLI entry point for the picker (it needs a LaunchServices
-/// call — a future item), so the menu entry is hidden there rather than
-/// offering an action that can't work.
+/// Whether this platform can show an OS "Open with…" chooser. macOS has no
+/// CLI entry point (it needs LaunchServices), so the entry is hidden there
+/// rather than offering an action that can't work.
 fn open_with_supported() -> bool {
     !cfg!(target_os = "macos")
 }
@@ -232,36 +227,27 @@ fn platform_affordance() -> filex::update::UpdateAffordance {
 
 const SEARCH_RESULT_LIMIT: usize = 500;
 
-/// How long the query must hold still before a scan starts.
-///
-/// Sized against typing, not against the scan: ~50 ms is below a fast
-/// typist's inter-key interval only at the tail of a burst, so the scan
-/// fires once the word is finished rather than once per character. Short
-/// enough to stay imperceptible on the final keystroke — the one the user
-/// is actually waiting on — and the scan it guards costs several times
-/// this on a large index, so trading it away is strictly a win.
+/// How long the query must hold still before a scan starts. Sized against
+/// typing, not the scan: ~50 ms falls below a fast typist's inter-key gap
+/// only at the tail of a burst, so the scan fires once per word rather
+/// than per character, and stays imperceptible on the final keystroke —
+/// the one the user is waiting on.
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Latency at or above which an operation logs itself at `warn` rather
-/// than `debug`. The point is a shipped `.app` launched by double-click
-/// has no `RUST_LOG`, so `debug` never writes — but a user staring at a
-/// 10-second search needs *something* in the log. Set well above a
-/// healthy scan (tens of ms) so normal use stays silent and only genuine
-/// stalls speak up.
+/// Latency at or above which an operation logs at `warn` rather than
+/// `debug`. A shipped `.app` launched by double-click has no `RUST_LOG`,
+/// so `debug` never writes — but a 10-second search needs to leave a
+/// trace. Set well above a healthy scan so normal use stays silent.
 const SLOW_OP_MS: u64 = 500;
 
-/// Minimum gap between refreshes triggered by *filesystem* events.
+/// Minimum gap between refreshes triggered by *filesystem* events. Far
+/// longer than [`SEARCH_DEBOUNCE`]: a keystroke is the user waiting on us,
+/// an FSEvent is a `node_modules` write nobody is waiting on. Refreshing
+/// per burst meant a full arena scan plus an O(n) live count many times a
+/// second on an active home directory.
 ///
-/// Deliberately far longer than [`SEARCH_DEBOUNCE`], because the two are
-/// answering different questions. A keystroke is the user waiting on us;
-/// an FSEvent is a browser cache or a `node_modules` write, and nobody is
-/// waiting on it. Refreshing per burst meant a full parallel scan of the
-/// arena *plus* an O(n) live-entry count many times a second on an active
-/// home directory — the app pinning cores while sitting idle.
-///
-/// A trailing throttle rather than a debounce: under continuous churn a
-/// debounce would keep pushing its deadline back and never refresh at
-/// all.
+/// A trailing throttle, not a debounce — under continuous churn a debounce
+/// keeps pushing its deadline back and never refreshes.
 const FS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A short label for a set of files: the single name quoted, or a count.
@@ -271,12 +257,11 @@ fn plural_items(n: usize) -> &'static str {
     if n == 1 { "item" } else { "items" }
 }
 
-/// One Magic-plan op as a review row: what it acts on, and where that
-/// ends up. The target is `None` for a delete — there is no destination,
-/// and inventing "→ Trash" would imply a path the op does not have.
-/// The three cells of a plan row — source name, the folder it lives in,
-/// and where it is going (`None` for a delete) — plus the full
-/// `source → destination` string for the row's hover tooltip.
+/// One Magic-plan op as a review row: the three cells (source name, the
+/// folder it lives in, where it's going) plus the full
+/// `source → destination` string for the hover tooltip. The target is
+/// `None` for a delete — inventing "→ Trash" would imply a path the op
+/// does not have.
 struct PlanRow {
     name: SharedString,
     location: SharedString,
@@ -304,15 +289,12 @@ fn describe_op(op: &FileOp) -> PlanRow {
             tooltip: format!("{} → Trash", path.display()).into(),
         },
         FileOp::Move { from, to } | FileOp::Copy { from, to } => {
-            // Show the full destination path when the plan retargeted this
-            // file to dodge a collision (`ROADMAP.md` → `ROADMAP 2.md`),
-            // so the rename is visible; otherwise the destination folder,
-            // since the name is already in the source cell.
-            //
-            // No "→ " prefix: the arrow is a fixed-width gutter column in
-            // `op_row` now, which is what keeps every row's destination
-            // starting at the same x. Baking it into the text would both
-            // double it and re-ragged the column.
+            // Full destination path when the plan retargeted to dodge a
+            // collision (`ROADMAP.md` → `ROADMAP 2.md`) so the rename is
+            // visible; otherwise just the folder, since the name is
+            // already in the source cell. No "→ " prefix — the arrow is a
+            // fixed-width gutter column in `op_row`, which is what aligns
+            // every row's destination.
             let renamed = to.file_name() != from.file_name();
             let dest = if renamed {
                 to.display().to_string()
@@ -337,10 +319,8 @@ fn describe_op(op: &FileOp) -> PlanRow {
 }
 
 /// Whether dragging `src` into directory `dest` is a meaningful move.
-/// Rejects the two degenerate cases: `src` already lives directly in
-/// `dest` (the move would be a no-op), and `dest` is `src` itself or a
-/// folder nested inside it (which would try to move a directory into its
-/// own subtree). Path-only — it does not touch the filesystem.
+/// Rejects the no-op (`src` already lives in `dest`) and the recursion
+/// (`dest` is `src` or nested inside it). Path-only, no filesystem.
 fn is_valid_drop(dest: &Path, src: &Path) -> bool {
     src.parent() != Some(dest) && !dest.starts_with(src)
 }
@@ -353,20 +333,18 @@ fn describe_items(items: &[(PathBuf, String)]) -> Option<String> {
     }
 }
 
-/// Migrate the sidecar tag index for a just-completed file op (moving,
-/// copying, or dropping the file's tags to follow it), logging rather
-/// than failing — a tag mishap must never derail the file operation
-/// itself. Runs on the background executor (it persists).
+/// Migrate the sidecar tag index so tags follow a just-completed file op.
+/// Logs rather than fails — a tag mishap must never derail the file
+/// operation. Runs on the background executor (it persists).
 fn migrate_tags(tags: &PlatformTags, applied: &mut ops::AppliedOp) {
     if let Err(err) = tags.apply_applied(applied) {
         tracing::error!("failed to migrate tags: {err:#}");
     }
 }
 
-/// Build search rows for a set of tagged paths (a `tag:`-only query,
-/// where there's no filename text to rank). Paths that no longer exist
-/// are skipped — a light visual prune — and the list is capped at
-/// `limit`. Blocking (it stats each path) — call off the UI thread.
+/// Build search rows for a set of tagged paths (a `tag:`-only query, with
+/// no filename text to rank). Missing paths are skipped and the list is
+/// capped at `limit`. Blocking (stats each path) — call off the UI thread.
 fn rows_from_tagged_paths(paths: Vec<PathBuf>, limit: usize) -> Vec<SearchRow> {
     paths
         .into_iter()
@@ -389,13 +367,11 @@ fn rows_from_tagged_paths(paths: Vec<PathBuf>, limit: usize) -> Vec<SearchRow> {
 /// is empty. Blocking (scans the sidecar) — call off the UI thread.
 /// May a hit feed a Magic plan?
 ///
-/// Fuzzy (subsequence) hits are excluded from command queries, because a
-/// command query's rows *are* its plan — every row becomes a file the
-/// batch renames, moves or deletes. Subsequence matching is far too loose
-/// to carry that weight: `gravloc` is a subsequence of
-/// `xstate-graph.development.cjs.js`, which is a fine thing to surface
-/// when someone is looking for a file and an unacceptable thing to rename
-/// on their behalf. Ordinary searches keep every fuzzy hit.
+/// Fuzzy hits are excluded from command queries, because a command
+/// query's rows *are* its plan. Subsequence matching is too loose to carry
+/// that: `gravloc` is a subsequence of `xstate-graph.development.cjs.js` —
+/// fine to surface when browsing, unacceptable to rename on the user's
+/// behalf. Ordinary searches keep every fuzzy hit.
 fn usable_in_plan(kind: MatchKind, command_query: bool) -> bool {
     !command_query || kind != MatchKind::Fuzzy
 }
@@ -510,12 +486,10 @@ struct Job {
     progress: std::sync::Arc<ops::OpProgress>,
 }
 
-/// How the search bar chooses between normal search and magic mode
-/// (`docs/design-magic-mode.md` v2). Three states, not a bool, because
-/// auto-switch and an explicit toggle both exist and can disagree: the
-/// toggle has to be able to force magic mode *off* on a query that
-/// auto-switch would otherwise light up, and *on* for a query that hasn't
-/// parsed into a command yet.
+/// How the search bar chooses between normal search and magic mode. Three
+/// states, not a bool, because auto-switch and the explicit toggle can
+/// disagree: the toggle must force magic *off* on a query auto-switch
+/// would light up, and *on* for one that hasn't parsed yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MagicMode {
     /// The default. A command-shaped query with structured evidence flips
@@ -554,23 +528,16 @@ impl SearchScope {
 }
 
 /// A parsed Magic command and the plan it resolved to, for the review
-/// card (`docs/design-magic-mode.md` §3).
-///
-/// Held separately from `results` even though the two are computed from
-/// the same search: `results` is what the user is *looking at*, while
-/// `ops`/`checked` are what would actually run. Keeping them apart is
-/// what lets a row be unchecked without disturbing the result list.
+/// card. Held separately from `results` though both come from one search:
+/// `results` is what the user is looking at, `ops`/`checked` is what would
+/// run — which is what lets a row be unchecked without disturbing the
+/// result list.
 struct MagicState {
     command: filex::magic::Command,
-    /// The resolved plan, or why there isn't one. `None` until the
-    /// search backing it has landed — distinguishing "still looking"
-    /// from "nothing matched" matters, because a root that is still
-    /// indexing would otherwise sit there claiming the command matched
-    /// no files.
-    ///
-    /// An error still shows a card: saying "no folder called Archive" is
-    /// far more useful than silently showing nothing after the user
-    /// typed a real command.
+    /// The resolved plan, or why there isn't one. `None` until the search
+    /// lands, so a still-indexing root doesn't claim the command matched
+    /// nothing. An error still shows a card — "no folder called Archive"
+    /// beats silence after the user typed a real command.
     outcome: Option<Result<filex::magic::Plan, filex::magic::PlanError>>,
     /// One flag per op in the plan, parallel to `Plan::ops`. Everything
     /// starts checked; the review step is about *removing* what you
@@ -603,10 +570,9 @@ struct RenameState {
     _subscription: gpui::Subscription,
 }
 
-/// An in-progress tag edit in the details panel: which file it targets,
-/// the input owning the typed tag name, the currently-chosen color, and
-/// (when editing an existing chip rather than adding) that tag's original
-/// name so commit replaces it in place.
+/// An in-progress tag edit in the details panel: target file, the input
+/// owning the typed name, the chosen color, and (when editing rather than
+/// adding) the original name so commit replaces it in place.
 struct TagEditor {
     path: PathBuf,
     input: gpui::Entity<SearchInput>,
@@ -618,12 +584,10 @@ struct TagEditor {
     _subscription: gpui::Subscription,
 }
 
-/// One browse tab's saved state (block 6). The *active* tab's state
-/// lives directly on the [`Workspace`] (so the existing browse code is
-/// untouched); this holds the inactive tabs, and the active slot is
-/// refreshed from the live fields on every switch. Search is global and
-/// not part of a tab. Transient per-tab UI (an in-progress rename, an
-/// armed delete) is intentionally dropped on switch rather than saved.
+/// One browse tab's saved state. The *active* tab lives directly on the
+/// [`Workspace`]; this holds the inactive ones, refreshed from the live
+/// fields on each switch. Search is global, not per-tab. Transient UI (an
+/// in-progress rename, an armed delete) is dropped on switch.
 struct TabSnapshot {
     cwd: PathBuf,
     entries: Vec<Entry>,
@@ -664,10 +628,9 @@ struct Workspace {
     appearance: WindowAppearance,
     /// Transient user-facing message (e.g. why a root couldn't be added).
     notice: Option<SharedString>,
-    /// The auto-updater's UI state, rendered as a slim banner above the
-    /// status bar. Advanced by a background manifest check on launch
-    /// (macOS/Linux); the Windows service path would report via IPC
-    /// (pending — the banner stays `Idle` there for now).
+    /// The auto-updater's UI state, a slim banner above the status bar.
+    /// Advanced by a background manifest check on launch (macOS/Linux);
+    /// the Windows service path would report via IPC (pending).
     update_status: filex::update::UpdateStatus,
     #[cfg(target_os = "macos")]
     fda_missing: bool,
@@ -689,10 +652,8 @@ struct Workspace {
     search_generation: u64,
     /// The Magic card's state when the query parses as a command.
     magic: Option<MagicState>,
-    /// How the search bar decides between normal search and magic mode.
-    /// See [`MagicMode`] — the three states exist so the toggle can both
-    /// force magic *on* and force it *off* against what auto-switch would
-    /// otherwise do.
+    /// How the search bar decides between normal search and magic mode;
+    /// see [`MagicMode`].
     magic_mode: MagicMode,
     /// Whether queries look everywhere or only under `cwd` — the search
     /// bar's scope dropdown. Applies to both normal and magic searches.
@@ -764,25 +725,22 @@ struct Workspace {
     /// once a switch settles). Ctrl-Tab walks this order, not the strip's
     /// positional order.
     tab_mru: Vec<usize>,
-    /// Position within `tab_mru` during an in-progress Ctrl-Tab cycle, so
-    /// repeated presses keep walking the frozen recency order instead of
-    /// reshuffling after each hop. Cleared when a tab is opened, closed,
-    /// or clicked (see [`Workspace::commit_mru`]).
+    /// Position within `tab_mru` during a Ctrl-Tab cycle, so repeated
+    /// presses walk the frozen recency order instead of reshuffling each
+    /// hop. Cleared on open/close/click (see [`Workspace::commit_mru`]).
     tab_cycle: Option<usize>,
     /// Back/forward navigation history for the active tab.
     history_back: Vec<PathBuf>,
     history_forward: Vec<PathBuf>,
     /// Recently-opened folders/files (local-only usage log).
     recents: Recents,
-    /// Cached path → frecency score, derived from `recents` and handed to
-    /// background search tasks for stage-B re-ranking. Rebuilt whenever
-    /// `recents` changes rather than per keystroke — the scores decay on
-    /// a 30-day half-life, so within a session it never goes stale.
+    /// Cached path → frecency score for stage-B re-ranking, handed to
+    /// background search tasks. Rebuilt when `recents` changes, not per
+    /// keystroke — a 30-day half-life never goes stale within a session.
     frecency: std::sync::Arc<std::collections::HashMap<PathBuf, f32>>,
-    /// Sidecar tag index: the enumeration source for the sidebar TAGS
-    /// section and the `tag:` filter, and (on every platform) the store
-    /// whose path keys are migrated by our own file ops. Shared into
-    /// background closures, which persist it off the UI thread.
+    /// Sidecar tag index: enumeration source for the sidebar TAGS section
+    /// and the `tag:` filter, and the store whose path keys our file ops
+    /// migrate. Shared into background closures, which persist it.
     tags: std::sync::Arc<PlatformTags>,
     /// Mounted volumes with capacity, refreshed on a slow timer.
     drives: Vec<Drive>,
@@ -790,16 +748,13 @@ struct Workspace {
     /// the next keystroke cancels it by dropping it — a `gpui::Task`
     /// cancels on drop.
     search_debounce: Option<gpui::Task<()>>,
-    /// Cancel flag for the *in-flight* scan (the one already past the
-    /// debounce and running on the background pool). Dropping the debounce
-    /// task only stops a scan that hasn't started; this stops one that
-    /// has. A new search sets the old flag and installs a fresh one — see
-    /// [`Workspace::update_search`].
+    /// Cancel flag for the *in-flight* scan. Dropping the debounce task
+    /// only stops a scan that hasn't started; this stops one that has. A
+    /// new search sets the old flag and installs a fresh one.
     search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// True while a filesystem-driven refresh is already scheduled. This
-    /// is a *throttle*, not a debounce: further events during the window
-    /// are dropped rather than pushing the deadline back, so continuous
-    /// churn still refreshes on a fixed cadence instead of starving.
+    /// True while a filesystem-driven refresh is scheduled. A *throttle*,
+    /// not a debounce: events during the window are dropped rather than
+    /// pushing the deadline back, so churn refreshes on a fixed cadence.
     fs_refresh_pending: bool,
 }
 
@@ -817,10 +772,9 @@ mod tabs;
 mod tags;
 
 impl Workspace {
-    /// Resolve the color theme from the `theme` setting + the current OS
-    /// appearance and install it as the global every component reads
-    /// through `cx.theme()`. Called at startup, whenever settings
-    /// change, and when the OS appearance flips.
+    /// Resolve the color theme from the `theme` setting + the OS
+    /// appearance and install it as the global `cx.theme()` reads. Called
+    /// at startup, on settings change, and when the appearance flips.
     pub(super) fn apply_theme(&self, cx: &mut Context<Self>) {
         let settings = self.settings.read(cx).settings();
         let (mode, accent, density) = (settings.theme, settings.accent, settings.density);
@@ -979,13 +933,12 @@ impl Workspace {
 pub fn run() {
     let _logging_guard = filex::logging::init("filex");
     filex::telemetry::install_panic_hook("filex");
-    // Sentry (UI process only; on-by-default, opt-out). The `crash_reports`
-    // setting is consent — default true, cleared from the Settings pane —
-    // and gates the whole integration, so read it straight from disk before
-    // the app exists; the returned guard flushes pending events (and closes
-    // the release-health session) on process exit and must live for the
-    // whole run. Builds without the `observability` feature never link the
-    // SDK (the elevated `filex-indexd` service is built that way).
+    // Sentry (UI process only; on-by-default, opt-out). The
+    // `crash_reports` setting is consent and gates the whole integration,
+    // so read it from disk before the app exists. The returned guard
+    // flushes pending events on exit and must live for the whole run.
+    // Builds without `observability` never link the SDK — which is how the
+    // elevated `filex-indexd` service is built.
     #[cfg(feature = "observability")]
     let _sentry_guard = {
         let consent = filex::settings::default_settings_file()
@@ -996,10 +949,9 @@ pub fn run() {
             .is_some_and(|settings| settings.crash_reports);
         filex::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
     };
-    // A startup line at the default level, so the log file is never empty:
-    // "logs are blank" then means "not writing", not "nothing happened".
-    // Names the log directory in the log itself, and the slow-op warnings
-    // land here without any RUST_LOG needed.
+    // A startup line at the default level, so a blank log file means "not
+    // writing", not "nothing happened". Names the log directory, and
+    // slow-op warnings land here without any RUST_LOG.
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         "filex starting — slow operations (>{SLOW_OP_MS}ms) log at warn; \
@@ -1071,10 +1023,9 @@ pub fn run() {
                 KeyBinding::new("ctrl-tab", NextTab, None),
                 KeyBinding::new("ctrl-shift-tab", PrevTab, None),
                 KeyBinding::new("f2", RenameSelected, None),
-                // Single-key shortcuts, scoped to `!SearchInput` so the
-                // same keys type normally once the search box has focus.
-                // `/` focuses search (the cap shown in the box); the mod
-                // accelerator does the same from anywhere.
+                // Single-key shortcuts, scoped to `!SearchInput` so they
+                // type normally once the search box has focus. `/` focuses
+                // search; the mod accelerator does the same from anywhere.
                 KeyBinding::new("/", FocusSearch, Some("!SearchInput")),
                 #[cfg(target_os = "macos")]
                 KeyBinding::new("cmd-f", FocusSearch, None),
@@ -1095,10 +1046,9 @@ pub fn run() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
-            // macOS: unified-titlebar look — the system titlebar goes
-            // transparent and the traffic lights sit inset in our top bar
-            // (which pads left to clear them). Elsewhere the native
-            // titlebar stays.
+            // macOS: unified titlebar — the system bar goes transparent
+            // and the traffic lights inset into our top bar, which pads
+            // left to clear them. Elsewhere the native titlebar stays.
             #[cfg(target_os = "macos")]
             let titlebar = TitlebarOptions {
                 title: None,
@@ -1125,10 +1075,9 @@ pub fn run() {
                     cx.activate(true);
                     let workspace = cx.new(|cx| {
                         let workspace = Workspace::new(cx);
-                        // Focus the workspace, not the search box: the app
-                        // starts on the file list so single-key shortcuts
-                        // work at once. `/` (or the mod accelerator) moves
-                        // focus into search when the user wants it.
+                        // Focus the workspace, not the search box, so the
+                        // app starts on the file list and single-key
+                        // shortcuts work at once. `/` moves focus in.
                         window.focus(&workspace.focus_handle);
                         workspace
                     });

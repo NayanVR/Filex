@@ -1,18 +1,15 @@
-//! Structured search filters (Phase 2d, block 8 item 2 — see
-//! `docs/design-search-chips.md`).
+//! Structured search filters — see `docs/design-search-chips.md`.
 //!
 //! One pure tokenizer, [`parse_query`], splits a raw search string into
-//! filename [`text`](Query::text) plus a set of typed [`Filter`]s
-//! (`kind:`, `ext:`, `size:`, `modified:`, and the item-1 `tag:`).
-//! Unrecognized `key:` tokens — and known keys with an unparseable value —
-//! fall back to literal text, so the search field never rejects input.
+//! filename [`text`](Query::text) plus typed [`Filter`]s (`kind:`, `ext:`,
+//! `size:`, `modified:`, `tag:`). Unrecognized `key:` tokens — and known
+//! keys with an unparseable value — fall back to literal text, so the
+//! search field never rejects input.
 //!
-//! This is the shared `key:value` grammar the roadmap calls for; it holds
-//! no state and no GPUI, so it is unit-tested in isolation. `kind:`/`ext:`
-//! are derivable from the filename the index already stores; `size:` and
-//! `modified:` need the size/mtime fields that block-8's index schema
-//! change adds (until then, [`Filter::matches`] reports them unknown, so
-//! they never positively match).
+//! No state and no GPUI, so it unit-tests in isolation. `kind:`/`ext:` are
+//! derivable from the filename; `size:`/`modified:` need the arena's
+//! size/mtime fields, and [`Filter::matches`] reports them unknown (so
+//! never positively matching) until those are populated.
 
 use serde::{Deserialize, Serialize};
 

@@ -29,10 +29,9 @@ use anyhow::{Result, bail};
 use memchr::memmem;
 use rayon::prelude::*;
 
-/// A cancel flag that is never set, for the non-cancellable public search
-/// entry points. Threading a real flag is opt-in via the `*_cancellable`
-/// methods; everything else (tests, benches, one-shot lookups) shares
-/// this constant-false sentinel so their signatures stay unchanged.
+/// A never-set cancel flag shared by the non-cancellable search entry
+/// points, so their signatures stay unchanged. Real flags are opt-in via
+/// the `*_cancellable` methods.
 pub(crate) static NEVER_CANCEL: AtomicBool = AtomicBool::new(false);
 
 /// Stable handle to an entry; index into `VolumeIndex::entries`.
@@ -41,14 +40,12 @@ pub struct EntryId(u32);
 
 pub const ROOT: EntryId = EntryId(0);
 
-/// Top-level directory names (immediately under a drive letter or `/`) that
-/// hold OS/system files a user never means to search — `C:\Windows`,
-/// `Program Files`, and friends. On Windows these dominate the C: drive and
-/// bloat the whole-machine index; excluding them (the default) is a large
-/// memory win with no real loss, since browsing uses a live directory read,
-/// not the index, so those folders stay navigable by hand. Compared
-/// case-insensitively (Windows paths are). Shared by [`is_system_top`]
-/// (index-time exclusion) and `manager::is_system_path` (search ranking).
+/// Top-level dirs (directly under a drive letter or `/`) holding OS files
+/// nobody means to search. On Windows they dominate C: and bloat the
+/// index; excluding them (the default) is a big memory win with no loss,
+/// since browsing reads the directory live and never the index. Compared
+/// case-insensitively. Shared by [`is_system_top`] (index-time exclusion)
+/// and `manager::is_system_path` (ranking).
 #[cfg(target_os = "windows")]
 pub const SYSTEM_TOP_DIRS: &[&str] = &[
     "Windows",
@@ -79,10 +76,8 @@ pub fn is_system_top(name: &str) -> bool {
 }
 
 /// Whether `path`'s first component *under `root`* is an excluded system
-/// dir — i.e. `path` is `root/Windows`, `root/Windows/...`, etc. Everything
-/// below such a dir is excluded transitively, so a single first-component
-/// check covers a whole subtree. Callers gate this on the exclusion flag
-/// before calling; this is the pure path test.
+/// dir. Exclusion is transitive, so this one check covers a whole subtree.
+/// The pure path test — callers gate on the exclusion flag themselves.
 pub(crate) fn path_under_system_top(root: &Path, path: &Path) -> bool {
     use std::path::Component;
     path.strip_prefix(root)
@@ -95,11 +90,9 @@ pub(crate) fn path_under_system_top(root: &Path, path: &Path) -> bool {
         .is_some_and(is_system_top)
 }
 
-/// Per-scan controls threaded through the parallel search.
-///
-/// Bundled into one struct rather than two parameters because they ride
-/// together down every layer (`search_cancellable` → `finish` →
-/// `fuzzy_pass`) and the list would otherwise only grow.
+/// Per-scan controls threaded through the parallel search. One struct
+/// rather than two parameters because they ride together down every layer
+/// (`search_cancellable` → `finish` → `fuzzy_pass`).
 #[derive(Clone, Copy)]
 pub struct ScanCtl<'a> {
     /// Polled once per candidate; when a newer query sets it, the scan
@@ -135,10 +128,9 @@ const MAX_PATH_DEPTH: usize = 4096;
 
 const FLAG_DIR: u8 = 1 << 0;
 const FLAG_TOMBSTONE: u8 = 1 << 1;
-/// Set once `size`/`mtime` have been populated for this entry. Bootstrap
-/// inserts names only (this bit clear); a background backfill and the live
-/// watchers set it (search-chips phase 2, `docs/design-search-chips.md`).
-/// Distinguishes a real 0-byte file from "size unknown".
+/// Set once `size`/`mtime` are populated. Bootstrap inserts names only;
+/// the background backfill and live watchers set it. Distinguishes a real
+/// 0-byte file from "size unknown".
 const FLAG_HAS_META: u8 = 1 << 2;
 
 /// (offset, len) into a name pool. Filenames are ≤255 bytes on every
@@ -184,24 +176,17 @@ impl FileEntry {
 
 /// How few literal hits it takes to fall back to the fuzzy pass.
 ///
-/// The fuzzy pass is a *second* full scan of the arena, and it is not
-/// cheap: unlike the literal pass's SIMD substring find, it UTF-8-decodes
-/// every surviving name and runs two alignment passes over it. Measured
-/// at ~20-24 ms against a 1.2M-entry index, versus ~4-7 ms for the
-/// literal pass alone.
-///
-/// So the gate has to mean "the result list is *empty enough to be
-/// useless*", not "the result list isn't completely full". Fifty rows is
-/// already more than fits on screen; below that, a `dsr` →
-/// `Design System Review.pdf` acronym hit is worth a second scan, and
-/// above it the user has plenty to look at and the scan is pure latency.
+/// The fuzzy pass is a *second* full arena scan that UTF-8-decodes every
+/// surviving name: ~20-24 ms on a 1.2M-entry index versus ~4-7 ms for the
+/// literal pass. So the gate means "the result list is empty enough to be
+/// useless", not "isn't completely full" — fifty rows already overflows
+/// the screen, and above that the second scan is pure latency.
 ///
 /// See `docs/design-search-ranking.md` decision 2 and [`Self::finish`].
 pub const FUZZY_GATE: usize = 50;
 
 /// How a hit matched the query, in ranking order (lower is better).
-///
-/// `Fuzzy` is last on purpose: subsequence hits are *filler* below every
+/// `Fuzzy` is last on purpose: subsequence hits are filler below every
 /// literal hit, never a way for a loose match to outrank a real one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MatchKind {
@@ -213,11 +198,9 @@ pub enum MatchKind {
 }
 
 /// A hit's ranking key — lower sorts better, field order *is* the
-/// precedence (derived `Ord` is lexicographic).
-///
-/// `penalty` is [`crate::fuzzy`]'s match-quality score, and is always `0`
-/// for the four literal kinds, so their relative order is exactly what it
-/// was before fuzzy matching existed.
+/// precedence (derived `Ord` is lexicographic). `penalty` is
+/// [`crate::fuzzy`]'s score, always `0` for the four literal kinds, so
+/// their relative order is unchanged from before fuzzy matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Score {
     pub kind: MatchKind,
@@ -227,10 +210,9 @@ pub struct Score {
     pub name_len: u16,
 }
 
-/// Widest `name_len` the packed key can hold (12 bits). Every filesystem
-/// filex targets caps a single name far below this (255 bytes is the
-/// usual limit), so the clamp is unreachable in practice — and it only
-/// ever affects a tiebreak, never whether an entry matches.
+/// Widest `name_len` the packed key can hold (12 bits). Every target
+/// filesystem caps names far below this (255 bytes typical), and the clamp
+/// only affects a tiebreak, never whether an entry matches.
 const PACKED_NAME_LEN_MAX: u16 = 0x0FFF;
 
 impl Score {
@@ -243,14 +225,11 @@ impl Score {
         }
     }
 
-    /// Pack into one `u32` whose natural ordering *is* the ranking
-    /// order: `kind` in the top 4 bits, then `penalty`, then `name_len`.
+    /// Pack into one `u32` whose natural ordering *is* the ranking order:
+    /// `kind` in the top 4 bits, then `penalty`, then `name_len`.
     ///
-    /// This exists for a measured reason. Carrying the fields as a
-    /// struct made the top-K heap element 12 bytes instead of 8 and cost
-    /// ~12% on every keystroke — a regression the design doc forbids on
-    /// the literal path. Packed, the heap element is the same 8 bytes it
-    /// was before fuzzy matching existed.
+    /// Measured: as a struct the top-K heap element was 12 bytes instead of
+    /// 8 and cost ~12% on every keystroke.
     fn pack(self) -> u32 {
         ((self.kind as u32) << 28)
             | ((self.penalty as u32) << 12)
@@ -285,12 +264,9 @@ fn byte_mask(bytes: &[u8]) -> [u64; 4] {
 }
 
 /// Whether `name` contains **every** byte in `needle_mask` — the necessary
-/// condition for `name` to contain the needle as a subsequence. Building
-/// the name's own byte mask is one linear pass with no allocation; the
-/// four-lane AND is a handful of instructions. A superset test on folded
-/// bytes, so a genuine (case-insensitive, possibly multi-byte) match is
-/// never rejected: if a needle char occurs in the match, all its bytes are
-/// present in the name.
+/// condition for containing the needle as a subsequence. One allocation-
+/// free linear pass plus a four-lane AND. A superset test on folded bytes,
+/// so a genuine (case-insensitive, multi-byte) match is never rejected.
 fn mask_covers(name: &[u8], needle_mask: &[u64; 4]) -> bool {
     let nm = byte_mask(name);
     needle_mask[0] & nm[0] == needle_mask[0]
@@ -300,9 +276,8 @@ fn mask_covers(name: &[u8], needle_mask: &[u64; 4]) -> bool {
 }
 
 /// Classify a literal (substring) match of `needle` in the folded
-/// `haystack`, or `None` if there is none. One SIMD find plus a byte
-/// compare — this runs per live entry on every keystroke, so it stays
-/// allocation-free.
+/// `haystack`, or `None`. One SIMD find plus a byte compare; runs per live
+/// entry on every keystroke, so it stays allocation-free.
 fn literal_kind(finder: &memmem::Finder<'_>, haystack: &[u8], needle: &[u8]) -> Option<MatchKind> {
     let pos = finder.find(haystack)?;
     Some(if pos == 0 {
@@ -318,20 +293,18 @@ fn literal_kind(finder: &memmem::Finder<'_>, haystack: &[u8], needle: &[u8]) -> 
     })
 }
 
-/// Compaction trigger: at least this many dead units *and* at least a
-/// quarter of the arena dead. The floor keeps small indexes from
-/// compacting constantly; the ratio keeps big ones from carrying
-/// gigabytes of tombstones.
+/// Compaction trigger: at least this many dead units *and* a quarter of
+/// the arena dead. The floor stops small indexes compacting constantly;
+/// the ratio stops big ones carrying gigabytes of tombstones.
 const COMPACTION_MIN_DEAD: usize = 4096;
 
 fn compaction_due(dead: usize, total_entries: usize) -> bool {
     dead >= COMPACTION_MIN_DEAD && dead * 4 >= total_entries
 }
 
-/// Keeps the best `limit` ranked items seen so far: a max-heap where the
-/// root is the *worst* kept item, evicted when something better arrives.
-/// Rayon folds one per chunk, then merges — memory is O(limit) per task
-/// instead of O(matches) total.
+/// The best `limit` ranked items so far: a max-heap whose root is the
+/// *worst* kept item, evicted when something better arrives. Rayon folds
+/// one per chunk then merges, so memory is O(limit) per task.
 struct TopK {
     limit: usize,
     /// `(packed score, entry index)` — 8 bytes, see [`Score::pack`].
@@ -386,8 +359,7 @@ pub struct SearchHit {
 
 // `Clone` is what makes a published snapshot independent of the writer's
 // mutable head (optimization B): the writer clones its head into a fresh
-// `Arc` to publish, then keeps mutating its own copy. All fields are
-// owned/clonable, so this is a straight deep copy.
+// `Arc`, then keeps mutating its own copy. A straight deep copy.
 #[derive(Debug, Clone)]
 pub struct VolumeIndex {
     root_path: PathBuf,
@@ -400,16 +372,14 @@ pub struct VolumeIndex {
     by_native_key: HashMap<u64, EntryId>,
     /// Bumped on every mutation; lets async consumers detect staleness.
     generation: u64,
-    /// Approximate count of dead arena units: tombstoned entries plus
-    /// names leaked by renames. Drives compaction (see
-    /// [`VolumeIndex::needs_compaction`]); recomputed as the tombstone
-    /// count when loading a snapshot.
+    /// Approximate dead arena units: tombstoned entries plus names leaked
+    /// by renames. Drives [`VolumeIndex::needs_compaction`]; recomputed as
+    /// the tombstone count on snapshot load.
     dead_debt: usize,
-    /// Skip [`SYSTEM_TOP_DIRS`] (e.g. `C:\Windows`) at index time. Set from
-    /// the user's "Index Windows system folders" setting before bootstrap
-    /// and re-applied after a snapshot load, so bootstrap, live deltas, and
-    /// resumed snapshots all agree. Not persisted — the setting is the
-    /// source of truth and is re-applied on every start.
+    /// Skip [`SYSTEM_TOP_DIRS`] at index time. Set from the user's setting
+    /// before bootstrap and re-applied after a snapshot load so bootstrap,
+    /// live deltas and resumed snapshots agree. Not persisted — the setting
+    /// is the source of truth.
     exclude_system_dirs: bool,
 }
 
@@ -490,12 +460,10 @@ impl VolumeIndex {
         self.len() == 0
     }
 
-    /// Approximate heap bytes held by this index — the figure behind
-    /// filex's memory footprint (the whole-volume filename arena). An
-    /// estimate, not exact accounting: it sums the entry vector, the two
-    /// name pools, and the child / native-key maps, which dominate; the
-    /// allocator's per-allocation overhead is not counted. Used only for
-    /// the observability memory sample, so an approximation is fine.
+    /// Approximate heap bytes held by this index. Sums the entry vector,
+    /// both name pools and the child/native-key maps, which dominate;
+    /// allocator overhead is not counted. Only feeds the observability
+    /// memory sample, so an estimate is fine.
     pub fn approx_bytes(&self) -> usize {
         let entries = self.entries.capacity() * std::mem::size_of::<FileEntry>();
         let names = self.name_pool.capacity() + self.name_pool_lower.capacity();
@@ -631,10 +599,9 @@ impl VolumeIndex {
         out
     }
 
-    /// Populate metadata for a backfilled entry, but only if `id` still
-    /// names the same entry (`expected_name`) — guards against the id
-    /// remap a compaction performs between the off-lock stat and this
-    /// apply. Returns whether it was applied.
+    /// Populate metadata for a backfilled entry, only if `id` still names
+    /// the same entry (`expected_name`) — guards the id remap a compaction
+    /// performs between the off-lock stat and this apply.
     pub fn backfill_meta(
         &mut self,
         id: EntryId,
@@ -747,9 +714,8 @@ impl VolumeIndex {
     }
 
     /// Whether `entry` lies within `ancestor`'s subtree (inclusive) — the
-    /// membership test behind the "Current Dir" search scope. Walks parent
-    /// links, bounded like [`path_of`](Self::path_of) against a cyclic
-    /// index. `ancestor == ROOT` is trivially true (the whole index).
+    /// "Current Dir" scope test. Walks parent links, bounded like
+    /// [`path_of`](Self::path_of) against a cyclic index.
     pub fn is_within(&self, entry: EntryId, ancestor: EntryId) -> bool {
         if ancestor == ROOT {
             return true;
@@ -809,11 +775,10 @@ impl VolumeIndex {
         compaction_due(self.dead_debt, self.entries.len())
     }
 
-    /// Rebuild a fresh index containing only live entries — tombstoned
-    /// arena slots and orphaned name-pool bytes are left behind. Entry
-    /// ids change; names, hierarchy, native keys, and the root are
-    /// preserved. The generation continues (old + 1) so staleness checks
-    /// remain monotonic across the swap.
+    /// Rebuild containing only live entries, leaving tombstoned slots and
+    /// orphaned name bytes behind. Entry ids change; names, hierarchy,
+    /// native keys and root are preserved. The generation continues
+    /// (old + 1) so staleness checks stay monotonic across the swap.
     pub fn compacted(&self) -> VolumeIndex {
         let root_key = self.entries[0].native_key;
         let mut fresh = VolumeIndex::new_with_root_key(&self.root_path, root_key);
@@ -845,11 +810,10 @@ impl VolumeIndex {
     }
 
     /// Case-insensitive substring search over all live entries, ranked
-    /// exact > prefix > word-boundary > substring, then by name length.
-    /// Runs as a rayon parallel scan over the entry arena with bounded
-    /// per-chunk top-K heaps, so cost is scan-dominated even for
-    /// single-character queries that match nearly everything — no
-    /// all-matches allocation, no global sort (see benches/).
+    /// exact > prefix > word-boundary > substring, then by name length. A
+    /// rayon scan with bounded per-chunk top-K heaps, so cost stays
+    /// scan-dominated even for one-character queries — no all-matches
+    /// allocation, no global sort (see benches/).
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         self.search_cancellable(query, limit, &plain_scan())
     }
@@ -857,14 +821,12 @@ impl VolumeIndex {
     /// [`search`](Self::search), abortable mid-scan and optionally scoped
     /// to a subtree (see [`ScanCtl`]).
     ///
-    /// `ctl.cancel` is polled once per candidate: when a newer keystroke
-    /// sets it, every remaining closure cheaply returns `None`, so the
-    /// rayon fold winds down to a near-no-op instead of scoring and
-    /// ranking two million entries whose results the generation check
-    /// will discard anyway. `ctl.scope`, when set, restricts hits to that
-    /// directory's subtree — the "Current Dir" scope — checked only after
-    /// the cheap name match so unmatched entries never pay for the
-    /// parent-chain walk.
+    /// `ctl.cancel` is polled per candidate: a newer keystroke makes every
+    /// remaining closure return `None`, winding the rayon fold down to a
+    /// near-no-op instead of ranking two million entries the generation
+    /// check would discard. `ctl.scope` restricts hits to a subtree,
+    /// checked after the cheap name match so unmatched entries never pay
+    /// for the parent-chain walk.
     pub fn search_cancellable(&self, query: &str, limit: usize, ctl: &ScanCtl) -> Vec<SearchHit> {
         if query.is_empty() || limit == 0 {
             return Vec::new();
@@ -898,20 +860,16 @@ impl VolumeIndex {
     }
 
     /// Turn a literal pass's heap into hits, running the gated fuzzy pass
-    /// first if the literal pass came up short. See
-    /// `docs/design-search-ranking.md` decision 2: this is what keeps the
-    /// common keystroke on exactly the pre-fuzzy code path.
+    /// first if the literal pass came up short — this is what keeps the
+    /// common keystroke on the pre-fuzzy code path
+    /// (`docs/design-search-ranking.md` decision 2).
     ///
-    /// The gate is [`FUZZY_GATE`], **not** `limit`. `limit` is the wrong
-    /// number twice over: callers reaching this through
+    /// The gate is [`FUZZY_GATE`], **not** `limit`: callers arriving via
     /// [`manager::search_all`](crate::index::manager::search_all) pass an
-    /// overfetched `limit * OVERFETCH`, and even the un-multiplied display
-    /// limit is in the hundreds — so gating on it ran the second scan for
-    /// any query specific enough to be useful, which is the opposite of
-    /// decision 2's intent ("only when the user is staring at an empty
-    /// result list"). `min` with `limit` keeps the original property that a
-    /// caller asking for fewer hits than the gate never pays for a pass it
-    /// has no room to show.
+    /// overfetched `limit * OVERFETCH`, and even the raw display limit is
+    /// in the hundreds, so gating on it ran the second scan for any useful
+    /// query. `min` with `limit` keeps the property that a caller asking
+    /// for fewer hits than the gate never pays for a pass it can't show.
     fn finish(
         &self,
         literal: TopK,
@@ -935,14 +893,11 @@ impl VolumeIndex {
             .collect()
     }
 
-    /// Subsequence-match entries the literal pass did *not* match, scored
-    /// by [`crate::fuzzy`] and ranked strictly below every literal hit.
-    ///
-    /// Only reached when the literal pass returned fewer than `limit`
-    /// hits — i.e. when the user is looking at a near-empty result list —
-    /// so its cost never lands on a normal keystroke. Entries that
-    /// already matched literally are skipped with the same SIMD find the
-    /// literal pass used, so hits are not duplicated.
+    /// Subsequence-match entries the literal pass missed, scored by
+    /// [`crate::fuzzy`] and ranked strictly below every literal hit. Only
+    /// reached when the literal pass came up short, so its cost never
+    /// lands on a normal keystroke. Already-literal matches are skipped
+    /// with the same SIMD find, so hits are not duplicated.
     fn fuzzy_pass(
         &self,
         needle: &str,
@@ -951,14 +906,11 @@ impl VolumeIndex {
         limit: usize,
         ctl: &ScanCtl,
     ) -> TopK {
-        // Cheap necessary-condition prefilter (docs/design-search-ranking.md
-        // "trigram bitmap in front of the scan"): a name can only contain
-        // the needle as a subsequence if it contains *every byte* of the
-        // needle. Testing that on the folded bytes — a couple of 64-bit AND
-        // s, no UTF-8 decode, no alignment — rejects the vast majority of a
-        // 2M-entry arena before the expensive `fuzzy::penalty`. It is a
-        // superset test on folded bytes, so it never rejects a real match
-        // (see `byte_mask`).
+        // Necessary-condition prefilter: a name can only contain the
+        // needle as a subsequence if it contains *every byte* of it. A
+        // couple of 64-bit ANDs on folded bytes — no decode, no alignment —
+        // rejects most of a 2M-entry arena before `fuzzy::penalty`, and
+        // never rejects a real match (see `byte_mask`).
         let needle_mask = byte_mask(needle.as_bytes());
         self.entries
             .par_iter()
@@ -1019,17 +971,14 @@ impl VolumeIndex {
         filters.iter().all(|f| f.matches(&item))
     }
 
-    /// Like [`search`](Self::search), but each candidate must also satisfy
-    /// every index-evaluable `filter` (`kind:`/`ext:`, and `size:`/
-    /// `modified:` once the arena carries those fields). With no filters
-    /// this is exactly [`search`](Self::search) — the branch keeps the
-    /// common no-filter keystroke on the untouched fast path. An empty
-    /// `query` with filters present is a filter-only scan (rank by name
-    /// length). `tag:` filters are a no-op here (tags live in the sidecar,
-    /// intersected by the caller).
+    /// [`search`](Self::search) where each candidate must also satisfy
+    /// every index-evaluable `filter`. With no filters it *is*
+    /// [`search`](Self::search), keeping the common keystroke on the
+    /// untouched fast path. Empty `query` + filters is a filter-only scan
+    /// (ranked by name length). `tag:` is a no-op here — tags live in the
+    /// sidecar and the caller intersects them.
     ///
-    /// Prototype for docs/design-search-chips.md "Option A"; benchmarked
-    /// against post-filtering in `benches/filter_bench.rs`.
+    /// Benchmarked against post-filtering in `benches/filter_bench.rs`.
     pub fn search_filtered(
         &self,
         query: &str,
@@ -1151,10 +1100,9 @@ struct Persistence {
     source: CheckpointSource,
 }
 
-/// How often a live index snapshots itself (via a PersistNow marker
-/// through the delta channel — see [`watcher::FsDelta::PersistNow`] for
-/// why that ordering makes the checkpoint safe). Bounds how much walk
-/// work a crash can cost; a clean shutdown still saves precisely.
+/// How often a live index snapshots itself, via a PersistNow marker
+/// through the delta channel (see [`watcher::FsDelta::PersistNow`] for why
+/// that ordering is safe). Bounds the walk work a crash can cost.
 const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Ticks the snapshot interval and enqueues PersistNow markers. Owning a
@@ -1216,12 +1164,10 @@ impl Drop for SnapshotSaver {
 const BACKFILL_BATCH: usize = 512;
 
 /// Populates `size`/`mtime` on entries the bootstrap left name-only, off
-/// the critical path (Option C, `docs/design-search-chips.md`). On a
-/// low-priority thread it stats entries in batches and writes the results
-/// back under short write locks, so `size:`/`modified:` filters converge
-/// over the first seconds of a fresh index without slowing time-to-
-/// searchable. Once caught up it polls slowly for entries added by live
-/// updates (the freshness layer will populate those inline later).
+/// the critical path. A low-priority thread stats in batches and writes
+/// back under short write locks, so those filters converge over the first
+/// seconds without slowing time-to-searchable, then polls slowly for
+/// entries added by live updates.
 struct MetaBackfiller {
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -1337,11 +1283,10 @@ impl Persistence {
     }
 }
 
-/// A volume index kept up to date by a platform watcher feeding an
-/// [`watcher::IndexWriter`]. Dropping this stops live updates and writes
-/// the snapshot (watcher first, then writer join, then save — an order
-/// that guarantees the persisted checkpoint covers exactly the applied
-/// events, losing none).
+/// A volume index kept current by a platform watcher feeding an
+/// [`watcher::IndexWriter`]. Dropping stops live updates and writes the
+/// snapshot — watcher, then writer join, then save, an order that makes
+/// the checkpoint cover exactly the applied events.
 pub struct LiveIndex {
     pub index: watcher::SharedIndex,
     saver: Option<SnapshotSaver>,
@@ -1396,10 +1341,9 @@ pub fn start_live_index(
     start_live_index_cancellable(root, exclude_system_dirs, on_change, None)
 }
 
-/// [`start_live_index`] whose (walk) bootstrap can be cancelled by setting
-/// `cancel` — a service shutdown abandons a long initial index promptly
-/// instead of blocking the stop until the walk finishes. A snapshot-load
-/// or USN-fast-path start has no long walk to cancel.
+/// [`start_live_index`] whose bootstrap walk `cancel` can abandon, so a
+/// service shutdown isn't blocked by a long initial index. Snapshot-load
+/// and USN-fast-path starts have no long walk to cancel.
 pub fn start_live_index_cancellable(
     root: &Path,
     exclude_system_dirs: bool,
@@ -1422,11 +1366,10 @@ pub fn start_live_index_cancellable(
 ///   the writer rebuilds off-lock and swaps, so queries never block on it.
 /// - No/invalid snapshot: full bootstrap walk.
 ///
-/// If the watcher can't start (permissions, watch limits), the index still
+/// If the watcher can't start (permissions, watch limits) the index still
 /// works as a static snapshot — search is never hostage to live updates.
-/// The watcher starts *before* any walk so no event is missed; replayed or
-/// double-seen deltas are absorbed by idempotent application. `on_change`
-/// fires from the writer thread after each applied batch.
+/// The watcher starts *before* any walk so no event is missed; duplicate
+/// deltas are absorbed by idempotent application.
 pub fn start_live_index_with_snapshot(
     root: &Path,
     snapshot_path: Option<PathBuf>,
