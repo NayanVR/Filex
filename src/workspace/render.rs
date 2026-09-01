@@ -3,6 +3,28 @@
 
 use super::*;
 
+/// What a top-bar navigation button does. An enum rather than four
+/// near-identical `.child(toolbar_button(..).on_click(..))` blocks, so the
+/// buttons are a table and the wiring is written once.
+#[derive(Clone, Copy)]
+enum NavAction {
+    Reload,
+    Back,
+    Forward,
+    Up,
+}
+
+impl NavAction {
+    fn run(self, workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+        match self {
+            Self::Reload => workspace.reload_dir(cx),
+            Self::Back => workspace.go_back(cx),
+            Self::Forward => workspace.go_forward(cx),
+            Self::Up => workspace.go_up(cx),
+        }
+    }
+}
+
 impl Workspace {
     /// Clickable path segments. Deep paths elide the middle ("…"),
     /// keeping the root and the last few segments — the tail is what
@@ -95,38 +117,33 @@ impl Workspace {
             .items_center()
             .gap_1()
             .overflow_hidden()
-            .child(
-                ui::top_bar::toolbar_button(
-                    &theme,
-                    "refresh",
-                    "icons/refresh-cw.svg",
-                    theme.text_dim,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.reload_dir(cx))),
-            )
-            .child(
-                ui::top_bar::toolbar_button(
-                    &theme,
-                    "back",
-                    "icons/chevron-left.svg",
-                    dim(can_back),
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_back(cx))),
-            )
-            .child(
-                ui::top_bar::toolbar_button(
-                    &theme,
-                    "forward",
-                    "icons/chevron-right.svg",
-                    dim(can_forward),
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.go_forward(cx))),
-            )
-            .child(
-                ui::top_bar::toolbar_button(&theme, "up", "icons/arrow-up.svg", theme.text_dim)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.go_up(cx);
-                    })),
+            .children(
+                [
+                    (
+                        "refresh",
+                        "icons/refresh-cw.svg",
+                        theme.text_dim,
+                        NavAction::Reload,
+                    ),
+                    (
+                        "back",
+                        "icons/chevron-left.svg",
+                        dim(can_back),
+                        NavAction::Back,
+                    ),
+                    (
+                        "forward",
+                        "icons/chevron-right.svg",
+                        dim(can_forward),
+                        NavAction::Forward,
+                    ),
+                    ("up", "icons/arrow-up.svg", theme.text_dim, NavAction::Up),
+                ]
+                .map(|(id, icon, color, action)| {
+                    ui::top_bar::toolbar_button(&theme, id, icon, color).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _window, cx| action.run(this, cx)),
+                    )
+                }),
             )
             .child(self.render_breadcrumbs(cx));
 
@@ -157,11 +174,7 @@ impl Workspace {
                 .child(div().flex_1().min_w_0().child(self.search_input.clone()))
                 // The `/` hint: press it to focus the box. Hidden once a
                 // query is present so it never crowds the typed text.
-                .children(
-                    self.query
-                        .is_empty()
-                        .then(|| ui::kbd::keycap(&theme, "/")),
-                )
+                .children(self.query.is_empty().then(|| ui::kbd::keycap(&theme, "/")))
                 .child(
                     ui::top_bar::magic_toggle(&theme, self.in_magic_view()).on_click(cx.listener(
                         |this, _: &ClickEvent, window, cx| {
@@ -698,7 +711,9 @@ impl Render for Workspace {
             // shortcuts fire here (list focused) but not while the search
             // box is focused, so those keys stay typeable as text.
             .key_context("Workspace")
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ToggleShortcuts, _window, cx| {
                 this.shortcuts_open = !this.shortcuts_open;
                 cx.notify();

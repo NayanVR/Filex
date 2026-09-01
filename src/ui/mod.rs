@@ -29,3 +29,19 @@ pub mod theme;
 pub mod tooltip;
 pub mod top_bar;
 pub mod update_banner;
+
+use gpui::{Div, div, prelude::*};
+
+/// The shared look of every surface that floats above the browse view —
+/// context menu, modal dialog, settings and shortcuts cards. Callers chain
+/// their own `.id()`, width, padding and gap.
+pub fn card(theme: &theme::Theme) -> Div {
+    div()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.panel)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+}

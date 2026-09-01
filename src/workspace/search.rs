@@ -121,10 +121,7 @@ impl Workspace {
                     );
                     this.journal.record(applied);
                 }
-                let cwd = this.cwd.clone();
-                this.load_dir(&cwd, cx);
-                this.refresh_sidebar_tags(cx);
-                cx.notify();
+                this.refresh_after_op(cx);
             })
             .ok();
         })

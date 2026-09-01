@@ -1,6 +1,75 @@
 //! Menus, modals, side panels, filter chips, and row builders.
 
 use super::*;
+use filex::settings::Settings;
+
+/// One plain on/off row of the settings modal: element id, label,
+/// explanation, how to read the value, how to flip it, and anything to do
+/// afterwards. A table rather than six near-identical `.child(...)` blocks
+/// — adding a boolean setting is now one entry.
+type SettingToggle = (
+    &'static str,
+    &'static str,
+    &'static str,
+    fn(&Settings) -> bool,
+    fn(&mut Settings),
+    fn(&Workspace, &mut Context<Workspace>),
+);
+
+/// Nothing to do after flipping — the case for every toggle but one.
+fn no_follow_up(_: &Workspace, _: &mut Context<Workspace>) {}
+
+const SETTING_TOGGLES: &[SettingToggle] = &[
+    (
+        "show-hidden",
+        "Show hidden files",
+        "Dotfiles and OS-hidden entries in the browse list",
+        |s| s.show_hidden_files,
+        |s| s.show_hidden_files = !s.show_hidden_files,
+        no_follow_up,
+    ),
+    (
+        "index-system-files",
+        "Index system folders",
+        "Include C:\\Windows, Program Files, and the like in search. Off saves memory; takes effect on next rebuild. Folders stay browsable either way.",
+        |s| s.index_system_files,
+        |s| s.index_system_files = !s.index_system_files,
+        no_follow_up,
+    ),
+    (
+        "confirm-delete",
+        "Confirm before deleting",
+        "First press arms; a second press moves the file to the trash",
+        |s| s.confirm_delete,
+        |s| s.confirm_delete = !s.confirm_delete,
+        no_follow_up,
+    ),
+    (
+        "dirs-first",
+        "Directories first",
+        "Group folders above files whatever the sort order",
+        |s| s.sort.directories_first,
+        |s| s.sort.directories_first = !s.sort.directories_first,
+        no_follow_up,
+    ),
+    (
+        "thumbnails",
+        "Image thumbnails",
+        "Decode small previews for image files in the list",
+        |s| s.thumbnails_enabled,
+        |s| s.thumbnails_enabled = !s.thumbnails_enabled,
+        no_follow_up,
+    ),
+    (
+        "crash-reports",
+        "Share anonymous diagnostics",
+        "Scrubbed crashes + performance only — never file names, paths, or queries",
+        |s| s.crash_reports,
+        |s| s.crash_reports = !s.crash_reports,
+        // Turning it on drains anything already queued.
+        Workspace::spawn_crash_upload,
+    ),
+];
 
 impl Workspace {
     /// The slim update banner above the status bar, or nothing when there's
@@ -187,94 +256,16 @@ impl Workspace {
                 "Row height and icon size in the file list",
                 self.render_density_selector(&theme, settings.density, cx),
             ))
-            .child(
-                ui::settings_pane::toggle_row(
-                    &theme,
-                    "show-hidden",
-                    "Show hidden files",
-                    "Dotfiles and OS-hidden entries in the browse list",
-                    settings.show_hidden_files,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.show_hidden_files = !s.show_hidden_files);
-                    });
-                })),
-            )
-            .child(
-                ui::settings_pane::toggle_row(
-                    &theme,
-                    "index-system-files",
-                    "Index system folders",
-                    "Include C:\\Windows, Program Files, and the like in search. Off saves memory; takes effect on next rebuild. Folders stay browsable either way.",
-                    settings.index_system_files,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.index_system_files = !s.index_system_files);
-                    });
-                })),
-            )
-            .child(
-                ui::settings_pane::toggle_row(
-                    &theme,
-                    "confirm-delete",
-                    "Confirm before deleting",
-                    "First press arms; a second press moves the file to the trash",
-                    settings.confirm_delete,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.confirm_delete = !s.confirm_delete);
-                    });
-                })),
-            )
-            .child(
-                ui::settings_pane::toggle_row(
-                    &theme,
-                    "dirs-first",
-                    "Directories first",
-                    "Group folders above files whatever the sort order",
-                    settings.sort.directories_first,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| {
-                            s.sort.directories_first = !s.sort.directories_first;
-                        });
-                    });
-                })),
-            )
-            .child(
-                ui::settings_pane::toggle_row(
-                    &theme,
-                    "thumbnails",
-                    "Image thumbnails",
-                    "Decode small previews for image files in the list",
-                    settings.thumbnails_enabled,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.thumbnails_enabled = !s.thumbnails_enabled);
-                    });
-                })),
-            )
-            .child(
-                ui::settings_pane::toggle_row(
-                    &theme,
-                    "crash-reports",
-                    "Share anonymous diagnostics",
-                    "Scrubbed crashes + performance only — never file names, paths, or queries",
-                    settings.crash_reports,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.crash_reports = !s.crash_reports);
-                    });
-                    // Turning it on drains anything already queued.
-                    this.spawn_crash_upload(cx);
-                })),
-            )
+            .children(SETTING_TOGGLES.iter().map(
+                |&(id, label, description, read, toggle, follow_up)| {
+                    ui::settings_pane::toggle_row(&theme, id, label, description, read(&settings))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.settings
+                                .update(cx, |store, cx| store.update(cx, toggle));
+                            follow_up(this, cx);
+                        }))
+                },
+            ))
             .child(ui::settings_pane::footnote(&theme, file_note));
         let card = ui::settings_pane::settings_card(&theme, "settings-panel")
             .on_click(|_, _, cx| cx.stop_propagation())
@@ -307,7 +298,8 @@ impl Workspace {
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.shortcuts_open = false;
                     cx.notify();
-                }));
+                }))
+                .into_any_element();
         // Never taller than the window: the header stays put and the list
         // of groups scrolls, so a short window can't clip the last rows.
         let max_h = (window.viewport_size().height - px(80.)).max(px(240.));
@@ -339,34 +331,18 @@ impl Workspace {
             }
             body = body.child(section);
         }
-        let card = div()
+        let card = ui::card(&theme)
             .id("shortcuts-panel")
             .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
             .w(px(460.))
             .max_h(max_h)
             .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.panel)
-            .shadow_lg()
-            .flex()
-            .flex_col()
             .gap_3()
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text)
-                            .child("Keyboard Shortcuts"),
-                    )
-                    .child(close),
-            )
+            .child(ui::settings_pane::card_header(
+                &theme,
+                "Keyboard Shortcuts",
+                close,
+            ))
             .child(body);
         Some(
             ui::modal::backdrop("shortcuts-backdrop")
@@ -389,21 +365,43 @@ impl Workspace {
         current: ThemeMode,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let segment = |id: &'static str, label: &'static str, mode: ThemeMode| {
-            ui::settings_pane::segment(theme, id, label, current == mode).on_click(cx.listener(
-                move |this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.theme = mode);
-                    });
-                },
-            ))
-        };
-        ui::settings_pane::segmented(theme)
-            .child(segment("theme-system", "System", ThemeMode::System))
-            .child(segment("theme-light", "Light", ThemeMode::Light))
-            .child(segment("theme-dark", "Dark", ThemeMode::Dark))
-            .child(segment("theme-oled", "OLED", ThemeMode::Oled))
-            .into_any_element()
+        self.segmented_setting(
+            theme,
+            current,
+            &[
+                ("theme-system", "System", ThemeMode::System),
+                ("theme-light", "Light", ThemeMode::Light),
+                ("theme-dark", "Dark", ThemeMode::Dark),
+                ("theme-oled", "OLED", ThemeMode::Oled),
+            ],
+            |s, mode| s.theme = mode,
+            cx,
+        )
+    }
+
+    /// A segmented control bound to an enum setting: one segment per
+    /// option, the current one filled, each writing straight to the store.
+    /// Shared by the Appearance and Density rows.
+    fn segmented_setting<T: PartialEq + Copy + 'static>(
+        &self,
+        theme: &Theme,
+        current: T,
+        options: &[(&'static str, &'static str, T)],
+        set: fn(&mut Settings, T),
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut row = ui::settings_pane::segmented(theme);
+        for &(id, label, value) in options {
+            row = row.child(
+                ui::settings_pane::segment(theme, id, label, current == value).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.settings
+                            .update(cx, |store, cx| store.update(cx, |s| set(s, value)));
+                    }),
+                ),
+            );
+        }
+        row.into_any_element()
     }
 
     /// The Comfortable/Compact list-density control.
@@ -413,19 +411,16 @@ impl Workspace {
         current: Density,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let segment = |id: &'static str, label: &'static str, density: Density| {
-            ui::settings_pane::segment(theme, id, label, current == density).on_click(cx.listener(
-                move |this, _: &ClickEvent, _window, cx| {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.density = density);
-                    });
-                },
-            ))
-        };
-        ui::settings_pane::segmented(theme)
-            .child(segment("density-comfortable", "Comfortable", Density::Comfortable))
-            .child(segment("density-compact", "Compact", Density::Compact))
-            .into_any_element()
+        self.segmented_setting(
+            theme,
+            current,
+            &[
+                ("density-comfortable", "Comfortable", Density::Comfortable),
+                ("density-compact", "Compact", Density::Compact),
+            ],
+            |s, density| s.density = density,
+            cx,
+        )
     }
 
     /// The accent-color swatch row: `Default` (the palette's own accent)

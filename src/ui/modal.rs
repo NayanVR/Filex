@@ -26,18 +26,7 @@ pub fn backdrop(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// The dialog card.
 pub fn panel(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .w(px(400.))
-        .p_4()
-        .rounded_lg()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.panel)
-        .shadow_lg()
-        .flex()
-        .flex_col()
-        .gap_2()
+    super::card(theme).id(id).w(px(400.)).p_4().gap_2()
 }
 
 pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {

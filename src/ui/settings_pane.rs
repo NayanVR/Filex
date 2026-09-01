@@ -18,18 +18,7 @@ use super::theme::Theme;
 /// view. Fixed width, sized to its content. Callers chain `.on_click`
 /// (to stop the backdrop's click-through) and the rows.
 pub fn settings_card(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .w(px(480.))
-        .p_4()
-        .rounded_lg()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.panel)
-        .shadow_lg()
-        .flex()
-        .flex_col()
-        .gap_1()
+    super::card(theme).id(id).w(px(480.)).p_4().gap_1()
 }
 
 /// The card's header: a heading on the left and a close ✕ on the right.

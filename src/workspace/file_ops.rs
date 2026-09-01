@@ -4,6 +4,17 @@
 use super::*;
 
 impl Workspace {
+    /// Bring the browse view back in sync after a file op has landed:
+    /// re-read the current directory and refresh the sidebar's distinct-tag
+    /// list, since an op may have migrated tag keys (moved/copied/dropped).
+    /// Every apply/undo path ends here, so they can't drift apart.
+    pub(super) fn refresh_after_op(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.cwd.clone();
+        self.load_dir(&cwd, cx);
+        self.refresh_sidebar_tags(cx);
+        cx.notify();
+    }
+
     /// Write every selected item's path to the OS clipboard (one per
     /// line), for pasting into a terminal or another app.
     pub(super) fn copy_selected_paths(&mut self, cx: &mut Context<Self>) {
@@ -373,12 +384,7 @@ impl Workspace {
                     );
                     this.journal.record(applied);
                 }
-                let cwd = this.cwd.clone();
-                this.load_dir(&cwd, cx);
-                // A file op may have migrated tags (moved/copied/dropped
-                // keys), so refresh the sidebar's distinct-tag list.
-                this.refresh_sidebar_tags(cx);
-                cx.notify();
+                this.refresh_after_op(cx);
             })
             .ok();
         })
@@ -442,12 +448,7 @@ impl Workspace {
                     );
                     this.journal.record(applied);
                 }
-                let cwd = this.cwd.clone();
-                this.load_dir(&cwd, cx);
-                // A file op may have migrated tags (moved/copied/dropped
-                // keys), so refresh the sidebar's distinct-tag list.
-                this.refresh_sidebar_tags(cx);
-                cx.notify();
+                this.refresh_after_op(cx);
             })
             .ok();
         })
@@ -560,12 +561,7 @@ impl Workspace {
                     }
                     Err(err) => this.notice = Some(format!("{err:#}").into()),
                 }
-                let cwd = this.cwd.clone();
-                this.load_dir(&cwd, cx);
-                // A file op may have migrated tags (moved/copied/dropped
-                // keys), so refresh the sidebar's distinct-tag list.
-                this.refresh_sidebar_tags(cx);
-                cx.notify();
+                this.refresh_after_op(cx);
             })
             .ok();
         })
@@ -646,12 +642,7 @@ impl Workspace {
                         this.journal.restore(batch);
                     }
                 }
-                let cwd = this.cwd.clone();
-                this.load_dir(&cwd, cx);
-                // A file op may have migrated tags (moved/copied/dropped
-                // keys), so refresh the sidebar's distinct-tag list.
-                this.refresh_sidebar_tags(cx);
-                cx.notify();
+                this.refresh_after_op(cx);
             })
             .ok();
         })

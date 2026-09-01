@@ -37,19 +37,12 @@ pub fn overlay(id: impl Into<ElementId>) -> Stateful<Div> {
 /// already clamped by the caller; `items` come from [`item`] /
 /// [`separator`].
 pub fn panel(theme: &Theme, position: Point<Pixels>, items: Vec<AnyElement>) -> impl IntoElement {
-    div()
+    super::card(theme)
         .absolute()
         .left(position.x)
         .top(position.y)
         .w(px(MENU_WIDTH))
         .py_1()
-        .rounded_lg()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.panel)
-        .shadow_lg()
-        .flex()
-        .flex_col()
         .children(items)
         .with_animation(
             "context-menu-open",
