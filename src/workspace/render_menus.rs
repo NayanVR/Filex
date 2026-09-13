@@ -476,31 +476,6 @@ impl Workspace {
         row.child(hex_box).into_any_element()
     }
 
-    /// A row for one service-managed root (service mode has no local
-    /// slots; state comes from the status poll).
-    #[cfg(target_os = "windows")]
-    pub(super) fn render_service_root_row(
-        &self,
-        ix: usize,
-        root: &filex::index::ipc::RootStatus,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let path = PathBuf::from(&root.path);
-        let label: SharedString = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.path.clone())
-            .into();
-        let theme = *cx.theme();
-        ui::sidebar::sidebar_row(&theme, ("service-root", ix))
-            .child(ui::icon::ui_icon("icons/dot.svg", theme.accent).size(px(14.)))
-            .child(div().flex_1().overflow_hidden().child(label))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                this.navigate(path.clone(), cx);
-            }))
-            .into_any_element()
-    }
-
     // `use<>`: the built element owns its data; without opting out of
     // lifetime capture it couldn't be collected across loop iterations.
     pub(super) fn render_root_row(
@@ -514,22 +489,22 @@ impl Workspace {
         // Clicking a healthy root navigates to it; clicking a failed one
         // surfaces why it failed in the status bar.
         let failure: Option<SharedString> = match &slot.state {
-            RootState::Failed(err) => Some(err.clone()),
+            IndexState::Failed(err) => Some(err.clone()),
             _ => None,
         };
         // Building spins (indexing is live); ready/failed are static.
         // Sidebar rows aren't virtualized, so animating here is fine.
         let marker = match &slot.state {
-            RootState::Building => ui::icon::spinner(
+            IndexState::Building => ui::icon::spinner(
                 "icons/loader-circle.svg",
                 theme.text_dim,
                 14.,
                 ("root-spin", ix),
             ),
-            RootState::Ready { .. } => ui::icon::ui_icon("icons/dot.svg", theme.accent)
+            IndexState::Ready => ui::icon::ui_icon("icons/dot.svg", theme.accent)
                 .size(px(14.))
                 .into_any_element(),
-            RootState::Failed(_) => ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn)
+            IndexState::Failed(_) => ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn)
                 .size(px(14.))
                 .into_any_element(),
         };
@@ -687,7 +662,7 @@ impl Workspace {
                         }))
                         .into_any_element(),
                 );
-                if count <= 1 && is_dir && !self.service_mode() {
+                if count <= 1 && is_dir {
                     let p = path.clone();
                     items.push(
                         ui::menu::item(&theme, "menu-index", "Index This Folder", false)

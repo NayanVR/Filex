@@ -1,0 +1,717 @@
+use filex::{
+    catalog::{
+        segment::{Identity, Record, Root, Segment},
+        wal::{Delta, Transaction, Wal},
+    },
+    daemon::{
+        ipc::{Client, Command, Query, Response},
+        query, server,
+        view::View,
+    },
+};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+fn record(id: u64, parent: u64, name: &[u8], dir: bool) -> Record {
+    Record {
+        id,
+        parent,
+        root: 1,
+        name: name.to_vec(),
+        flags: u8::from(dir),
+        identity: Identity {
+            device: 1,
+            key: id,
+            birth: 1,
+        },
+        size: Some(id),
+        mtime: Some(1700000000),
+    }
+}
+#[test]
+fn mapped_segment_roundtrip_and_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("segment.fx2");
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let records = vec![
+        record(1, 0, b"test", true),
+        record(2, 1, b"Report.pdf", false),
+        record(3, 1, b"XMLHttpRequest.rs", false),
+        record(4, 1, &[255], false),
+    ];
+    let segment = Segment::build(records.clone(), roots, 42).unwrap();
+    segment.save(&path).unwrap();
+    drop(segment);
+    let mapped = unsafe { Segment::open(&path) }.unwrap();
+    assert_eq!(mapped.sequence, 42);
+    for (i, r) in records.iter().enumerate() {
+        assert_eq!(&mapped.record(i), r);
+    }
+    assert_eq!(mapped.search.search("report", 100).len(), 1);
+    assert_eq!(mapped.search.search("http", 100).len(), 1);
+    assert_eq!(mapped.search.fuzzy_names("xhr").len(), 1);
+    drop(mapped);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[128] ^= 1;
+    std::fs::write(&path, bytes).unwrap();
+    assert!(unsafe { Segment::open(&path) }.is_err());
+}
+#[test]
+fn wal_recovers_torn_tail_and_rejects_complete_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal");
+    let (wmut, _) = Wal::open(&path).unwrap();
+    let mut wal = wmut;
+    wal.append(&Transaction {
+        sequence: 1,
+        deltas: vec![Delta::Upsert(record(1, 0, b"root", true))],
+        next_id: 2,
+    })
+    .unwrap();
+    drop(wal);
+    let good = std::fs::read(&path).unwrap();
+    for tail in [&[1u8][..], &[4, 0, 0, 0, 1, 2][..]] {
+        let mut torn = good.clone();
+        torn.extend_from_slice(tail);
+        std::fs::write(&path, torn).unwrap();
+        let (wal, tx) = Wal::open(&path).unwrap();
+        assert_eq!(tx.len(), 1);
+        drop(wal);
+        assert_eq!(std::fs::read(&path).unwrap(), good);
+    }
+    let mut bad = good;
+    bad[8] ^= 1;
+    std::fs::write(path.clone(), bad).unwrap();
+    assert!(Wal::open(&path).is_err());
+}
+#[track_caller]
+fn wait_until(mut condition: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !condition() {
+        assert!(start.elapsed() < Duration::from_secs(20), "timed out");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+#[test]
+fn daemon_search_stream_live_move_recovery_and_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("files");
+    let data = dir.path().join("index");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    std::fs::create_dir(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/report.pdf"), b"hello").unwrap();
+    std::fs::write(root.join("report.txt"), b"text").unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let path = data.clone();
+    let roots = vec![root.clone()];
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown).unwrap());
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| {
+        client.status().is_ok_and(|s| {
+            if s.error.is_some() {
+                eprintln!("build error: {:?}", s.error);
+            }
+            !s.building && s.error.is_none() && !s.roots.is_empty()
+        })
+    });
+    let cancel = AtomicBool::new(false);
+    let query = Query {
+        text: "report".into(),
+        client: 1,
+        ..Default::default()
+    };
+    let first = client.search(query.clone(), &cancel).unwrap();
+    assert_eq!(first.hits.len(), 2);
+    let original = first
+        .hits
+        .iter()
+        .find(|h| h.name == "report.pdf")
+        .unwrap()
+        .clone();
+    let mut complete = false;
+    let mut count = 0;
+    client
+        .stream_matches(query.clone(), &cancel, |batch| {
+            count += batch.hits.len();
+            complete |= batch.total == Some(2);
+            true
+        })
+        .unwrap();
+    assert!(complete);
+    assert_eq!(count, 2);
+    std::fs::rename(root.join("docs"), root.join("moved")).unwrap();
+    client
+        .hint(1, vec![root.join("docs"), root.join("moved")])
+        .unwrap();
+    wait_until(|| {
+        client.search(query.clone(), &cancel).is_ok_and(|p| {
+            p.hits
+                .iter()
+                .any(|h| h.id == original.id && h.path == root.join("moved/report.pdf"))
+        })
+    });
+    assert!(client.verify(original).is_err());
+    std::fs::write(root.join("fresh.txt"), b"new").unwrap();
+    client.hint(2, vec![root.join("fresh.txt")]).unwrap();
+    let fresh = Query {
+        text: "fresh".into(),
+        client: 1,
+        ..Default::default()
+    };
+    wait_until(|| {
+        client
+            .search(fresh.clone(), &cancel)
+            .is_ok_and(|p| p.hits.len() == 1)
+    });
+    let allowed = Query {
+        allowed: Some(vec![root.join("report.txt")]),
+        ..query.clone()
+    };
+    assert_eq!(client.search(allowed, &cancel).unwrap().hits.len(), 1);
+    let scoped = Query {
+        scope: Some(root.join("moved")),
+        ..query.clone()
+    };
+    assert_eq!(client.search(scoped, &cancel).unwrap().hits.len(), 1);
+    assert!(matches!(
+        client.call(Command::Status).unwrap(),
+        Response::Status(_)
+    ));
+    stop.store(true, Ordering::Relaxed);
+    thread.join().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let path = data.clone();
+    let root_copy = root.clone();
+    let thread = std::thread::spawn(move || server::run(&path, vec![root_copy], shutdown).unwrap());
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    assert_eq!(client.search(fresh, &cancel).unwrap().hits.len(), 1);
+    stop.store(true, Ordering::Relaxed);
+    thread.join().unwrap();
+}
+#[test]
+fn exhaustive_never_includes_fuzzy() {
+    let segment = Segment::build(
+        [
+            record(1, 0, b"root", true),
+            record(2, 1, b"report.txt", false),
+        ],
+        vec![Root {
+            id: 1,
+            path: "/test".into(),
+            device: 1,
+        }],
+        0,
+    )
+    .unwrap();
+    let view = View {
+        base: Arc::new(segment),
+        layers: Vec::new(),
+        roots: vec![Root {
+            id: 1,
+            path: "/test".into(),
+            device: 1,
+        }],
+        epoch: 0,
+    };
+    let q = Query {
+        text: "repor".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        query::search(&view, &q, &AtomicBool::new(false), &Default::default())
+            .unwrap()
+            .hits
+            .len(),
+        1
+    );
+    let q = Query {
+        text: "reprot".into(),
+        ..q
+    };
+    let mut hits = 0;
+    query::stream(&view, &q, &AtomicBool::new(false), |b| {
+        hits += b.hits.len();
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(hits, 0);
+}
+
+#[test]
+fn paging_filters_overlay_tombstones_and_cancellation() {
+    use filex::{daemon::view::Overlay, search_filter::Filter};
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let mut records = vec![record(1, 0, b"root", true)];
+    records
+        .extend((2..302).map(|id| record(id, 1, format!("report-{id:04}.txt").as_bytes(), false)));
+    records.push(record(302, 1, b"report-final.pdf", false));
+    let base = Arc::new(Segment::build(records, roots.clone(), 7).unwrap());
+    let mut layer = Overlay::default();
+    layer.put(2, None);
+    layer.put(303, Some(record(303, 1, b"report-new.pdf", false)));
+    let view = View {
+        base,
+        layers: vec![Arc::new(layer)],
+        roots,
+        epoch: 8,
+    };
+    let cancel = AtomicBool::new(false);
+    let hot = Default::default();
+    let q = Query {
+        text: "report".into(),
+        fuzzy: false,
+        epoch_hint: Some(8),
+        ..Default::default()
+    };
+    let mut ids = std::collections::HashSet::new();
+    for offset in [0, 100, 200, 300] {
+        let page = query::search(
+            &view,
+            &Query {
+                offset,
+                ..q.clone()
+            },
+            &cancel,
+            &hot,
+        )
+        .unwrap();
+        for h in page.hits {
+            assert!(ids.insert(h.id), "duplicate across pages");
+        }
+    }
+    assert_eq!(ids.len(), 301);
+    assert!(!ids.contains(&2));
+    let page = query::search(
+        &view,
+        &Query {
+            filters: vec![Filter::Ext("pdf".into())],
+            ..q.clone()
+        },
+        &cancel,
+        &hot,
+    )
+    .unwrap();
+    assert_eq!(page.hits.len(), 2);
+    assert!(
+        query::search(
+            &view,
+            &Query {
+                epoch_hint: Some(7),
+                ..q.clone()
+            },
+            &cancel,
+            &hot
+        )
+        .is_err()
+    );
+    cancel.store(true, Ordering::Relaxed);
+    assert!(query::search(&view, &q, &cancel, &hot).is_err());
+}
+#[test]
+fn checkpoint_keeps_fallback_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal");
+    let (mut wal, _) = Wal::open(&path).unwrap();
+    for sequence in 1..=5 {
+        wal.append(&Transaction {
+            sequence,
+            deltas: vec![],
+            next_id: sequence,
+        })
+        .unwrap();
+    }
+    wal.checkpoint(3).unwrap();
+    wal.append(&Transaction {
+        sequence: 6,
+        deltas: vec![],
+        next_id: 7,
+    })
+    .unwrap();
+    drop(wal);
+    let (_, transactions) = Wal::open(&path).unwrap();
+    assert_eq!(
+        transactions.iter().map(|t| t.sequence).collect::<Vec<_>>(),
+        vec![4, 5, 6]
+    );
+}
+#[test]
+fn self_exclusion_bursts_and_corrupt_generation_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let data = root.join("database");
+    std::fs::write(root.join("first.txt"), b"1").unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let path = data.clone();
+    let roots = vec![root.clone()];
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown).unwrap());
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    let cancel = AtomicBool::new(false);
+    let q = Query {
+        fuzzy: false,
+        client: 99,
+        ..Default::default()
+    };
+    let mut paths = Vec::new();
+    for n in 0..300 {
+        let p = root.join(format!("burst-{n}.txt"));
+        std::fs::write(&p, b"x").unwrap();
+        paths.push(p);
+    }
+    client.hint(99, paths).unwrap();
+    wait_until(|| {
+        client
+            .search(
+                Query {
+                    text: "burst-".into(),
+                    limit: 400,
+                    ..q.clone()
+                },
+                &cancel,
+            )
+            .is_ok_and(|p| p.hits.len() == 300)
+    });
+    let page = client
+        .search(
+            Query {
+                limit: 400,
+                ..q.clone()
+            },
+            &cancel,
+        )
+        .unwrap();
+    assert!(page.hits.iter().all(|h| !h.path.starts_with(&data)));
+    stop.store(true, Ordering::Relaxed);
+    thread.join().unwrap();
+    // A restart produces another independently recoverable generation.
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let path = data.clone();
+    let roots = vec![root.clone()];
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown).unwrap());
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    stop.store(true, Ordering::Relaxed);
+    thread.join().unwrap();
+    let manifests = filex::catalog::manifest::candidates(&data).unwrap();
+    assert!(manifests.len() >= 2);
+    let latest = data.join(&manifests[0].1.segment);
+    std::fs::write(latest, b"corrupt").unwrap();
+    std::fs::write(root.join("offline.txt"), b"offline").unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let path = data.clone();
+    let roots = vec![root.clone()];
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown).unwrap());
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    assert_eq!(
+        client
+            .search(
+                Query {
+                    text: "offline".into(),
+                    ..q
+                },
+                &cancel
+            )
+            .unwrap()
+            .hits
+            .len(),
+        1
+    );
+    stop.store(true, Ordering::Relaxed);
+    thread.join().unwrap();
+}
+#[test]
+fn local_protocol_preserves_native_path_bytes() {
+    use filex::catalog::segment::{os_name, raw_name};
+    #[cfg(unix)]
+    let raw = vec![b'/', b't', 255, b'.', b'x'];
+    #[cfg(windows)]
+    let raw = vec![255, 254, 0, 216];
+    #[cfg(not(any(unix, windows)))]
+    let raw = b"/test".to_vec();
+    let path = std::path::PathBuf::from(os_name(&raw));
+    let q = Query {
+        scope: Some(path.clone()),
+        allowed: Some(vec![path.clone()]),
+        ..Default::default()
+    };
+    let bytes = serde_json::to_vec(&q).unwrap();
+    let decoded: Query = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(raw_name(decoded.scope.unwrap().as_os_str()), raw);
+    assert_eq!(decoded.allowed.unwrap(), vec![path]);
+}
+
+#[test]
+fn ranked_pages_agree_with_exhaustive_stream() {
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let mut records = vec![record(1, 0, b"root", true)];
+    let words = ["fooBar", "foobar", "report", "annualReport", "bar", "data"];
+    for i in 0..1500 {
+        records.push(record(
+            i + 2,
+            1,
+            format!(
+                "{}-{:03}.{}",
+                words[i as usize % words.len()],
+                i % 120,
+                if i % 3 == 0 { "pdf" } else { "txt" }
+            )
+            .as_bytes(),
+            false,
+        ));
+    }
+    let mut layer = filex::daemon::view::Overlay::default();
+    for id in 2..80 {
+        layer.put(
+            id,
+            Some(record(
+                id,
+                1,
+                format!("bar-report-renamed-with-a-longer-name-{id}.txt").as_bytes(),
+                false,
+            )),
+        );
+    }
+    let view = View {
+        base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        layers: vec![Arc::new(layer)],
+        roots,
+        epoch: 1,
+    };
+    let hot = std::collections::HashMap::from([(1401, 50), (1402, 100), (1300, 200)]);
+    let cancel = AtomicBool::new(false);
+    for text in ["bar", "report", "a", "data", "foo"] {
+        let q = Query {
+            text: text.into(),
+            fuzzy: false,
+            ..Default::default()
+        };
+        let mut expected = Vec::new();
+        query::stream(&view, &q, &cancel, |batch| {
+            expected.extend(batch.hits);
+            Ok(())
+        })
+        .unwrap();
+        expected.sort_by_cached_key(|h| {
+            let folded = filex::catalog::normalize::nfc_fold(&h.name);
+            (
+                h.tier,
+                std::cmp::Reverse(hot.get(&h.id).copied().unwrap_or(0)),
+                folded.len(),
+                folded,
+                h.id,
+            )
+        });
+        for offset in [0, 100, 200] {
+            let actual = query::search(
+                &view,
+                &Query {
+                    offset,
+                    ..q.clone()
+                },
+                &cancel,
+                &hot,
+            )
+            .unwrap();
+            assert_eq!(
+                actual.hits.iter().map(|h| h.id).collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .skip(offset)
+                    .take(100)
+                    .map(|h| h.id)
+                    .collect::<Vec<_>>(),
+                "query {text}, page {offset}"
+            );
+        }
+    }
+}
+
+#[test]
+fn daemon_process_crash_replays_durable_changes_and_reconciles_offline_changes() {
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("files");
+    let data = dir.path().join("index");
+    std::fs::create_dir(&root).unwrap();
+    let spawn = || {
+        Child(
+            std::process::Command::new(env!("CARGO_BIN_EXE_filex-indexd"))
+                .arg("--data-dir")
+                .arg(&data)
+                .arg(&root)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let child = spawn();
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    let cancel = AtomicBool::new(false);
+    let q = Query {
+        text: "durable".into(),
+        request: 2,
+        client: 77,
+        ..Default::default()
+    };
+    std::fs::write(root.join("durable.txt"), b"x").unwrap();
+    client.hint(1, vec![root.join("durable.txt")]).unwrap();
+    wait_until(|| {
+        client
+            .search(q.clone(), &cancel)
+            .is_ok_and(|p| p.hits.len() == 1)
+    });
+    let original = client.search(q.clone(), &cancel).unwrap().hits[0].id;
+    client
+        .call(Command::Cancel {
+            client: 77,
+            before_request: 2,
+        })
+        .unwrap();
+    assert!(
+        client
+            .search(
+                Query {
+                    request: 1,
+                    ..q.clone()
+                },
+                &cancel
+            )
+            .is_err()
+    );
+    assert_eq!(client.search(q.clone(), &cancel).unwrap().hits.len(), 1);
+    drop(child);
+    std::fs::write(root.join("offline.txt"), b"x").unwrap();
+    let _child = spawn();
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    assert_eq!(client.search(q, &cancel).unwrap().hits[0].id, original);
+    assert_eq!(
+        client
+            .search(
+                Query {
+                    text: "offline".into(),
+                    client: 78,
+                    ..Default::default()
+                },
+                &cancel
+            )
+            .unwrap()
+            .hits
+            .len(),
+        1
+    );
+}
+
+#[test]
+#[ignore = "10,000-file churn/resource qualification; run explicitly"]
+fn ten_thousand_changes_converge_during_queries() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("files");
+    let data = dir.path().join("index");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("anchor.txt"), b"x").unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let path = data.clone();
+    let roots = vec![root.clone()];
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown).unwrap());
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    let creating = root.clone();
+    let files = std::thread::spawn(move || {
+        let mut paths = Vec::new();
+        for i in 0..10_000 {
+            let p = creating.join(format!("burst-{i:05}.txt"));
+            std::fs::write(&p, b"x").unwrap();
+            paths.push(p);
+        }
+        paths
+    });
+    let cancel = AtomicBool::new(false);
+    let q = Query {
+        text: "t".into(),
+        client: 555,
+        ..Default::default()
+    };
+    let mut samples = Vec::new();
+    while !files.is_finished() {
+        let start = Instant::now();
+        let page = client.search(q.clone(), &cancel).unwrap();
+        assert!(!page.hits.is_empty() && page.hits.len() <= 100);
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let paths = files.join().unwrap();
+    for (i, chunk) in paths.chunks(2048).enumerate() {
+        client.hint(i as u64 + 1, chunk.to_vec()).unwrap();
+    }
+    wait_until(|| {
+        let mut total = None;
+        client
+            .stream_matches(
+                Query {
+                    text: "burst-".into(),
+                    client: 556,
+                    ..Default::default()
+                },
+                &cancel,
+                |b| {
+                    if b.total.is_some() {
+                        total = b.total;
+                    }
+                    true
+                },
+            )
+            .is_ok()
+            && total == Some(10_000)
+    });
+    samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "churn queries={}, p95_ms={:.3}",
+        samples.len(),
+        samples[(samples.len() * 95 / 100).min(samples.len() - 1)]
+    );
+    stop.store(true, Ordering::Relaxed);
+    thread.join().unwrap();
+}

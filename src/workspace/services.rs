@@ -4,10 +4,7 @@
 use super::*;
 
 impl Workspace {
-    /// Sample memory use on a slow timer for the observability backend: the
-    /// index arena bytes (the filex-controlled figure behind the memory
-    /// question) plus process RSS. Ready-root index handles are cloned on
-    /// the UI thread; the `approx_bytes` walk and the send run off it.
+    /// Sample UI RSS; the UI owns zero catalog bytes. Daemon resources are separate.
     #[cfg(feature = "observability")]
     pub(super) fn spawn_resource_sampling(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -15,26 +12,10 @@ impl Workspace {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(60))
                     .await;
-                let handles = this.update(cx, |this, _cx| {
-                    this.roots
-                        .iter()
-                        .filter_map(|slot| slot.ready_index())
-                        .collect::<Vec<_>>()
-                });
-                let Ok(handles) = handles else {
-                    break; // workspace dropped
+                let Ok(roots) = this.update(cx, |this, _| this.roots.len()) else {
+                    break;
                 };
-                let roots = handles.len();
-                let arena_bytes = cx
-                    .background_executor()
-                    .spawn(async move {
-                        handles
-                            .iter()
-                            .map(|index| read_index(index).approx_bytes() as u64)
-                            .sum::<u64>()
-                    })
-                    .await;
-                filex::observability::record_resource_sample(arena_bytes, roots);
+                filex::observability::record_resource_sample(0, roots);
             }
         })
         .detach();
@@ -71,10 +52,10 @@ impl Workspace {
 
     /// Check the manifest once on launch (distribution decision 7: no
     /// timer) and surface the banner if a newer version exists. Notice-
-    /// only — macOS/Linux install via their package manager, so this never
+    /// only — installation remains with the platform package workflow; this never
     /// downloads or verifies an artifact. Off-thread; a failed check is
     /// silent (retried next launch).
-    #[cfg(all(not(target_os = "windows"), feature = "updater"))]
+    #[cfg(feature = "updater")]
     pub(super) fn spawn_update_check(&self, cx: &mut Context<Self>) {
         let url = Self::UPDATE_MANIFEST_URL;
         if url.is_empty() {
@@ -133,95 +114,65 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Probe for filex-indexd; on success run in service mode, otherwise
-    /// start local indexing. Runs off-thread — the UI shows "indexing
-    /// 0/0" briefly while probing.
-    #[cfg(target_os = "windows")]
+    /// Connect or start the per-user daemon; reconnect without an in-process index.
     pub(super) fn spawn_service_probe(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let client = cx
-                .background_executor()
-                .spawn(async { filex::index::ipc::ServiceClient::try_connect().ok() })
-                .await;
-            this.update(cx, |this, cx| {
-                match client {
-                    Some(client) => {
-                        this.service = Some(std::sync::Arc::new(client));
-                        this.spawn_service_status_poll(cx);
-                    }
-                    None => {
-                        for path in this.configured_roots(cx) {
-                            this.add_root_slot(path, cx);
-                        }
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Keep the service's root/file counts fresh; on IPC failure fall
-    /// back to local indexing so search keeps working.
-    #[cfg(target_os = "windows")]
-    pub(super) fn spawn_service_status_poll(&self, cx: &mut Context<Self>) {
-        let Some(client) = self.service.clone() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
             loop {
-                let status = cx
+                let existing = this.update(cx, |this, _| this.service.clone());
+                let Ok(existing) = existing else {
+                    break;
+                };
+                let outcome = cx
                     .background_executor()
-                    .spawn({
-                        let client = client.clone();
-                        async move { client.status() }
+                    .spawn(async move {
+                        let client = match existing {
+                            Some(client) => client,
+                            None => std::sync::Arc::new(filex::daemon::ipc::Client::start()?),
+                        };
+                        let status = client.status()?;
+                        Ok::<_, anyhow::Error>((client, status))
                     })
                     .await;
-                let keep_polling = this.update(cx, |this, cx| match status {
-                    Ok(status) => {
-                        this.service_status = status.roots;
+                if this
+                    .update(cx, |this, cx| {
+                        match outcome {
+                            Ok((client, status)) => {
+                                // A Magic plan keeps its captured epoch while the
+                                // filesystem changes. Refresh it on initial recovery,
+                                // not on every ordinary catalog publication.
+                                let refresh = this.service.is_none()
+                                    || !this.in_magic_view()
+                                    || (this.daemon_status.building && !status.building);
+                                let changed = this.service.is_none()
+                                    || status.epoch != this.daemon_status.epoch
+                                    || status.building != this.daemon_status.building;
+                                this.service = Some(client);
+                                this.roots =
+                                    status.roots.iter().map(IndexedRoot::from_status).collect();
+                                this.daemon_status = status;
+                                if changed && refresh && !this.query.is_empty() {
+                                    this.update_search(cx);
+                                }
+                            }
+                            Err(_) => {
+                                this.service = None;
+                                this.daemon_status.error = Some(
+                                    "Search unavailable — reconnecting to filex-indexd".into(),
+                                );
+                            }
+                        }
                         cx.notify();
-                        true
-                    }
-                    Err(err) => {
-                        tracing::warn!("index service lost ({err:#}); indexing locally");
-                        this.service_disconnected(cx);
-                        false
-                    }
-                });
-                if !matches!(keep_polling, Ok(true)) {
+                    })
+                    .is_err()
+                {
                     break;
                 }
                 cx.background_executor()
-                    .timer(std::time::Duration::from_secs(5))
+                    .timer(std::time::Duration::from_millis(100))
                     .await;
             }
         })
         .detach();
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(super) fn service_disconnected(&mut self, cx: &mut Context<Self>) {
-        self.service = None;
-        self.service_status.clear();
-        if self.roots.is_empty() {
-            for path in self.configured_roots(cx) {
-                self.add_root_slot(path, cx);
-            }
-        }
-        self.update_search(cx);
-        cx.notify();
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(super) fn service_mode(&self) -> bool {
-        self.service.is_some()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    pub(super) fn service_mode(&self) -> bool {
-        false
     }
 
     pub(super) fn spawn_fda_check(&self, cx: &mut Context<Self>) {
@@ -229,7 +180,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let has_access = cx
                 .background_executor()
-                .spawn(async { filex::index::macos::has_full_disk_access() })
+                .spawn(async { filex::ingest::has_full_disk_access() })
                 .await;
             this.update(cx, |this, cx| {
                 this.fda_missing = !has_access;

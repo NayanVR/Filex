@@ -1,25 +1,25 @@
 [package]
 name = "filex"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 
 [features]
 default = ["app"]
+# Local aggregate measurements and alternate search representations. Never
+# enabled by the application or daemon release builds.
+index-v2-lab = []
 # The GPUI application. The index library builds without it, so indexing
 # logic can be cross-checked/tested for other platforms without pulling in
 # UI toolchains (cargo check --no-default-features --target ...).
 app = ["dep:gpui", "dep:futures", "dep:image", "dep:ureq", "updater"]
-# Update downloader: HTTPS GET for the manifest + artifact. Opt-in so the
-# default library build stays network-free; enabled by the UI and, on
-# Windows, by the index service (which must reach the network to self-
-# update — a deliberate exception to the network-free service rule, gated
-# by the verify-before-install check). See docs/design-distribution.md §3.
+# Update downloader for the UI. The per-user daemon release is built
+# without default features and has no update or telemetry transport.
 updater = ["dep:ureq"]
 # Observability: Sentry crash/error reporting + performance measurements +
 # release-health sessions, UI process only. This is the *only* telemetry
 # transport (the legacy FILEX_CRASH_ENDPOINT POST uploader was removed).
-# It is a *build-time* gate, not a consent gate: the elevated filex-indexd
-# service must never link a telemetry SDK, so it is built without this
+# It is a *build-time* gate, not a consent gate: the filex-indexd
+# daemon must never link a telemetry SDK, so it is built without this
 # feature (release CI builds the service plain and the UI with it). The
 # UI's consent is on-by-default/opt-out (the `crash_reports` setting), so
 # shipped UI builds report by default. Uses the ureq transport + rustls to
@@ -35,10 +35,6 @@ required-features = ["app"]
 
 [dependencies]
 anyhow = "1.0.103"
-# Lock-free snapshot reads for the search index: readers load an immutable
-# `Arc<VolumeIndex>` without ever taking a lock, so a background writer can
-# never stall a search (docs/indexing-architecture.md §3, optimization B).
-arc-swap = "1.7"
 dirs = "6.0.0"
 # Update payload authentication: detached Ed25519 signature over the
 # downloaded artifact bytes, verified before any install step runs. The
@@ -59,7 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = { version = "0.3.32", optional = true }
 gpui = { version = "0.2", optional = true }
 image = { version = "0.25", optional = true }
-# Crash-report upload (UI process only; the lib/service stay network-free).
+# Crash-report upload (UI process only; the daemon has no external network transport).
 ureq = { version = "2.10", optional = true }
 # Observability (UI process only, `observability` feature). Lean transport:
 # ureq + rustls, matching filex's existing HTTP stack — no reqwest/tokio.
@@ -79,14 +75,23 @@ sentry-tracing = { version = "0.49", optional = true }
 # Cross-platform resident-set-size query for the memory measurement
 # (observability feature only); tiny, no transitive deps beyond the OS.
 memory-stats = { version = "1.2", optional = true }
-jwalk = "0.8.1"
 memchr = "2.8.3"
 # Binary property-list codec for the macOS Finder tag xattr
 # (`_kMDItemUserTags`). Kept portable (not macOS-gated) so the encode/
 # decode logic is unit-tested on CI without needing a Mac.
 plist = "1.7"
-rayon = "1.12.0"
 unicode-segmentation = "1.13.3"
+unicode-normalization = "=0.1.24"
+unicode-casefold = "=0.2.0"
+memmap2 = "0.9"
+bytemuck = "1"
+notify = "8"
+fs2 = "0.4"
+
+[[bin]]
+name = "filex-index-lab"
+path = "src/bin/filex-index-lab.rs"
+required-features = ["index-v2-lab"]
 
 [[bench]]
 name = "search_bench"
@@ -101,21 +106,23 @@ name = "filter_bench"
 harness = false
 
 [[bench]]
-name = "bootstrap_bench"
+name = "segment_bench"
 harness = false
 
 [[bench]]
 name = "magic_bench"
 harness = false
 
+[[bench]]
+name = "suffix_probe"
+harness = false
+required-features = ["index-v2-lab"]
+
 [dev-dependencies]
 criterion = "0.8.2"
 tempfile = "3.27.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-dispatch2 = "0.3"
-objc2-core-foundation = "0.3.2"
-objc2-core-services = { version = "0.3.2", features = ["FSEvents", "dispatch2"] }
 # Delete-to-trash: NSFileManager reports where the item landed, which
 # the `trash` crate discards — that handle is what makes undo possible.
 objc2-foundation = { version = "0.3.2", features = [
@@ -135,14 +142,8 @@ trash = "5.2.6"
 [target.'cfg(target_os = "windows")'.dependencies]
 # Recycle Bin with list/restore (undo) via os_limited.
 trash = "5.2.6"
-# SCM service wrapper for filex-indexd (ServiceMain + control handler).
-windows-service = "0.7"
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Storage_FileSystem",
-  "Win32_System_IO",
-  "Win32_System_Ioctl",
-  "Win32_System_Pipes",
-  "Win32_System_Threading",
 ] }

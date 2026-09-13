@@ -6,7 +6,6 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use futures::StreamExt as _;
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
     KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy,
@@ -15,8 +14,6 @@ use gpui::{
 };
 
 use filex::drives::Drive;
-use filex::index::watcher::SharedIndex;
-use filex::index::{LiveIndex, MatchKind, VolumeIndex, manager, start_live_index};
 use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
@@ -208,14 +205,14 @@ fn open_with_dialog(path: &Path) -> std::io::Result<()> {
 
 /// The update affordance for this platform's UI banner. macOS copies a
 /// `brew` command; Linux opens the releases page to re-download the
-/// tarball. (Windows applies via the service, so it isn't handled here.)
-#[cfg(all(not(target_os = "windows"), feature = "updater"))]
+/// tarball. Windows opens the release page for its per-machine MSI.
+#[cfg(feature = "updater")]
 fn platform_affordance() -> filex::update::UpdateAffordance {
     #[cfg(target_os = "macos")]
     {
         filex::update::UpdateAffordance::RunCommand("brew upgrade filex".to_string())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         // TODO(block 5): point at the real releases URL once the repo is
         // published.
@@ -225,7 +222,7 @@ fn platform_affordance() -> filex::update::UpdateAffordance {
     }
 }
 
-const SEARCH_RESULT_LIMIT: usize = 500;
+const SEARCH_RESULT_LIMIT: usize = 100;
 
 /// How long the query must hold still before a scan starts. Sized against
 /// typing, not the scan: ~50 ms falls below a fast typist's inter-key gap
@@ -240,19 +237,7 @@ const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50
 /// trace. Set well above a healthy scan so normal use stays silent.
 const SLOW_OP_MS: u64 = 500;
 
-/// Minimum gap between refreshes triggered by *filesystem* events. Far
-/// longer than [`SEARCH_DEBOUNCE`]: a keystroke is the user waiting on us,
-/// an FSEvent is a `node_modules` write nobody is waiting on. Refreshing
-/// per burst meant a full arena scan plus an O(n) live count many times a
-/// second on an active home directory.
-///
-/// A trailing throttle, not a debounce — under continuous churn a debounce
-/// keeps pushing its deadline back and never refreshes.
-const FS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// A short label for a set of files: the single name quoted, or a count.
-/// `None` for an empty set (callers use it to bail early).
-/// "item" / "items" — Magic card headings and job labels count files.
+/// Singular or plural item label for plans and jobs.
 fn plural_items(n: usize) -> &'static str {
     if n == 1 { "item" } else { "items" }
 }
@@ -337,98 +322,40 @@ fn describe_items(items: &[(PathBuf, String)]) -> Option<String> {
 /// Logs rather than fails — a tag mishap must never derail the file
 /// operation. Runs on the background executor (it persists).
 fn migrate_tags(tags: &PlatformTags, applied: &mut ops::AppliedOp) {
+    filex::daemon::ipc::notify_applied(applied);
     if let Err(err) = tags.apply_applied(applied) {
         tracing::error!("failed to migrate tags: {err:#}");
     }
 }
 
-/// Build search rows for a set of tagged paths (a `tag:`-only query, with
-/// no filename text to rank). Missing paths are skipped and the list is
-/// capped at `limit`. Blocking (stats each path) — call off the UI thread.
-fn rows_from_tagged_paths(paths: Vec<PathBuf>, limit: usize) -> Vec<SearchRow> {
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let meta = std::fs::symlink_metadata(&path).ok()?;
-            let name = path.file_name()?.to_string_lossy().into_owned();
-            Some(SearchRow {
-                name: name.into(),
-                path_label: path.display().to_string().into(),
-                is_dir: meta.is_dir(),
-                target: path,
-            })
-        })
-        .take(limit)
-        .collect()
-}
-
-/// Keep only the rows whose path carries every one of `required` tags
-/// (the filename-search ∩ `tag:` intersection). A no-op when `required`
-/// is empty. Blocking (scans the sidecar) — call off the UI thread.
-/// May a hit feed a Magic plan?
-///
-/// Fuzzy hits are excluded from command queries, because a command
-/// query's rows *are* its plan. Subsequence matching is too loose to carry
-/// that: `gravloc` is a subsequence of `xstate-graph.development.cjs.js` —
-/// fine to surface when browsing, unacceptable to rename on the user's
-/// behalf. Ordinary searches keep every fuzzy hit.
-fn usable_in_plan(kind: MatchKind, command_query: bool) -> bool {
-    !command_query || kind != MatchKind::Fuzzy
-}
-
-fn filter_rows_by_tags(
-    rows: Vec<SearchRow>,
-    store: &PlatformTags,
-    required: &[String],
-) -> Vec<SearchRow> {
-    if required.is_empty() {
-        return rows;
-    }
-    let tagged: std::collections::HashSet<PathBuf> =
-        store.paths_with_all_tags(required).into_iter().collect();
-    rows.into_iter()
-        .filter(|row| tagged.contains(&row.target))
-        .collect()
-}
-
-/// A lock-free snapshot of the index (optimization B). Derefs (through the
-/// `Arc`) to `VolumeIndex`; hold it only as long as the read.
-fn read_index(index: &SharedIndex) -> arc_swap::Guard<std::sync::Arc<VolumeIndex>> {
-    index.load()
-}
-
-enum RootState {
+enum IndexState {
     Building,
-    Ready { live: LiveIndex, files: usize },
+    Ready,
     Failed(SharedString),
 }
-
-/// One indexed root: its own LiveIndex (watcher + writer + snapshot).
-struct RootSlot {
-    /// Canonical path — the identity used to route async updates.
+struct IndexedRoot {
     path: PathBuf,
     label: SharedString,
-    state: RootState,
+    state: IndexState,
 }
-
-impl RootSlot {
-    fn new(path: PathBuf) -> Self {
-        let label: SharedString = path
+impl IndexedRoot {
+    fn from_status(root: &filex::daemon::ipc::RootStatus) -> Self {
+        let label = root
+            .path
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string())
-            .into();
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.path.display().to_string());
+        let state = if root.state == "Building index" {
+            IndexState::Building
+        } else if root.state == "Ready" {
+            IndexState::Ready
+        } else {
+            IndexState::Failed(root.state.clone().into())
+        };
         Self {
-            path,
-            label,
-            state: RootState::Building,
-        }
-    }
-
-    fn ready_index(&self) -> Option<SharedIndex> {
-        match &self.state {
-            RootState::Ready { live, .. } => Some(live.index.clone()),
-            _ => None,
+            path: root.path.clone(),
+            label: label.into(),
+            state,
         }
     }
 }
@@ -619,7 +546,7 @@ struct Workspace {
     cwd: PathBuf,
     entries: Vec<Entry>,
     load_error: Option<SharedString>,
-    roots: Vec<RootSlot>,
+    roots: Vec<IndexedRoot>,
     settings: gpui::Entity<SettingsStore>,
     _settings_subscription: gpui::Subscription,
     /// Last-known OS window appearance, tracked so the `system` theme
@@ -634,12 +561,16 @@ struct Workspace {
     update_status: filex::update::UpdateStatus,
     #[cfg(target_os = "macos")]
     fda_missing: bool,
-    /// Connection to filex-indexd, when the elevated service is running.
+    /// Connection to the per-user filex-indexd daemon.
     /// Searches go over IPC and no local indexing happens.
-    #[cfg(target_os = "windows")]
-    service: Option<std::sync::Arc<filex::index::ipc::ServiceClient>>,
-    #[cfg(target_os = "windows")]
-    service_status: Vec<filex::index::ipc::RootStatus>,
+    service: Option<std::sync::Arc<filex::daemon::ipc::Client>>,
+    daemon_status: filex::daemon::ipc::Status,
+    search_hits: std::collections::HashMap<PathBuf, filex::daemon::ipc::Hit>,
+    search_more: bool,
+    index_system_files: bool,
+    search_page_query: Option<filex::daemon::ipc::Query>,
+    search_paging: bool,
+    search_client_id: u64,
     /// Mirror of the search input's content (the input entity owns it).
     query: String,
     search_input: gpui::Entity<SearchInput>,
@@ -734,10 +665,6 @@ struct Workspace {
     history_forward: Vec<PathBuf>,
     /// Recently-opened folders/files (local-only usage log).
     recents: Recents,
-    /// Cached path → frecency score for stage-B re-ranking, handed to
-    /// background search tasks. Rebuilt when `recents` changes, not per
-    /// keystroke — a 30-day half-life never goes stale within a session.
-    frecency: std::sync::Arc<std::collections::HashMap<PathBuf, f32>>,
     /// Sidecar tag index: enumeration source for the sidebar TAGS section
     /// and the `tag:` filter, and the store whose path keys our file ops
     /// migrate. Shared into background closures, which persist it.
@@ -752,10 +679,6 @@ struct Workspace {
     /// only stops a scan that hasn't started; this stops one that has. A
     /// new search sets the old flag and installs a fresh one.
     search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// True while a filesystem-driven refresh is scheduled. A *throttle*,
-    /// not a debounce: events during the window are dropped rather than
-    /// pushing the deadline back, so churn refreshes on a fixed cadence.
-    fs_refresh_pending: bool,
 }
 
 mod file_ops;
@@ -798,16 +721,15 @@ impl Workspace {
         });
         let accent_hex = cx.new(SearchInput::new);
         accent_hex.update(cx, |input, cx| input.set_placeholder("#RRGGBB", cx));
-        let accent_hex_subscription =
-            cx.subscribe(&accent_hex, |this, _input, event, cx| {
-                if let SearchInputEvent::Changed(text) = event
-                    && let Some(hex) = ui::theme::parse_hex(text)
-                {
-                    this.settings.update(cx, |store, cx| {
-                        store.update(cx, |s| s.accent = filex::settings::AccentColor::Custom(hex));
-                    });
-                }
-            });
+        let accent_hex_subscription = cx.subscribe(&accent_hex, |this, _input, event, cx| {
+            if let SearchInputEvent::Changed(text) = event
+                && let Some(hex) = ui::theme::parse_hex(text)
+            {
+                this.settings.update(cx, |store, cx| {
+                    store.update(cx, |s| s.accent = filex::settings::AccentColor::Custom(hex));
+                });
+            }
+        });
         let settings = cx.new(SettingsStore::new);
         // Settings changes re-derive everything visible that depends on
         // them (the hidden-file filter on the browse list, and the
@@ -815,6 +737,17 @@ impl Workspace {
         let settings_subscription =
             cx.subscribe(&settings, |this, _store, event, cx| match event {
                 SettingsEvent::Changed => {
+                    let include_system = this.settings.read(cx).settings().index_system_files;
+                    if this.index_system_files != include_system {
+                        this.index_system_files = include_system;
+                        if let Some(client) = this.service.clone() {
+                            cx.background_executor()
+                                .spawn(async move {
+                                    let _ = client.call(filex::daemon::ipc::Command::Reconcile);
+                                })
+                                .detach();
+                        }
+                    }
                     let cwd = this.cwd.clone();
                     this.load_dir(&cwd, cx);
                     this.apply_theme(cx);
@@ -823,6 +756,7 @@ impl Workspace {
         let recents = filex::recents::default_recents_file()
             .map(|file| Recents::load(&file))
             .unwrap_or_default();
+        let index_system_files = settings.read(cx).settings().index_system_files;
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
@@ -837,10 +771,17 @@ impl Workspace {
             notice: None,
             #[cfg(target_os = "macos")]
             fda_missing: false,
-            #[cfg(target_os = "windows")]
             service: None,
-            #[cfg(target_os = "windows")]
-            service_status: Vec::new(),
+            daemon_status: filex::daemon::ipc::Status::default(),
+            search_hits: Default::default(),
+            search_more: false,
+            index_system_files,
+            search_page_query: None,
+            search_paging: false,
+            search_client_id: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64)
+                ^ u64::from(std::process::id()),
             query: String::new(),
             search_input,
             _search_input_subscription: subscription,
@@ -882,7 +823,6 @@ impl Workspace {
             tab_cycle: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
-            frecency: std::sync::Arc::new(recents.score_table(filex::frecency::now_secs())),
             recents,
             tags: std::sync::Arc::new(PlatformTags::load(
                 filex::tags::default_tags_file()
@@ -891,29 +831,19 @@ impl Workspace {
             drives: Vec::new(),
             search_debounce: None,
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            fs_refresh_pending: false,
             update_status: filex::update::UpdateStatus::default(),
         };
         this.load_dir(&cwd, cx);
         this.spawn_tag_prune(cx);
         this.refresh_sidebar_tags(cx);
         this.spawn_crash_upload(cx);
-        // Windows probes for the elevated index service first and only
-        // falls back to in-process indexing if it's absent; elsewhere
-        // indexing is always in-process.
-        #[cfg(target_os = "windows")]
         this.spawn_service_probe(cx);
-        #[cfg(not(target_os = "windows"))]
-        for path in this.configured_roots(cx) {
-            this.add_root_slot(path, cx);
-        }
         this.spawn_fda_check(cx);
         this.spawn_drive_refresh(cx);
         #[cfg(feature = "observability")]
         this.spawn_resource_sampling(cx);
-        // macOS/Linux check the manifest themselves (no service); Windows
-        // learns of updates from filex-indexd instead.
-        #[cfg(all(not(target_os = "windows"), feature = "updater"))]
+        // Update discovery belongs to the UI on every platform.
+        #[cfg(feature = "updater")]
         this.spawn_update_check(cx);
         this
     }
@@ -924,6 +854,10 @@ impl Workspace {
     #[cfg(all(target_os = "macos", feature = "updater"))]
     const UPDATE_MANIFEST_URL: &'static str =
         "https://github.com/NayanVR/filex/releases/latest/download/filex-macos.json";
+
+    #[cfg(all(target_os = "windows", feature = "updater"))]
+    const UPDATE_MANIFEST_URL: &'static str =
+        "https://github.com/NayanVR/filex/releases/latest/download/filex-windows.json";
 
     #[cfg(all(target_os = "linux", feature = "updater"))]
     const UPDATE_MANIFEST_URL: &'static str =
@@ -943,7 +877,7 @@ pub fn run() {
     let _sentry_guard = {
         let consent = filex::settings::default_settings_file()
             .and_then(|file| {
-                let legacy = filex::index::manager::default_roots_file();
+                let legacy = filex::ingest::default_roots_file();
                 filex::settings::Settings::load(&file, legacy.as_deref()).ok()
             })
             .is_some_and(|settings| settings.crash_reports);
@@ -1117,49 +1051,6 @@ mod magic_ui_tests {
     /// returned 148 rows, of which 4 actually contained "gravloc". The
     /// rest were subsequence matches on unrelated files, and every one of
     /// them would have been renamed on confirm.
-    #[test]
-    fn a_command_plan_never_includes_fuzzy_matches() {
-        use filex::index::{ROOT, VolumeIndex};
-
-        let mut index = VolumeIndex::new("/vol");
-        for name in ["Gravloc", "Gravloc.pdf", "Gravloc Logo.af"] {
-            index.insert(ROOT, name, false).unwrap();
-        }
-        // Subsequence-matches "gravloc" (g-r-a-v-l-o-c) but shares no
-        // substring with it — exactly the shape that polluted the plan.
-        for name in [
-            "xstate-graph.development.cjs.js",
-            "generate_umath_validation.cpp",
-        ] {
-            index.insert(ROOT, name, false).unwrap();
-        }
-
-        let hits = index.search("gravloc", 500);
-        assert!(
-            hits.iter().any(|h| h.score.kind == MatchKind::Fuzzy),
-            "fixture must actually produce fuzzy hits, or this proves nothing"
-        );
-
-        let planned = hits
-            .iter()
-            .filter(|h| usable_in_plan(h.score.kind, true))
-            .count();
-        let searched = hits
-            .iter()
-            .filter(|h| usable_in_plan(h.score.kind, false))
-            .count();
-
-        assert_eq!(
-            planned, 3,
-            "only the literal Gravloc matches may be planned"
-        );
-        assert_eq!(
-            searched,
-            hits.len(),
-            "ordinary search still shows everything"
-        );
-    }
-
     fn state(outcome: Result<Plan, filex::magic::PlanError>, checked: Vec<bool>) -> MagicState {
         MagicState {
             command: filex::magic::parse("delete screenshots older than 30 days", 1_785_067_200)

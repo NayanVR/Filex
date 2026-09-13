@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use gpui::{Context, EventEmitter};
 
-use filex::index::manager;
+use filex::ingest as manager;
 use filex::settings::{Settings, default_settings_file};
 
 pub enum SettingsEvent {

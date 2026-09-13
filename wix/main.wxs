@@ -1,20 +1,8 @@
 <?xml version="1.0" encoding="windows-1252"?>
-<!--
-  Filex MSI (docs/roadmap.md Phase 2b step 2). Installs the app
-  (filex.exe) and registers the elevated index service (filex-indexd.exe)
-  as an SCM service, so a single admin-consented install gives standard
-  users the USN fast path. Built by cargo-wix (WiX v3): `cargo wix`.
-
-  cargo-wix supplies the preprocessor variables used below: `Version`
-  (from Cargo.toml) and `CargoTargetBinDir` (the built-binary directory).
-  Targets x64 (the only Windows CI/runner arch today).
-
-  The service is registered auto-start AND started by the installer:
-  filex-indexd reports RUNNING before it bootstraps (so the install
-  returns promptly), and a stop is now observed between/after bootstrap
-  and during the walk (start_live_index_cancellable), so an
-  uninstall-time stop no longer waits on the whole initial index.
--->
+<!-- Installs the UI and per-user search daemon. The UI launches the sibling
+     daemon with its own filesystem permissions. WiX major upgrades remove the
+     v1 SCM service through the previous package's uninstall actions.
+     Build with cargo-wix / WiX v3; targets x64. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
       Id="*"
@@ -60,35 +48,8 @@
                 Name="filex-indexd.exe"
                 Source="$(var.CargoTargetBinDir)\filex-indexd.exe"
                 KeyPath="yes" />
-            <!-- Register the elevated index service. `Name` must match
-                 SERVICE_NAME in src/bin/filex-indexd.rs. The service binary
-                 is this component's keypath file. -->
-            <!-- No Arguments: the service resolves its roots from
-                 settings.json and, on a fresh install with none configured,
-                 defaults to every fixed drive (drives::default_index_roots).
-                 (SCM does not deliver ImagePath arguments to ServiceMain
-                 anyway, so a hard-coded root here would have been silently
-                 ignored — see src/bin/filex-indexd.rs.) -->
-            <ServiceInstall
-                Id="FilexIndexdService"
-                Name="filex-indexd"
-                DisplayName="Filex Index Service"
-                Description="Maintains the Filex file index and serves search over a named pipe."
-                Type="ownProcess"
-                Start="auto"
-                ErrorControl="normal"
-                Account="LocalSystem"
-                Vital="yes" />
-            <!-- Start on install; stop on upgrade/uninstall; remove the
-                 registration on uninstall. The service reports RUNNING
-                 before bootstrapping, so install returns promptly. -->
-            <ServiceControl
-                Id="FilexIndexdControl"
-                Name="filex-indexd"
-                Start="install"
-                Stop="both"
-                Remove="uninstall"
-                Wait="yes" />
+            <!-- The UI starts the daemon in the user's security context.
+                 Major upgrades uninstall and remove the old v1 SCM service. -->
           </Component>
 
         </Directory>

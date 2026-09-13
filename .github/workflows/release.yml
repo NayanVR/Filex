@@ -32,7 +32,7 @@ env:
   TAP_REPO: NayanVR/homebrew-filex
 
 jobs:
-  # --- Windows: MSI (app + SCM service), signed -------------------------
+  # --- Windows: MSI (app + per-user daemon), signed -------------------------
   windows:
     name: windows (msi)
     runs-on: windows-latest
@@ -52,18 +52,18 @@ jobs:
         run: cargo install cargo-wix --locked
         env:
           RUSTFLAGS: ""
-      # The elevated service must never link the telemetry SDK, so build it
-      # (and filex-sign) with default features only; the UI app gets
+      # The search daemon must never link the telemetry SDK, so build it
+      # (and filex-sign) without default features; the UI app gets
       # `observability`. Both land in target/release for cargo-wix to
       # package. FILEX_SENTRY_DSN is compiled into the app when the secret
       # is set, and is simply absent (Sentry stays disabled) when it isn't.
-      - name: Build release (service without telemetry; app with observability)
+      - name: Build release (daemon without telemetry; app with observability)
         shell: bash
         env:
           FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
         run: |
           set -euo pipefail
-          cargo build --release --locked --bin filex-indexd
+          cargo build --release --locked --no-default-features --bin filex-indexd
           cargo build --release --locked --features observability --bin filex
       - name: Build the MSI
         run: cargo wix --no-build -v
@@ -106,7 +106,9 @@ jobs:
       - name: Build release
         env:
           FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
-        run: cargo build --release --locked --features observability --bin filex
+        run: |
+          cargo build --release --locked --no-default-features --bin filex-indexd
+          cargo build --release --locked --features observability --bin filex
       - name: Build filex-sign
         run: cargo build --release --locked --no-default-features --bin filex-sign
       - name: Package + sign
@@ -116,7 +118,7 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           ASSET="filex-${VERSION}-linux-x86_64.tar.gz"
-          tar -C target/release -czf "$ASSET" filex
+          tar -C target/release -czf "$ASSET" filex filex-indexd
           URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ASSET}"
           ./target/release/filex-sign sign \
             --version "$VERSION" --url "$URL" \
@@ -145,7 +147,9 @@ jobs:
       - name: Build release
         env:
           FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
-        run: cargo build --release --locked --features observability --bin filex
+        run: |
+          cargo build --release --locked --no-default-features --bin filex-indexd
+          cargo build --release --locked --features observability --bin filex
       - name: Build filex-sign
         run: cargo build --release --locked --no-default-features --bin filex-sign
       - name: Bundle .app, ad-hoc sign, package + sign
@@ -158,6 +162,7 @@ jobs:
           APP="Filex.app"
           mkdir -p "$APP/Contents/MacOS"
           cp target/release/filex "$APP/Contents/MacOS/filex"
+          cp target/release/filex-indexd "$APP/Contents/MacOS/filex-indexd"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

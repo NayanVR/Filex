@@ -71,14 +71,16 @@ impl Workspace {
 
     /// Note `path` as recently opened and persist the log off-thread.
     pub(super) fn record_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(client) = self.service.clone() {
+            let touched = path.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = client.call(filex::daemon::ipc::Command::Touch { path: touched });
+                })
+                .detach();
+        }
         self.recents.record(path);
-        self.refresh_frecency();
         self.persist_recents(cx);
-    }
-
-    /// Rebuild the cached frecency table after `recents` changed.
-    pub(super) fn refresh_frecency(&mut self) {
-        self.frecency = std::sync::Arc::new(self.recents.score_table(filex::frecency::now_secs()));
     }
 
     pub(super) fn persist_recents(&self, cx: &Context<Self>) {
@@ -97,7 +99,6 @@ impl Workspace {
 
     pub(super) fn clear_recents(&mut self, cx: &mut Context<Self>) {
         self.recents.clear();
-        self.refresh_frecency();
         self.persist_recents(cx);
         cx.notify();
     }

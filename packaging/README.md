@@ -1,68 +1,46 @@
-# Packaging & release setup
+# Per-user index daemon
 
-How Filex is distributed and the one-time setup the release pipeline needs.
-Full design: [`docs/design-distribution.md`](../docs/design-distribution.md).
+Release packages include both `filex` and `filex-indexd` in the same executable
+directory. The application starts the sibling daemon automatically and reconnects
+if it exits. Browsing remains usable while indexing is unavailable.
 
-| Platform | Artifact | Install | Update |
-|----------|----------|---------|--------|
-| macOS | ad-hoc-signed `Filex.app` in `filex-*-macos.tar.gz` | Homebrew cask (`brew install --cask …`) | `brew upgrade` |
-| Windows | `Filex-*-x64.msi` (app + `filex-indexd` service) | run the MSI (one SmartScreen prompt) | silent, service-driven |
-| Linux | `filex-*-linux-x86_64.tar.gz` | extract & run | re-download |
+For development:
 
-The release pipeline is [`.github/workflows/release.yml`](../.github/workflows/release.yml),
-triggered by a `v*` tag.
-
-## One-time setup (block 0)
-
-### 1. Generate the signing keypair
-
-Every update payload is signed with our own Ed25519 key — the boundary
-that replaces the OS code signing we don't pay for. **Run once, locally:**
-
-```bash
-cargo run --no-default-features --bin filex-sign -- keygen
+```sh
+cargo build --locked --release --no-default-features --bin filex-indexd
+cargo run --locked --release --bin filex
 ```
 
-- Copy `private_key` into the repo's Actions secret **`FILEX_SIGNING_KEY`**.
-  It must never be committed or pasted anywhere public.
-- Put `public_key` into the two embedded constants (see step 2).
+For a separate daemon with explicit roots and an isolated database:
 
-### 2. Fill the embedded constants
-
-Currently empty placeholders (which safely disable self-update):
-
-- `src/bin/filex-indexd.rs` → `UPDATE_PUBLIC_KEY` = the `public_key` hex,
-  and `MANIFEST_URL` =
-  `https://github.com/<owner>/filex/releases/latest/download/filex-windows.json`
-- `src/main.rs` → `Workspace::UPDATE_MANIFEST_URL` =
-  `https://github.com/<owner>/filex/releases/latest/download/filex-<macos|linux>.json`
-  (and update the Linux releases URL in `platform_affordance`).
-
-The `latest/download/...` URL always resolves to the newest release, so it
-never changes between versions.
-
-### 3. Create the Homebrew tap + token
-
-- Create a public repo **`<owner>/homebrew-filex`** (the tap).
-- Create a PAT with `contents:write` on it, stored as the Actions secret
-  **`TAP_GITHUB_TOKEN`**. The release pipeline writes `Casks/filex.rb` there
-  (see [`homebrew/filex.rb`](homebrew/filex.rb) for the shape).
-- Update `TAP_REPO` in `release.yml` if the owner differs.
-
-Users then install with:
-
-```bash
-brew install --cask <owner>/filex/filex
+```sh
+cargo run --no-default-features --bin filex-indexd -- \
+  --user --data-dir /path/to/database /path/to/root
 ```
 
-## Cutting a release
+Use an absolute database path. It is excluded from both enumeration and watcher
+updates. Without explicit roots, settings and the platform defaults are used.
+The database is under the user's local data directory at `filex/index-v2`.
 
-```bash
-git tag v1.4.0 && git push origin v1.4.0
-```
+The daemon also launches short-lived copies of its own executable to build
+segments. Keep the app and daemon from the same build together. The worker has no
+listening endpoint and cannot publish a generation; the owner validates and
+publishes its output. See [index maintenance](../docs/index-v2-maintenance.md) for
+the process lifecycle and development checks.
 
-The pipeline builds all three artifacts, signs each with `FILEX_SIGNING_KEY`,
-publishes the GitHub Release with the artifacts + `filex-<os>.json`
-manifests, and bumps the cask. Once step 2's constants are filled, existing
-installs pick the update up on next launch (silent on Windows; a banner
-elsewhere).
+Optional supervisors:
+
+- Linux: copy `systemd/filex-indexd.service` into
+  `~/.config/systemd/user/`, adjust `ExecStart`, and enable it with
+  `systemctl --user enable --now filex-indexd`.
+- macOS: copy `launchd/dev.filex.indexd.plist` into `~/Library/LaunchAgents/`,
+  adjust the application path if necessary, and load it with
+  `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.filex.indexd.plist`.
+- Windows: the MSI installs the executables. The UI launches the daemon under the
+  interactive user's account. The v2 MSI does not install an SCM service; a major
+  upgrade removes the old service through the previous MSI's uninstall actions.
+
+The endpoint capability stays in the private user database directory. The daemon
+performs no privileged file operations. Initial enumeration and restart recovery
+can take time; notification overflow requests reconciliation. Full journal-only
+recovery and elevated machine-wide search are not part of this version.

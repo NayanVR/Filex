@@ -1,3 +1,5 @@
+> Historical v1 design. Replaced by [index v2](design-index-v2.md); this document does not describe the shipped runtime.
+
 # filex — Volume Indexing Architecture (Phase 1)
 
 Goal: instant (sub-10ms perceived) filename/path search across whole volumes at

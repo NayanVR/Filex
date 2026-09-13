@@ -1,14 +1,5 @@
-# Windows + Linux validation. macOS is validated on a dev machine (it has
-# its own live FSEvents tests), so no macOS job — by design, don't add one.
-#
-# Two layers:
-# - test: the index library without GPUI (--no-default-features), so
-#   runners exercise the real inotify / fanotify / RDCW / USN-journal code
-#   paths (Windows runners are elevated, so USN live tests run for real)
-#   without UI toolchain deps. Fast; runs the whole suite.
-# - build-app: compiles the actual GPUI application per platform — the
-#   only place the shipped binary is built for Windows/Linux. Slower
-#   (first run compiles gpui; cached after), catches UI-side breakage.
+# Windows and Linux tests and app builds. macOS is exercised locally.
+# Library tests run the portable notify adapters and v2 recovery/IPC path.
 name: CI
 
 on:
@@ -34,14 +25,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run index library tests (fixtures + live watcher smoke tests)
         run: cargo test --locked --no-default-features
+      - name: Run v2 catalog and literal laboratory tests
+        run: cargo test --locked --no-default-features --features index-v2-lab
+      - name: Enforce v2 synthetic recall, ranking, and 505k memory gates
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo bench --locked --no-default-features --features index-v2-lab --bench suffix_probe
       # Benches aren't built by `cargo test`; keep them compiling too.
       - name: Check all library targets (incl. benches)
-        run: cargo check --locked --all-targets --no-default-features
-      # fanotify needs CAP_SYS_ADMIN; rerun its live test elevated so the
-      # privileged fast path is actually exercised (it self-skips above).
-      - name: fanotify live test (privileged)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo -E "$(command -v cargo)" test --locked --no-default-features fanotify_live -- --nocapture
+        run: cargo check --locked --all-targets --no-default-features --features index-v2-lab
 
   build-app:
     name: build app (${{ matrix.os }})
@@ -63,8 +54,8 @@ jobs:
       - name: Build the GPUI application
         run: cargo build --locked
 
-  # Build the Windows MSI (app + SCM service) and smoke-test that it
-  # installs, registers the filex-indexd service, and uninstalls cleanly.
+  # Build the Windows MSI (app + per-user daemon) and smoke-test that it
+  # installs the UI and per-user daemon, and uninstalls cleanly.
   msi:
     name: MSI installer (windows)
     runs-on: windows-latest
@@ -85,11 +76,11 @@ jobs:
         # Don't apply our `-D warnings` to a third-party tool's own build.
         env:
           RUSTFLAGS: ""
-      - name: Build release binaries (app + service)
+      - name: Build release binaries (app + daemon)
         run: cargo build --release --locked
       - name: Build the MSI
         run: cargo wix --no-build -v
-      - name: Smoke test (install, verify service, uninstall)
+      - name: Smoke test (install, verify binaries, uninstall)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -103,8 +94,8 @@ jobs:
           $p = Start-Process msiexec -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart /l*v install.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60; throw "install failed (exit $($p.ExitCode))" }
           if (-not (Test-Path "C:\Program Files\Filex\filex-indexd.exe")) { throw "filex-indexd.exe not installed" }
-          sc.exe query filex-indexd | Write-Host
-          if ($LASTEXITCODE -ne 0) { throw "filex-indexd service not registered after install" }
+          # V2 uses a per-user daemon, not an elevated machine-wide endpoint.
+          if (-not (Test-Path "C:\Program Files\Filex\filex.exe")) { throw "UI was not installed" }
           Write-Host "Uninstalling"
           $p = Start-Process msiexec -ArgumentList "/x `"$($msi.FullName)`" /quiet /norestart /l*v uninstall.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content uninstall.log -Tail 60; throw "uninstall failed (exit $($p.ExitCode))" }

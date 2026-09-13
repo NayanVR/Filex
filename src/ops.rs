@@ -75,6 +75,12 @@ pub enum FileOp {
 }
 
 impl FileOp {
+    pub fn source(&self) -> &Path {
+        match self {
+            Self::Move { from, .. } | Self::Copy { from, .. } => from,
+            Self::Rename { path, .. } | Self::Delete { path } => path,
+        }
+    }
     /// Where this operation wants to create something — the path a
     /// conflict check should probe. Deletes create nothing.
     pub fn destination(&self) -> Option<PathBuf> {

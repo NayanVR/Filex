@@ -56,6 +56,7 @@ impl Workspace {
             return;
         }
         let verb = state.command.verb;
+        let identities = self.search_hits.clone();
         let progress = std::sync::Arc::new(ops::OpProgress::default());
         let job_id = self.next_job_id;
         self.next_job_id += 1;
@@ -78,19 +79,44 @@ impl Workspace {
 
         let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
-            let applied = cx
+            let (applied, failure) = cx
                 .background_executor()
                 .spawn({
                     let progress = progress.clone();
                     async move {
                         let mut applied = Vec::new();
+                        let mut failure = None;
+                        for op in &ops {
+                            let checked = identities
+                                .get(op.source())
+                                .ok_or_else(|| anyhow::anyhow!("search target expired"))
+                                .and_then(filex::daemon::query::verify);
+                            if let Err(e) = checked {
+                                return (
+                                    applied,
+                                    Some(format!(
+                                        "Plan changed: {e}. Search again before applying."
+                                    )),
+                                );
+                            }
+                        }
                         for mut op in ops {
+                            let hit = &identities[op.source()];
+                            if let Err(e) = filex::daemon::query::verify(hit) {
+                                failure =
+                                    Some(format!("Stopped because a search target changed: {e}"));
+                                break;
+                            }
+
                             if let Some(dest) = op.destination()
                                 && std::fs::symlink_metadata(&dest).is_ok()
                             {
                                 match ops::next_free_name(&dest) {
                                     Ok(free) => op = op.with_destination(free),
-                                    Err(_) => continue,
+                                    Err(e) => {
+                                        failure = Some(e.to_string());
+                                        break;
+                                    }
                                 }
                             }
                             match ops::apply_with_progress(&op, &progress) {
@@ -99,11 +125,12 @@ impl Workspace {
                                     applied.push(done);
                                 }
                                 Err(err) => {
-                                    tracing::warn!("magic op failed: {err:#}");
+                                    failure = Some(format!("Plan stopped: {err:#}"));
+                                    break;
                                 }
                             }
                         }
-                        applied
+                        (applied, failure)
                     }
                 })
                 .await;
@@ -120,6 +147,9 @@ impl Workspace {
                         .into(),
                     );
                     this.journal.record(applied);
+                }
+                if let Some(error) = failure {
+                    this.notice = Some(error.into());
                 }
                 this.refresh_after_op(cx);
             })
@@ -203,26 +233,35 @@ impl Workspace {
     /// Every caller wanting results comes through here, not
     /// [`run_search`](Self::run_search).
     ///
-    /// A search is a full parallel scan of every root's arena and is **not
-    /// cancellable once started** — the generation check drops a stale
-    /// scan's *results*, but the scan still runs. One per keystroke meant
-    /// a 12-character query launched 12 scans, 11 of them waste, all
-    /// competing for the same cores: ~124 ms against a 1.2M-entry index.
-    /// [`SEARCH_DEBOUNCE`] collapses that to one scan per settled query.
+    /// Debounce keystrokes and cancel the preceding daemon request.
     pub(super) fn update_search(&mut self, cx: &mut Context<Self>) {
         // Bump now, not in `run_search`: a query that has already changed
         // must invalidate scans still in flight immediately, so their
         // results can't land under the newer query.
         self.search_generation += 1;
-        // Stop any scan already running, then hand the next one a fresh
-        // flag. The generation check discards a stale scan's *results*;
-        // this stops it burning CPU to produce them. Without it a burst of
-        // searches convoys with the FS writer — multi-second stalls.
+        self.search_page_query = None;
+        self.search_paging = false;
+        self.search_more = false;
+        if let Some(client) = self.service.clone() {
+            let client_id = self.search_client_id;
+            let before_request = self.search_generation;
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = client.call(filex::daemon::ipc::Command::Cancel {
+                        client: client_id,
+                        before_request,
+                    });
+                })
+                .detach();
+        }
+
+        // Cancel in-flight work immediately. The generation check below also
+        // prevents a completed older request from replacing the current results.
         self.search_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.search_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // Coalesce the burst. Dropping the previous task cancels its
-        // timer, so an N-character word costs one scan, not N.
+        // Restart the 50 ms timer after each edit. Only keystrokes within that
+        // interval are coalesced; ordinary typing can still issue several queries.
         self.search_debounce = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             this.update(cx, |this, cx| this.run_search(cx)).ok();
@@ -230,17 +269,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Run a merged query across every ready root on the background
-    /// executor; stale completions are dropped by generation check. Call
-    /// [`update_search`](Self::update_search) instead — this is the
-    /// debounced tail, and calling it directly restores a scan per
-    /// keystroke.
-    ///
-    /// [`parse_query`](filex::search_filter::parse_query) splits the raw
-    /// query into filename text, index-evaluable filters and `tag:`
-    /// filters. Text + index filters run in `search_filtered`; results are
-    /// then intersected with the sidecar's tagged paths. A `tag:`-only
-    /// query lists straight from the sidecar, skipping the scan.
+    /// Parse filters and request a bounded page or an exhaustive Magic stream.
     pub(super) fn run_search(&mut self, cx: &mut Context<Self>) {
         let generation = self.search_generation;
 
@@ -319,8 +348,7 @@ impl Workspace {
             }
         };
 
-        // Tags live in the sidecar (intersected after the scan); the rest
-        // are evaluated inside the index scan.
+        // Resolve tag membership before daemon ranking and truncation.
         let mut tags_required = Vec::new();
         let mut index_filters = Vec::new();
         for filter in all_filters {
@@ -331,190 +359,162 @@ impl Workspace {
             }
         }
 
-        // Tag-only query (no text, no index filters): list the tagged files
-        // straight from the sidecar (works the same in service mode — tags
-        // are always a client-side store).
-        if text.is_empty() && index_filters.is_empty() {
-            let store = self.tags.clone();
-            let required = tags_required;
-            // Scope tag results the same way as everything else, so the
-            // dropdown means one thing across query kinds.
-            let scope_dir = match self.search_scope {
-                SearchScope::Anywhere => None,
-                SearchScope::CurrentDir => Some(self.cwd.clone()),
-            };
-            cx.spawn(async move |this, cx| {
-                let rows = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let mut paths = store.paths_with_all_tags(&required);
-                        if let Some(dir) = &scope_dir {
-                            paths.retain(|p| p.starts_with(dir));
-                        }
-                        rows_from_tagged_paths(paths, limit)
-                    })
-                    .await;
-                this.update(cx, |this, cx| {
-                    if this.search_generation == generation {
-                        this.results = rows;
-                        this.rebuild_magic_plan();
-                        this.select_first_result();
-                        this.refresh_preview(cx);
-                        cx.notify();
-                    }
-                })
-                .ok();
-            })
-            .detach();
+        let Some(client) = self.service.clone() else {
+            self.results.clear();
+            self.search_hits.clear();
+            self.notice = Some("Search unavailable — reconnecting to filex-indexd".into());
+            cx.notify();
             return;
-        }
-
-        // Service mode: text + index filters go over IPC and are applied
-        // service-side, where the index with size/mtime lives; a failed
-        // roundtrip falls back to local. `tag:` stays client-side — the
-        // service has no sidecar.
-        #[cfg(target_os = "windows")]
-        if let Some(client) = self.service.clone() {
-            let store = self.tags.clone();
-            let text = text.clone();
-            let tags_required = tags_required.clone();
-            let index_filters = index_filters.clone();
-            cx.spawn(async move |this, cx| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        // KNOWN GAP: these hits carry no `MatchKind` over
-                        // the wire, so `usable_in_plan` can't apply and a
-                        // service-mode command can plan against fuzzy
-                        // matches. Fix is adding the kind to the IPC hit.
-                        client
-                            .search(&text, &index_filters, limit as u32)
-                            .map(|hits| {
-                                let rows = hits
-                                    .into_iter()
-                                    .map(|hit| SearchRow {
-                                        name: hit.name.into(),
-                                        path_label: hit.path.display().to_string().into(),
-                                        is_dir: hit.is_dir,
-                                        target: hit.path,
-                                    })
-                                    .collect();
-                                filter_rows_by_tags(rows, &store, &tags_required)
-                            })
-                    })
-                    .await;
-                this.update(cx, |this, cx| {
-                    if this.search_generation != generation {
-                        return;
-                    }
-                    match result {
-                        Ok(rows) => {
-                            this.results = rows;
-                            this.rebuild_magic_plan();
-                            this.select_first_result();
-                            this.refresh_preview(cx);
-                            cx.notify();
-                        }
-                        Err(err) => {
-                            tracing::warn!("service search failed ({err:#})");
-                            this.service_disconnected(cx);
-                        }
-                    }
-                })
-                .ok();
-            })
-            .detach();
-            return;
-        }
-
-        let indexes: Vec<SharedIndex> = self
-            .roots
-            .iter()
-            .filter_map(RootSlot::ready_index)
-            .collect();
-        if indexes.is_empty() {
-            return; // still building; root readiness re-runs the query
-        }
+        };
         let store = self.tags.clone();
-        let frecency = self.frecency.clone();
-        let command_query = command.is_some();
         let cancel = self.search_cancel.clone();
-        // "Current Dir" scopes the scan to cwd; "Anywhere" leaves it open.
-        // The path is resolved to a subtree per-index inside the scan (off
-        // the UI thread), so this is just the directory to hand down.
-        let scope_dir = match self.search_scope {
+        let command_query = command.is_some();
+        let scope = match self.search_scope {
             SearchScope::Anywhere => None,
             SearchScope::CurrentDir => Some(self.cwd.clone()),
         };
-
+        let client_id = self.search_client_id;
         cx.spawn(async move |this, cx| {
-            let rows = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move {
-                    // Per-scan latency — the search-as-you-type number.
-                    // Needs `RUST_LOG=filex=debug` to see.
-                    let started = std::time::Instant::now();
-                    let rows: Vec<SearchRow> = manager::search_all_scoped(
-                        &indexes,
-                        &text,
-                        &index_filters,
-                        limit,
-                        &frecency,
-                        &cancel,
-                        scope_dir.as_deref(),
-                    )
-                        .into_iter()
-                        // The plan is built from these rows, so a fuzzy hit
-                        // becomes a file the batch acts on. Too loose for
-                        // that: `rename gravloc to …` matched 148 files, 4
-                        // of which contained "gravloc". Fuzzy helps you
-                        // *find* something; it is not evidence you meant to
-                        // modify it.
-                        .filter(|hit| usable_in_plan(hit.score.kind, command_query))
-                        .map(|hit| SearchRow {
-                            name: hit.name.into(),
-                            path_label: hit.path.display().to_string().into(),
-                            is_dir: hit.is_dir,
-                            target: hit.path,
-                        })
-                        .collect();
-                    let elapsed_ms = started.elapsed().as_millis() as u64;
-                    // A 2M-entry scan is tens of milliseconds, so anything
-                    // near a second is not scan *work* — almost certainly
-                    // `search_all` blocked on the read lock during a big
-                    // rescan. At warn so it lands in a shipped .app's log
-                    // with no `RUST_LOG` set.
-                    if elapsed_ms >= SLOW_OP_MS {
-                        tracing::warn!(
-                            query = %text,
-                            limit,
-                            hits = rows.len(),
-                            elapsed_ms,
-                            "slow search — scan or lock wait over budget"
-                        );
-                        // Only the slow scans are sampled to Sentry — the
-                        // ones worth investigating — so search-as-you-type
-                        // never pays a per-keystroke measurement cost.
-                        #[cfg(feature = "observability")]
-                        filex::observability::record_search_latency(elapsed_ms, rows.len());
+                    let allowed = if tags_required.is_empty() {
+                        None
                     } else {
-                        tracing::debug!(query = %text, limit, hits = rows.len(), elapsed_ms, "index scan");
+                        Some(store.paths_with_all_tags(&tags_required))
+                    };
+                    let query = filex::daemon::ipc::Query {
+                        text,
+                        filters: index_filters,
+                        scope,
+                        allowed,
+                        limit: limit.min(1000),
+                        offset: 0,
+                        fuzzy: !command_query,
+                        client: client_id,
+                        request: generation,
+                        epoch_hint: None,
+                    };
+                    if command_query {
+                        let mut hits = Vec::new();
+                        let mut epoch = 0;
+                        client.stream_matches(query, &cancel, |batch| {
+                            epoch = batch.epoch;
+                            hits.extend(batch.hits);
+                            hits.len() <= filex::magic::MAX_PLAN_OPS
+                        })?;
+                        hits.truncate(filex::magic::MAX_PLAN_OPS + 1);
+                        for hit in &hits {
+                            filex::daemon::query::verify(hit)?;
+                        }
+                        Ok::<_, anyhow::Error>((hits, epoch, false, None, false))
+                    } else {
+                        let page = client.search(query.clone(), &cancel)?;
+                        Ok((page.hits, page.epoch, page.more, Some(query), page.partial))
                     }
-                    filter_rows_by_tags(rows, &store, &tags_required)
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.search_generation == generation {
-                    this.results = rows;
-                    this.rebuild_magic_plan();
-                    this.select_first_result();
-                    this.refresh_preview(cx);
-                    cx.notify();
+                if this.search_generation != generation {
+                    return;
                 }
+                match result {
+                    Ok((hits, epoch, more, query, partial)) => {
+                        this.search_page_query = query.map(|mut q| {
+                            q.epoch_hint = Some(epoch);
+                            q
+                        });
+                        this.notice = partial
+                            .then(|| "Search limit reached; refine your query or scope".into());
+                        this.search_more = more;
+                        this.search_hits =
+                            hits.iter().map(|h| (h.path.clone(), h.clone())).collect();
+                        this.results = hits
+                            .into_iter()
+                            .map(|hit| SearchRow {
+                                name: hit.name.into(),
+                                path_label: hit.path.display().to_string().into(),
+                                is_dir: hit.is_dir,
+                                target: hit.path,
+                            })
+                            .collect();
+                        this.rebuild_magic_plan();
+                        this.select_first_result();
+                        this.refresh_preview(cx);
+                    }
+                    Err(e) => {
+                        this.results.clear();
+                        this.search_hits.clear();
+                        this.notice = Some(e.to_string().into());
+                        if let Some(state) = &mut this.magic {
+                            state.outcome = None;
+                            state.checked.clear();
+                        }
+                    }
+                }
+                cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    pub(super) fn load_more_results(&mut self, cx: &mut Context<Self>) {
+        if self.search_paging || !self.search_more {
+            return;
+        }
+        let (Some(client), Some(mut query)) =
+            (self.service.clone(), self.search_page_query.clone())
+        else {
+            return;
+        };
+        query.offset = self.results.len();
+        let generation = self.search_generation;
+        let cancel = self.search_cancel.clone();
+        self.search_paging = true;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.search(query, &cancel) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                this.search_paging = false;
+                match result {
+                    Ok(page) => {
+                        this.search_more = page.more && !page.hits.is_empty();
+                        for hit in page.hits {
+                            if this.search_hits.contains_key(&hit.path) {
+                                continue;
+                            }
+                            this.results.push(SearchRow {
+                                name: hit.name.clone().into(),
+                                path_label: hit.path.display().to_string().into(),
+                                is_dir: hit.is_dir,
+                                target: hit.path.clone(),
+                            });
+                            this.search_hits.insert(hit.path.clone(), hit);
+                        }
+                        if page.partial {
+                            this.notice =
+                                Some("Search limit reached; refine your query or scope".into());
+                        } else {
+                            this.notice = None;
+                        }
+                    }
+                    Err(e) => {
+                        this.notice = Some(e.to_string().into());
+                        this.update_search(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Resolve the pending Magic command against the rows the search just
@@ -584,38 +584,30 @@ impl Workspace {
     }
 
     pub(super) fn any_root_ready(&self) -> bool {
-        if self.service_mode() {
-            return true;
-        }
-        self.roots
-            .iter()
-            .any(|slot| matches!(slot.state, RootState::Ready { .. }))
+        self.service.is_some()
+            && (!self.daemon_status.building
+                || self.daemon_status.roots.iter().any(|r| r.files > 0))
     }
-
     pub(super) fn index_status_text(&self) -> SharedString {
-        #[cfg(target_os = "windows")]
-        if self.service_mode() {
-            let files: u64 = self.service_status.iter().map(|r| r.files).sum();
-            return ui::status_bar::service_index_status(files, self.service_status.len()).into();
+        if self.service.is_none() {
+            return "Search unavailable — browsing is available".into();
         }
-        let total = self.roots.len();
-        let mut ready = 0usize;
-        let mut failed = 0usize;
-        let mut files = 0usize;
-        for slot in &self.roots {
-            match &slot.state {
-                RootState::Ready { files: f, .. } => {
-                    ready += 1;
-                    files += f;
-                }
-                RootState::Failed(_) => failed += 1,
-                RootState::Building => {}
+        if let Some(error) = &self.daemon_status.error {
+            return error.clone().into();
+        }
+        if self.daemon_status.building {
+            return "Building index".into();
+        }
+        let files: u64 = self.daemon_status.roots.iter().map(|r| r.files).sum();
+        format!(
+            "{} files indexed{}",
+            files,
+            if self.search_more {
+                " · more matches available"
+            } else {
+                ""
             }
-        }
-        let degraded = self.roots.iter().any(|slot| match &slot.state {
-            RootState::Ready { live, .. } => live.coverage_degraded(),
-            _ => false,
-        });
-        ui::status_bar::local_index_status(ready, total, failed, files, degraded).into()
+        )
+        .into()
     }
 }

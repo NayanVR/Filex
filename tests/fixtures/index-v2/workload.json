@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "queries": [
+    "e", "a", "i", "s", "re", "in", "js", "rs", "md", "_", ".", "0", "1", "9",
+    "report", "invoice_01", "invoice_010", "project-04", "index", "package.json",
+    "readme", "config", "main", "test", "src", ".git", "node", "cache", "png", "pdf",
+    "gz", "lock", "request", "é", "STRASSE", "東京", "filex-no-such-name-987654321"
+  ],
+  "relevance": [
+    {"query":"report", "names":["report", "report.pdf", "my-report.txt", "xreport"], "expected":["report", "report.pdf", "my-report.txt", "xreport"]},
+    {"query":"http", "names":["XMLHttpRequest.rs", "ahttp", "http", "http.txt"], "expected":["http", "http.txt", "XMLHttpRequest.rs", "ahttp"]},
+    {"query":"STRASSE", "names":["Straße", "STRASSE.txt", "xstrasse"], "expected":["Straße", "STRASSE.txt", "xstrasse"]}
+  ]
+}

@@ -148,6 +148,9 @@ impl Workspace {
         from_search: bool,
         cx: &mut Context<Self>,
     ) {
+        if from_search && !self.validate_search_paths(std::slice::from_ref(&path), cx) {
+            return;
+        }
         if is_dir {
             self.navigate(path, cx);
             if from_search {
@@ -168,6 +171,9 @@ impl Workspace {
     /// Show the OS "Open with…" chooser for a path (context-menu action),
     /// letting the user pick a program other than the default.
     pub(super) fn open_with(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.validate_search_paths(std::slice::from_ref(&path), cx) {
+            return;
+        }
         if let Err(err) = open_with_dialog(&path) {
             self.notice =
                 Some(format!("couldn't open {} with another app: {err}", path.display()).into());

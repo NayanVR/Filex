@@ -56,7 +56,7 @@ impl Verb {
     }
 }
 
-/// Which files a command targets, in the shape [`crate::index`]'s search
+/// Which files a command targets, in the shape [`crate::search`]'s search
 /// already takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {

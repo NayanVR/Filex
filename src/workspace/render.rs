@@ -329,24 +329,9 @@ impl Workspace {
         let (header, collapsed) = self.section_header(&theme, "indexed", "INDEXED", cx);
         content = content.child(header);
         if !collapsed {
-            let root_rows: Vec<gpui::AnyElement> = {
-                #[cfg(target_os = "windows")]
-                if self.service_mode() {
-                    self.service_status
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, root)| self.render_service_root_row(ix, root, cx))
-                        .collect()
-                } else {
-                    (0..self.roots.len())
-                        .map(|ix| self.render_root_row(ix, cx).into_any_element())
-                        .collect()
-                }
-                #[cfg(not(target_os = "windows"))]
-                (0..self.roots.len())
-                    .map(|ix| self.render_root_row(ix, cx).into_any_element())
-                    .collect()
-            };
+            let root_rows: Vec<gpui::AnyElement> = (0..self.roots.len())
+                .map(|ix| self.render_root_row(ix, cx).into_any_element())
+                .collect();
             content = content.children(root_rows).child(
                 ui::sidebar::sidebar_row(&theme, "add-root")
                     .text_color(theme.text_dim)
@@ -409,7 +394,7 @@ impl Workspace {
                     .child(ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn).size(px(14.)))
                     .child("Grant Full Disk Access")
                     .on_click(|_: &ClickEvent, _window, _cx| {
-                        filex::index::macos::open_full_disk_access_settings();
+                        filex::ingest::open_full_disk_access_settings();
                     }),
             )
         } else {
@@ -513,12 +498,12 @@ impl Workspace {
     pub(super) fn render_search_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = *cx.theme();
         if !self.any_root_ready() {
-            return ui::pane::empty_state(
-                &theme,
-                "still indexing — results will appear when ready…",
-            );
+            return ui::pane::empty_state(&theme, self.index_status_text());
         }
         if self.results.is_empty() {
+            if let Some(notice) = &self.notice {
+                return ui::pane::empty_state(&theme, notice.clone());
+            }
             return ui::pane::empty_state(&theme, format!("no matches for “{}”", self.query));
         }
         // Match the browse list's inset so search rows get the same
@@ -530,6 +515,18 @@ impl Workspace {
             .min_h_0()
             .px_1p5()
             .child(self.render_search_results(cx))
+            .children(self.search_more.then(|| {
+                div()
+                    .id("load-more-search")
+                    .p_2()
+                    .cursor_pointer()
+                    .child(if self.search_paging {
+                        "Loading…"
+                    } else {
+                        "Load more results"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.load_more_results(cx)))
+            }))
             .into_any_element()
     }
 

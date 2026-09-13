@@ -4,6 +4,29 @@
 use super::*;
 
 impl Workspace {
+    /// Validate search row identities at the action boundary. Browse rows use
+    /// the normal operation checks; a stale search selection is never retargeted.
+    pub(super) fn validate_search_paths(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for path in paths {
+            if let Some(hit) = self.search_hits.get(path) {
+                if let Err(e) = filex::daemon::query::verify(hit) {
+                    self.notice = Some(format!("Search target changed: {e}. Search again.").into());
+                    cx.notify();
+                    return false;
+                }
+            } else if !self.query.is_empty() && self.results.iter().any(|r| &r.target == path) {
+                self.notice = Some("Search target expired; search again".into());
+                cx.notify();
+                return false;
+            }
+        }
+        true
+    }
+
     /// Bring the browse view back in sync after a file op has landed:
     /// re-read the current directory and refresh the sidebar's distinct-tag
     /// list, since an op may have migrated tag keys (moved/copied/dropped).
@@ -315,6 +338,9 @@ impl Workspace {
         dest_dir: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        if !self.validate_search_paths(&sources, cx) {
+            return;
+        }
         let progress = std::sync::Arc::new(ops::OpProgress::default());
         let job_id = self.next_job_id;
         self.next_job_id += 1;
@@ -330,15 +356,23 @@ impl Workspace {
         });
         self.spawn_job_ticker(job_id, cx);
         cx.notify();
+        let identities = self.search_hits.clone();
         let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
-            let applied = cx
+            let (applied, failure) = cx
                 .background_executor()
                 .spawn({
                     let progress = progress.clone();
                     async move {
                         let mut applied = Vec::new();
+                        let mut failure = None;
                         for source in sources {
+                            if let Some(hit) = identities.get(&source)
+                                && let Err(e) = filex::daemon::query::verify(hit)
+                            {
+                                failure = Some(format!("Stopped: search target changed: {e}"));
+                                break;
+                            }
                             let Some(name) = source.file_name() else {
                                 continue;
                             };
@@ -367,7 +401,7 @@ impl Workspace {
                                 applied.push(done);
                             }
                         }
-                        applied
+                        (applied, failure)
                     }
                 })
                 .await;
@@ -383,6 +417,9 @@ impl Workspace {
                         format!("{verb} {} {}", applied.len(), plural_items(applied.len())).into(),
                     );
                     this.journal.record(applied);
+                }
+                if let Some(error) = failure {
+                    this.notice = Some(error.into());
                 }
                 this.refresh_after_op(cx);
             })
@@ -418,22 +455,33 @@ impl Workspace {
     /// Move every path to the OS trash as one undo batch (off-thread;
     /// each trash op is instant but there can be many).
     pub(super) fn delete_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if !self.validate_search_paths(&paths, cx) {
+            return;
+        }
         if paths.is_empty() {
             return;
         }
+        let identities = self.search_hits.clone();
         let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
-            let applied = cx
+            let (applied, failure) = cx
                 .background_executor()
                 .spawn(async move {
                     let mut applied = Vec::new();
+                    let mut failure = None;
                     for path in paths {
+                        if let Some(hit) = identities.get(&path)
+                            && let Err(e) = filex::daemon::query::verify(hit)
+                        {
+                            failure = Some(format!("Stopped: search target changed: {e}"));
+                            break;
+                        }
                         if let Ok(mut done) = ops::apply(&FileOp::Delete { path }) {
                             migrate_tags(&tags, &mut done);
                             applied.push(done);
                         }
                     }
-                    applied
+                    (applied, failure)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -447,6 +495,9 @@ impl Workspace {
                         .into(),
                     );
                     this.journal.record(applied);
+                }
+                if let Some(error) = failure {
+                    this.notice = Some(error.into());
                 }
                 this.refresh_after_op(cx);
             })
@@ -514,6 +565,10 @@ impl Workspace {
     /// Copies and moves (the potentially long ones) appear in the jobs
     /// bar with progress and a cancel control while they run.
     pub(super) fn spawn_apply(&mut self, op: FileOp, cx: &mut Context<Self>) {
+        if !self.validate_search_paths(&[op.source().to_path_buf()], cx) {
+            return;
+        }
+        let expected = self.search_hits.get(op.source()).cloned();
         let progress = std::sync::Arc::new(ops::OpProgress::default());
         let job_id = self.next_job_id;
         if matches!(op, FileOp::Copy { .. } | FileOp::Move { .. }) {
@@ -543,6 +598,9 @@ impl Workspace {
                 .spawn({
                     let progress = progress.clone();
                     async move {
+                        if let Some(hit) = expected {
+                            filex::daemon::query::verify(&hit)?;
+                        }
                         let mut applied = ops::apply_with_progress(&op, &progress)?;
                         migrate_tags(&tags, &mut applied);
                         anyhow::Ok(applied)

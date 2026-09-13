@@ -188,7 +188,7 @@ impl Settings {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 let mut settings = Self::default();
                 if let Some(legacy) = legacy_roots_file {
-                    settings.roots = crate::index::manager::load_roots(legacy);
+                    settings.roots = crate::ingest::load_roots(legacy);
                 }
                 return Ok(settings);
             }

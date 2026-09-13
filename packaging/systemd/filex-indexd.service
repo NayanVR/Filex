@@ -1,0 +1,11 @@
+[Unit]
+Description=Filex per-user search index
+
+[Service]
+ExecStart=/usr/local/bin/filex-indexd --user
+Restart=on-failure
+RestartSec=2
+Nice=5
+
+[Install]
+WantedBy=default.target
