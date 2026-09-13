@@ -87,11 +87,14 @@ impl Wal {
             replacement.append(tx)?;
         }
         replacement.file.sync_all()?;
-        drop(replacement);
-        super::manifest::replace_file(&tmp, &self.path)?;
+        // Windows refuses to replace a file that has open handles, so release
+        // ours first. std opens with FILE_SHARE_DELETE, so the source may stay open.
+        self.file = replacement.file;
+        let replaced = super::manifest::replace_file(&tmp, &self.path);
+        // Reopen either way so appends never land in the temporary file.
         let (new, _) = Self::open(&self.path)?;
         *self = new;
-        Ok(())
+        replaced
     }
     pub fn append(&mut self, tx: &Transaction) -> Result<()> {
         let payload = serde_json::to_vec(tx)?;
