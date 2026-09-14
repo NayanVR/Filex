@@ -3,74 +3,6 @@
 use super::*;
 use filex::settings::Settings;
 
-/// One plain on/off row of the settings modal: element id, label,
-/// explanation, how to read the value, how to flip it, and anything to do
-/// afterwards. A table rather than six near-identical `.child(...)` blocks
-/// — adding a boolean setting is now one entry.
-type SettingToggle = (
-    &'static str,
-    &'static str,
-    &'static str,
-    fn(&Settings) -> bool,
-    fn(&mut Settings),
-    fn(&Workspace, &mut Context<Workspace>),
-);
-
-/// Nothing to do after flipping — the case for every toggle but one.
-fn no_follow_up(_: &Workspace, _: &mut Context<Workspace>) {}
-
-const SETTING_TOGGLES: &[SettingToggle] = &[
-    (
-        "show-hidden",
-        "Show hidden files",
-        "Dotfiles and OS-hidden entries in the browse list",
-        |s| s.show_hidden_files,
-        |s| s.show_hidden_files = !s.show_hidden_files,
-        no_follow_up,
-    ),
-    (
-        "index-system-files",
-        "Index system folders",
-        "Include C:\\Windows, Program Files, and the like in search. Off saves memory; takes effect on next rebuild. Folders stay browsable either way.",
-        |s| s.index_system_files,
-        |s| s.index_system_files = !s.index_system_files,
-        no_follow_up,
-    ),
-    (
-        "confirm-delete",
-        "Confirm before deleting",
-        "First press arms; a second press moves the file to the trash",
-        |s| s.confirm_delete,
-        |s| s.confirm_delete = !s.confirm_delete,
-        no_follow_up,
-    ),
-    (
-        "dirs-first",
-        "Directories first",
-        "Group folders above files whatever the sort order",
-        |s| s.sort.directories_first,
-        |s| s.sort.directories_first = !s.sort.directories_first,
-        no_follow_up,
-    ),
-    (
-        "thumbnails",
-        "Image thumbnails",
-        "Decode small previews for image files in the list",
-        |s| s.thumbnails_enabled,
-        |s| s.thumbnails_enabled = !s.thumbnails_enabled,
-        no_follow_up,
-    ),
-    (
-        "crash-reports",
-        "Share anonymous diagnostics",
-        "Scrubbed crashes + performance only — never file names, paths, or queries",
-        |s| s.crash_reports,
-        |s| s.crash_reports = !s.crash_reports,
-        // Turning it on drains anything already queued.
-        Workspace::spawn_crash_upload,
-    ),
-];
-
 impl Workspace {
     /// The slim update banner above the status bar, or nothing when there's
     /// no update to show. Text/labels come from `filex::update`'s tested
@@ -208,153 +140,6 @@ impl Workspace {
     /// than replacing it): a dimmed backdrop closes on an outside click,
     /// Escape closes it too (see the ClearInput handler). `None` while
     /// closed.
-    pub(super) fn render_settings_modal(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        if !self.settings_open {
-            return None;
-        }
-        let theme = *cx.theme();
-        let settings = self.settings.read(cx).settings().clone();
-        let file_note: SharedString = match filex::settings::default_settings_file() {
-            Some(path) => format!("saved to {}", path.display()).into(),
-            None => "no config directory found — settings won't persist".into(),
-        };
-        let close =
-            ui::top_bar::toolbar_button(&theme, "settings-close", "icons/x.svg", theme.text_dim)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
-                .into_any_element();
-        // The rows scroll inside a height-capped card so a tall settings
-        // list can't run off the bottom of a short window; the header
-        // stays pinned.
-        let max_h = (window.viewport_size().height - px(80.)).max(px(240.));
-        let body = div()
-            .id("settings-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(ui::settings_pane::choice_row(
-                &theme,
-                "Appearance",
-                "Match the system, or force a light, dark, or OLED palette",
-                self.render_theme_selector(&theme, settings.theme, cx),
-            ))
-            .child(ui::settings_pane::choice_row(
-                &theme,
-                "Accent color",
-                "The highlight color for folders, selection, and buttons",
-                self.render_accent_picker(&theme, settings.accent, cx),
-            ))
-            .child(ui::settings_pane::choice_row(
-                &theme,
-                "Density",
-                "Row height and icon size in the file list",
-                self.render_density_selector(&theme, settings.density, cx),
-            ))
-            .children(SETTING_TOGGLES.iter().map(
-                |&(id, label, description, read, toggle, follow_up)| {
-                    ui::settings_pane::toggle_row(&theme, id, label, description, read(&settings))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.settings
-                                .update(cx, |store, cx| store.update(cx, toggle));
-                            follow_up(this, cx);
-                        }))
-                },
-            ))
-            .child(ui::settings_pane::footnote(&theme, file_note));
-        let card = ui::settings_pane::settings_card(&theme, "settings-panel")
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .max_h(max_h)
-            .child(ui::settings_pane::card_header(&theme, "Settings", close))
-            .child(body);
-        Some(
-            ui::modal::backdrop("settings-backdrop")
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_settings(cx)))
-                .child(card)
-                .into_any_element(),
-        )
-    }
-
-    /// The keyboard-shortcuts overlay: a centered card listing every
-    /// documented shortcut (from [`ui::kbd::catalog`]) as description +
-    /// keycaps. Toggled by `?` or the keyboard button; Escape / click
-    /// outside dismisses it.
-    pub(super) fn render_shortcuts_modal(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        if !self.shortcuts_open {
-            return None;
-        }
-        let theme = *cx.theme();
-        let close =
-            ui::top_bar::toolbar_button(&theme, "shortcuts-close", "icons/x.svg", theme.text_dim)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.shortcuts_open = false;
-                    cx.notify();
-                }))
-                .into_any_element();
-        // Never taller than the window: the header stays put and the list
-        // of groups scrolls, so a short window can't clip the last rows.
-        let max_h = (window.viewport_size().height - px(80.)).max(px(240.));
-        let mut body = div()
-            .id("shortcuts-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_3();
-        for group in ui::kbd::catalog() {
-            let mut section = div().flex().flex_col().gap_1p5().child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_dim)
-                    .child(group.title),
-            );
-            for sc in group.shortcuts {
-                section = section.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_4()
-                        .child(div().text_sm().text_color(theme.text).child(sc.action))
-                        .child(ui::kbd::keys_row(&theme, &sc.keys)),
-                );
-            }
-            body = body.child(section);
-        }
-        let card = ui::card(&theme)
-            .id("shortcuts-panel")
-            .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
-            .w(px(460.))
-            .max_h(max_h)
-            .p_4()
-            .gap_3()
-            .child(ui::settings_pane::card_header(
-                &theme,
-                "Keyboard Shortcuts",
-                close,
-            ))
-            .child(body);
-        Some(
-            ui::modal::backdrop("shortcuts-backdrop")
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.shortcuts_open = false;
-                    cx.notify();
-                }))
-                .child(card)
-                .into_any_element(),
-        )
-    }
-
     /// The three-way light/dark/system segmented control for the
     /// Appearance setting. Each segment writes the chosen mode straight
     /// to the store; the Changed event re-resolves and reinstalls the
@@ -829,18 +614,25 @@ impl Workspace {
     /// schedule a thumbnail decode, exactly like a list row.
     pub(super) fn render_details_panel(
         &mut self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let settings = self.settings.read(cx).settings();
         if !settings.preview_open {
             return None;
         }
-        let width = settings.preview_width;
+        let width = ui::details::fitted_width(
+            settings.preview_width,
+            f32::from(window.viewport_size().width) - ui::sidebar::SIDEBAR_WIDTH,
+        );
         let theme = *cx.theme();
         let Some((path, name, is_dir)) = self.lead_item() else {
             return Some(
                 ui::details::panel(&theme, width)
-                    .child(ui::details::empty(&theme, "No selection"))
+                    .child(ui::details::empty(
+                        &theme,
+                        "Select a file to see its preview and details.",
+                    ))
                     .into_any_element(),
             );
         };

@@ -1,5 +1,5 @@
 //! The navigation bar (second row): the back/forward/refresh controls,
-//! the current path breadcrumbs, and the search box frame (the input
+//! the editable current path, and the search box frame (the input
 //! entity itself lives in the workspace).
 //!
 //! The traffic lights and the tab strip live one row *above* this now
@@ -11,7 +11,7 @@ use super::icon;
 use super::theme::Theme;
 
 /// Bar height.
-pub const TOP_BAR_HEIGHT: f32 = 44.;
+pub const TOP_BAR_HEIGHT: f32 = 56.;
 
 /// The bar container; children flow left-to-right.
 pub fn top_bar(theme: &Theme) -> Div {
@@ -20,7 +20,8 @@ pub fn top_bar(theme: &Theme) -> Div {
         .items_center()
         .gap_2()
         .h(px(TOP_BAR_HEIGHT))
-        .px_3()
+        .flex_none()
+        .px_4()
         .border_b_1()
         .border_color(theme.border)
         .bg(theme.panel)
@@ -43,52 +44,12 @@ pub fn toolbar_button(
         .flex()
         .items_center()
         .justify_center()
-        .p_1()
-        .rounded_md()
+        .size(px(30.))
+        .flex_none()
+        .rounded_lg()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .child(icon::ui_icon(icon, color).size(px(18.)))
-}
-
-/// The breadcrumb strip filling the bar's middle. Children are
-/// [`breadcrumb_segment`]s interleaved with [`breadcrumb_separator`]s.
-pub fn breadcrumbs() -> Div {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .gap_1()
-        .overflow_hidden()
-}
-
-/// One clickable path segment. Callers chain `.on_click` to navigate.
-pub fn breadcrumb_segment(
-    theme: &Theme,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-) -> Stateful<Div> {
-    let (hover, text) = (theme.hover, theme.text);
-    div()
-        .id(id)
-        .px_1()
-        .rounded_sm()
-        .cursor_pointer()
-        .text_sm()
-        .text_color(theme.text_dim)
-        .hover(move |s| s.bg(hover).text_color(text))
-        .child(label.into())
-}
-
-/// The "›" chevron between breadcrumb segments.
-pub fn breadcrumb_chevron(theme: &Theme) -> Div {
-    div()
-        .flex_none()
-        .child(icon::ui_icon("icons/chevron-right.svg", theme.text_dim).size(px(14.)))
-}
-
-/// The non-clickable "…" that stands in for elided middle segments.
-pub fn breadcrumb_ellipsis(theme: &Theme) -> Div {
-    div().text_xs().text_color(theme.text_dim).child("…")
 }
 
 /// The removable-search-chip strip, shown under the nav bar while a query
@@ -225,8 +186,8 @@ pub fn search_box(theme: &Theme, active: bool) -> Div {
         .min_w(px(160.))
         .max_w(px(420.))
         .px_3()
-        .py(px(6.))
-        .rounded_md()
+        .h(px(36.))
+        .rounded_lg()
         .border_1()
         .border_color(if active { theme.accent } else { theme.border })
         .bg(theme.bg)

@@ -94,5 +94,85 @@ fn bench_magic(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_phrases, bench_magic);
+/// Compare a small folder preview with a whole-index literal stream.
+fn bench_magic_stream(c: &mut Criterion) {
+    use filex::{
+        catalog::segment::{Identity, Record, Root, Segment},
+        daemon::{ipc::Query, query, view::View},
+    };
+    use std::sync::{Arc, atomic::AtomicBool};
+    let roots = vec![Root {
+        id: 1,
+        path: "/bench".into(),
+        device: 1,
+    }];
+    let record = |id, parent, name: Vec<u8>, flags| Record {
+        id,
+        parent,
+        root: 1,
+        name,
+        flags,
+        identity: Identity {
+            device: 1,
+            key: id,
+            birth: 1,
+        },
+        size: Some(1),
+        mtime: Some(NOW),
+    };
+    let mut records = vec![
+        record(1, 0, b"bench".to_vec(), 1),
+        record(2, 1, b"work".to_vec(), 1),
+    ];
+    for id in 3..100003 {
+        records.push(record(
+            id,
+            if id < 103 { 2 } else { 1 },
+            format!("document-{id}.pdf").into_bytes(),
+            0,
+        ));
+    }
+    let view = View {
+        base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        layers: vec![],
+        roots,
+        epoch: 1,
+    };
+    let mut group = c.benchmark_group("magic_stream");
+    for (label, scope) in [
+        ("folder_100_of_100k", Some("/bench/work".into())),
+        ("all_100k", None),
+    ] {
+        let q = Query {
+            text: "document".into(),
+            scope,
+            ..Default::default()
+        };
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                query::stream(&view, &q, &AtomicBool::new(false), |batch| {
+                    black_box(batch);
+                    Ok(())
+                })
+                .unwrap();
+            })
+        });
+    }
+    let q = Query {
+        text: "document-99999".into(),
+        ..Default::default()
+    };
+    group.bench_function("rare_name_100k", |b| {
+        b.iter(|| {
+            query::stream(&view, &q, &AtomicBool::new(false), |batch| {
+                black_box(batch);
+                Ok(())
+            })
+            .unwrap();
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_phrases, bench_magic, bench_magic_stream);
 criterion_main!(benches);

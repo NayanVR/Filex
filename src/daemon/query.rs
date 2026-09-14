@@ -390,8 +390,65 @@ pub fn stream(
     let needle = nfc_fold(&query.text);
     let mut batch = Vec::with_capacity(256);
     let (mut scanned, mut total) = (0u64, 0u64);
+    // Small folder scopes use the catalog's child ranges. If enumeration hits
+    // the bound, fall back to the full stream: a preview must never silently
+    // truncate a plan. Include the scope folder itself, matching full-scan rules.
+    const SCOPE_BOUND: usize = 16_384;
+    let scoped = query.scope.as_ref().and_then(|scope| {
+        let root = view.resolve(scope)?;
+        let mut ids = view.scoped_ids(scope, SCOPE_BOUND, cancel);
+        if ids.len() >= SCOPE_BOUND {
+            return None;
+        }
+        ids.push(root);
+        ids.sort_unstable();
+        ids.dedup();
+        Some(ids)
+    });
+    // Rare literal queries can enumerate every posting directly. A bounded
+    // candidate set is used only when complete; common/empty queries still
+    // stream the catalog. Overlay IDs are included so renames are never lost.
+    let scoped = scoped.or_else(|| {
+        if needle.is_empty() {
+            return None;
+        }
+        let names = view.base.search.substring(&needle, SCOPE_BOUND);
+        if names.len() >= SCOPE_BOUND {
+            return None;
+        }
+        let mut ids = Vec::new();
+        for name in names {
+            for slot in view.base.search.files(name) {
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                ids.push(view.base.id(slot as usize));
+                if ids.len() >= SCOPE_BOUND {
+                    return None;
+                }
+            }
+        }
+        for layer in &view.layers {
+            for id in layer.records.keys() {
+                ids.push(*id);
+                if ids.len() >= SCOPE_BOUND {
+                    return None;
+                }
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Some(ids)
+    });
+    let records: Box<dyn Iterator<Item = Record> + '_> = match &scoped {
+        Some(ids) => Box::new(
+            ids.iter()
+                .filter_map(|id| view.record_projected(*id, need_size, need_mtime)),
+        ),
+        None => Box::new(view.records_projected(need_size, need_mtime)),
+    };
     // Ordered by stable FileId; fuzzy never enters an exhaustive operation.
-    for record in view.records_projected(need_size, need_mtime) {
+    for record in records {
         if cancel.load(Ordering::Relaxed) {
             anyhow::bail!("stream cancelled");
         }

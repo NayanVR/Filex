@@ -1,4 +1,4 @@
-//! The topmost bar: the tab strip on the left and the window/view icon
+//! The topmost bar: the tab strip on the left and the global utility icon
 //! group on the right.
 //!
 //! Presentation only: the workspace owns the tab list and supplies each
@@ -13,7 +13,7 @@ use super::icon;
 use super::theme::Theme;
 
 /// Height of the tab strip.
-pub const TAB_BAR_HEIGHT: f32 = 38.;
+pub const TAB_BAR_HEIGHT: f32 = 46.;
 
 /// The bar container. Children are the left tab group (tabs +
 /// [`new_tab_button`]) and the right icon group, separated by a
@@ -28,6 +28,7 @@ pub fn tab_bar(theme: &Theme) -> Div {
         .items_center()
         .gap_1()
         .h(px(TAB_BAR_HEIGHT))
+        .flex_none()
         .px_2()
         .border_b_1()
         .border_color(theme.border)
@@ -59,11 +60,13 @@ pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Di
         .id(id)
         .flex()
         .items_center()
-        .gap_1()
-        .h(px(26.))
+        .gap_2()
+        .h(px(30.))
+        .w(px(160.))
+        .min_w(px(64.))
         .max_w(px(180.))
-        .px_2()
-        .rounded_md()
+        .px_3()
+        .rounded_lg()
         .cursor_pointer()
         .overflow_hidden();
     if active {
@@ -77,7 +80,9 @@ pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Di
 pub fn tab_label(name: impl Into<SharedString>) -> Div {
     div()
         .flex_1()
-        .text_sm()
+        .min_w_0()
+        .text_xs()
+        .truncate()
         .overflow_hidden()
         .child(name.into())
 }
@@ -92,6 +97,7 @@ pub fn tab_close(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .flex_none()
+        .size(px(18.))
         .rounded_sm()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))

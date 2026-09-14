@@ -39,13 +39,7 @@ impl Workspace {
             }
             return;
         }
-        let extend = keystroke.modifiers.shift;
-        match keystroke.key.as_str() {
-            "up" => self.move_selection(-1, extend, cx),
-            "down" => self.move_selection(1, extend, cx),
-            "enter" => self.activate_selected(cx),
-            _ => {}
-        }
+        // Selection/navigation now comes from the editable action registry.
     }
 
     /// Keep the menu on screen: pull the anchor back from the right and

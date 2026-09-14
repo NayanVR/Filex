@@ -59,6 +59,7 @@ pub enum SearchInputEvent {
 
 pub struct SearchInput {
     focus_handle: FocusHandle,
+    propagate_empty: bool,
     content: SharedString,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -79,6 +80,7 @@ impl SearchInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            propagate_empty: true,
             content: "".into(),
             placeholder: "type to search".into(),
             selected_range: 0..0,
@@ -89,6 +91,11 @@ impl SearchInput {
             is_selecting: false,
             scroll_offset: px(0.),
         }
+    }
+
+    /// Ordinary text fields must not turn empty clipboard actions into file operations.
+    pub fn set_propagate_empty(&mut self, enabled: bool) {
+        self.propagate_empty = enabled;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -133,7 +140,9 @@ impl SearchInput {
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.content.is_empty() {
-            cx.emit(SearchInputEvent::BackspaceWhenEmpty);
+            if self.propagate_empty {
+                cx.emit(SearchInputEvent::BackspaceWhenEmpty);
+            }
             return;
         }
         if self.selected_range.is_empty() {
@@ -158,7 +167,9 @@ impl SearchInput {
         cx: &mut Context<Self>,
     ) {
         if self.content.is_empty() {
-            cx.emit(SearchInputEvent::BackspaceWhenEmpty);
+            if self.propagate_empty {
+                cx.emit(SearchInputEvent::BackspaceWhenEmpty);
+            }
             return;
         }
         if self.selected_range.is_empty() {
@@ -189,7 +200,7 @@ impl SearchInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.content.is_empty() {
+        if self.content.is_empty() && self.propagate_empty {
             cx.propagate();
             return;
         }
@@ -255,7 +266,7 @@ impl SearchInput {
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         // Empty input: bubble to the workspace so cmd-a selects all rows
         // (mirrors the clipboard keys).
-        if self.content.is_empty() {
+        if self.content.is_empty() && self.propagate_empty {
             cx.propagate();
             return;
         }
@@ -287,7 +298,7 @@ impl SearchInput {
     // works).
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if self.content.is_empty() {
+        if self.content.is_empty() && self.propagate_empty {
             cx.propagate();
             return;
         }
@@ -297,7 +308,7 @@ impl SearchInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.content.is_empty() {
+        if self.content.is_empty() && self.propagate_empty {
             cx.propagate();
             return;
         }
@@ -309,7 +320,7 @@ impl SearchInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.content.is_empty() {
+        if self.content.is_empty() && self.propagate_empty {
             cx.propagate();
             return;
         }
@@ -872,11 +883,20 @@ impl Focusable for SearchInput {
 
 /// Key bindings for the input's key context. Call once at app startup.
 pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys(key_bindings());
+}
+
+/// Standard text editing bindings shared by all editable fields.
+pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     const CTX: Option<&str> = Some("SearchInput");
-    cx.bind_keys([
+    vec![
         gpui::KeyBinding::new("backspace", Backspace, CTX),
         gpui::KeyBinding::new("delete", Delete, CTX),
-        gpui::KeyBinding::new("escape", ClearInput, CTX),
+        gpui::KeyBinding::new(
+            "escape",
+            ClearInput,
+            Some("SearchInput && !PathInput && !Settings"),
+        ),
         gpui::KeyBinding::new("left", Left, CTX),
         gpui::KeyBinding::new("right", Right, CTX),
         gpui::KeyBinding::new("shift-left", SelectLeft, CTX),
@@ -931,7 +951,7 @@ pub fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("ctrl-c", Copy, CTX),
         #[cfg(not(target_os = "macos"))]
         gpui::KeyBinding::new("ctrl-x", Cut, CTX),
-    ]);
+    ]
 }
 
 #[cfg(test)]

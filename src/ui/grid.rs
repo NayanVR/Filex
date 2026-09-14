@@ -12,14 +12,14 @@ use super::theme::Theme;
 
 /// Icon/thumbnail edge (px) for each zoom step; `grid_zoom` in settings
 /// indexes this. [`card_size`] clamps out-of-range indices.
-pub const CARD_SIZES: [f32; 4] = [88., 112., 140., 176.];
+pub const CARD_SIZES: [f32; 4] = [104., 128., 156., 192.];
 
 /// Padding inside a card, on every side.
 const CARD_PAD: f32 = 8.;
 /// Height reserved under the icon for the (up to 2-line) name plus the
 /// detail line — see [`card_name`]. Fixed so every card is the same
 /// height and a long name can't push into the row below.
-const LABEL_HEIGHT: f32 = 66.;
+const LABEL_HEIGHT: f32 = 74.;
 /// Fixed height of the name block: exactly two `text_xs` line-boxes. gpui
 /// defaults line height to φ·font-size (≈1.618 × 12px ≈ 19px), so two
 /// lines need ~38px — a shorter box clips descenders (y, g, p) on the
@@ -60,6 +60,15 @@ pub fn columns_for(content_width: f32, cell: f32) -> usize {
     (((content_width + CARD_GAP) / (cell + CARD_GAP)).floor() as usize).max(1)
 }
 
+/// Distribute spare pane width evenly, including on the final partial row.
+/// This keeps cards aligned while avoiding a dead strip beside the grid.
+pub fn column_width(content_width: f32, columns: usize) -> f32 {
+    let columns = columns.max(1);
+    ((content_width - CARD_GAP * columns.saturating_sub(1) as f32) / columns as f32)
+        .floor()
+        .max(1.)
+}
+
 /// A grid row: a fixed-height, full-width flex strip the caller fills
 /// with [`card`]s.
 pub fn grid_row(size: f32) -> Div {
@@ -79,6 +88,7 @@ pub fn card(
     theme: &Theme,
     id: impl Into<ElementId>,
     size: f32,
+    width: f32,
     is_selected: bool,
 ) -> Stateful<Div> {
     let hover = theme.hover;
@@ -88,11 +98,12 @@ pub fn card(
         .flex_col()
         .items_center()
         .gap_1()
-        .w(px(cell_width(size)))
-        // Fixed height (matching the row) + clip: a long name can never
+        .w(px(width))
+        // Fixed height with a trailing row gap + clip: a long name can never
         // grow the card and spill into the cards below it.
-        .h(px(row_height(size)))
+        .h(px(row_height(size) - CARD_GAP))
         .p(px(CARD_PAD))
+        .bg(theme.stripe)
         .rounded_lg()
         .cursor_pointer()
         .overflow_hidden()
@@ -113,14 +124,14 @@ pub fn card_icon_area(size: f32) -> Div {
 
 /// A card's name block: centered, wrapping to at most two lines with a
 /// trailing ellipsis. gpui only truncates against a *definite* width, so
-/// the explicit `w(size)` here (not a flex-derived width) is what makes
+/// the explicit card width here (not a flex-derived width) is what makes
 /// the ellipsis reliable; the line wrapper force-breaks over-long words,
 /// so no single line can spill past the card edge. Fixed height keeps the
 /// detail line aligned across cards. Pair it with a tooltip for the full
 /// name.
-pub fn card_name(theme: &Theme, size: f32) -> Div {
+pub fn card_name(theme: &Theme, width: f32) -> Div {
     div()
-        .w(px(size))
+        .w(px(width - CARD_PAD * 2.))
         .flex_none()
         .h(px(NAME_HEIGHT))
         .text_center()
@@ -149,6 +160,21 @@ mod tests {
         // Three need 100*3 + 8*2 = 316.
         assert_eq!(columns_for(315., 100.), 2);
         assert_eq!(columns_for(316., 100.), 3);
+    }
+
+    #[test]
+    fn fluid_columns_fit_the_pane_without_a_trailing_empty_strip() {
+        for pane_width in [344., 348., 624., 904., 1264.] {
+            for zoom in 0..=max_zoom() {
+                let minimum = cell_width(card_size(zoom));
+                let columns = columns_for(pane_width, minimum);
+                let width = column_width(pane_width, columns);
+                let occupied = width * columns as f32 + CARD_GAP * (columns - 1) as f32;
+                assert!(width >= minimum);
+                assert!(occupied <= pane_width);
+                assert!(pane_width - occupied < columns as f32);
+            }
+        }
     }
 
     #[test]

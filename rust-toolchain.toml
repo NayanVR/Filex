@@ -2,3 +2,4 @@
 # intrinsics on nightly toolchains and breaks when nightly renames them.
 [toolchain]
 channel = "stable"
+components = ["rust-src", "rust-analyzer"]

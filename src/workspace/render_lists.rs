@@ -53,6 +53,37 @@ impl Workspace {
 
         let verb = state.command.verb;
         let destructive = verb == filex::magic::Verb::Delete;
+        if let Some(error) = &state.error {
+            return ui::magic_card::pane()
+                .child(ui::pane::message_state(
+                    &theme,
+                    "icons/search.svg",
+                    "Couldn’t prepare this action",
+                    error.clone(),
+                ))
+                .child(
+                    ui::magic_card::pane_actions(&theme)
+                        .child(
+                            ui::magic_card::secondary_button(
+                                &theme,
+                                "magic-error-cancel",
+                                "Cancel",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
+                        )
+                        .child(
+                            ui::magic_card::confirm_button(
+                                &theme,
+                                "magic-retry",
+                                "Try again",
+                                true,
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.update_search(cx))),
+                        ),
+                )
+                .into_any_element();
+        }
         let echo = format!("matching “{}”", state.command.selection.source);
 
         let mut header = ui::magic_card::pane_header(&theme);
@@ -67,17 +98,10 @@ impl Workspace {
                 header = header
                     .child(ui::magic_card::heading(&theme, verb.label()))
                     .child(ui::magic_card::subtitle(&theme, echo))
-                    .child(ui::magic_card::subtitle(
-                        &theme,
-                        if self.any_root_ready() {
-                            "finding matches…"
-                        } else {
-                            "still indexing — matches will appear when ready…"
-                        },
-                    ));
+                    .child(ui::magic_card::subtitle(&theme, state.status()));
             }
             Some(Ok(plan)) => {
-                let count = state.checked.iter().filter(|c| **c).count();
+                let count = state.selection_count();
                 header = header
                     .child(ui::magic_card::heading(
                         &theme,
@@ -130,7 +154,8 @@ impl Workspace {
                                     )
                                     .tooltip(ui::tooltip::text_tooltip(tooltip, theme))
                                     .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, _window, cx| {
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            window.focus(&this.focus_handle);
                                             this.toggle_magic_op(ix, cx);
                                         },
                                     )),
@@ -155,36 +180,56 @@ impl Workspace {
                     filex::magic::Verb::Rename => Some("New name"),
                     _ => Some("Destination"),
                 };
+                let bulk = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        ui::magic_card::secondary_button(&theme, "magic-select-all", "Select all")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_all_magic_ops(true, cx);
+                                window.focus(&this.focus_handle);
+                            })),
+                    )
+                    .child(
+                        ui::magic_card::secondary_button(
+                            &theme,
+                            "magic-deselect-all",
+                            "Deselect all",
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_all_magic_ops(false, cx);
+                            window.focus(&this.focus_handle);
+                        })),
+                    )
+                    .child(
+                        ui::magic_card::secondary_button(&theme, "magic-refresh", "Refresh")
+                            .on_click(cx.listener(|this, _, _, cx| this.update_search(cx))),
+                    )
+                    .child(div().flex_1())
+                    .child(ui::magic_card::subtitle(&theme, state.status()));
                 body = Some(
                     ui::magic_card::pane_list()
+                        .child(bulk)
                         .child(ui::magic_card::plan_header(&theme, dest_label))
                         .child(list)
                         .into_any_element(),
                 );
 
-                // Select all / Deselect all: labelled by the current state
-                // so one click always flips the whole plan the other way.
-                let all_checked = !plan.ops.is_empty() && count == plan.ops.len();
-                let toggle_label = if all_checked {
-                    "Deselect all"
-                } else {
-                    "Select all"
-                };
                 action_bar = Some(
                     ui::magic_card::pane_actions(&theme)
                         .justify_between()
-                        .child(
-                            ui::magic_card::secondary_button(
-                                &theme,
-                                "magic-select-all",
-                                toggle_label,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _: &ClickEvent, _window, cx| {
-                                    this.set_all_magic_ops(!all_checked, cx);
-                                },
-                            )),
-                        )
+                        .child(ui::magic_card::subtitle(
+                            &theme,
+                            if count == 0 {
+                                "Select files to continue"
+                            } else {
+                                "Only selected files will change"
+                            },
+                        ))
                         .child(
                             div()
                                 .flex()
@@ -206,8 +251,13 @@ impl Workspace {
                                     ui::magic_card::confirm_button(
                                         &theme,
                                         "magic-confirm",
-                                        verb.label(),
-                                        count > 0,
+                                        format!(
+                                            "{} {} {}",
+                                            verb.label(),
+                                            count,
+                                            plural_items(count)
+                                        ),
+                                        count > 0 && !state.loading,
                                         destructive,
                                     )
                                     .on_click(cx.listener(
@@ -227,6 +277,39 @@ impl Workspace {
             }
         }
 
+        if body.is_none() {
+            body = Some(if state.loading {
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(ui::icon::spinner(
+                        "icons/loader-circle.svg",
+                        theme.accent,
+                        22.,
+                        "magic-loading",
+                    ))
+                    .child(ui::magic_card::subtitle(&theme, "Preparing your preview…"))
+                    .into_any_element()
+            } else {
+                ui::pane::message_state(
+                    &theme,
+                    "icons/search.svg",
+                    "Adjust your command",
+                    "Try a more specific file name, choose Current folder, or check the destination.",
+                )
+            });
+        }
+        if action_bar.is_none() {
+            action_bar = Some(
+                ui::magic_card::pane_actions(&theme).child(
+                    ui::magic_card::secondary_button(&theme, "magic-stop", "Cancel")
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
+                ),
+            );
+        }
         ui::magic_card::pane()
             .child(header)
             .children(body)
@@ -243,7 +326,10 @@ impl Workspace {
         let size = ui::grid::card_size(settings.grid_zoom);
         let cell = ui::grid::cell_width(size);
         let preview_w = if settings.preview_open {
-            ui::details::clamp_width(settings.preview_width)
+            ui::details::fitted_width(
+                settings.preview_width,
+                f32::from(window.viewport_size().width) - ui::sidebar::SIDEBAR_WIDTH,
+            )
         } else {
             0.
         };
@@ -256,6 +342,7 @@ impl Workspace {
             - ui::grid::CARD_GAP * 2.)
             .max(cell);
         let cols = ui::grid::columns_for(content_w, cell);
+        let column_width = ui::grid::column_width(content_w, cols);
         let rows = self.entries.len().div_ceil(cols);
         uniform_list(
             "grid",
@@ -268,7 +355,8 @@ impl Workspace {
                         let end = (start + cols).min(this.entries.len());
                         let mut strip = ui::grid::grid_row(size);
                         for ix in start..end {
-                            strip = strip.child(this.render_card(ix, size, &theme, cx));
+                            strip =
+                                strip.child(this.render_card(ix, size, column_width, &theme, cx));
                         }
                         strip
                     })
@@ -292,6 +380,7 @@ impl Workspace {
         &mut self,
         ix: usize,
         size: f32,
+        width: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -307,12 +396,18 @@ impl Workspace {
             format_size(entry.size).into()
         };
         let name_tip: SharedString = name.clone().into();
-        let icon = self.render_icon_cell(&name, &path, is_dir, size, cx);
+        // Keep document and folder symbols balanced with actual image previews.
+        let icon_edge = if FileKind::of(&name, is_dir) == FileKind::Image {
+            size
+        } else {
+            size * 0.72
+        };
+        let icon = self.render_icon_cell(&name, &path, is_dir, icon_edge, cx);
         let drag = self.drag_items(ix, *theme);
-        let card = ui::grid::card(theme, ("card", ix), size, is_selected)
+        let card = ui::grid::card(theme, ("card", ix), size, width, is_selected)
             .tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
             .child(ui::grid::card_icon_area(size).child(icon))
-            .child(ui::grid::card_name(theme, size).child(name))
+            .child(ui::grid::card_name(theme, width).child(name))
             .child(ui::list_row::tabular(
                 div()
                     .flex_none()
@@ -363,8 +458,7 @@ impl Workspace {
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let name_tip: SharedString = name.clone().into();
-                        let icon =
-                            this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
+                        let icon = this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
                         let rename_input = this
                             .renaming
                             .as_ref()
@@ -459,28 +553,13 @@ impl Workspace {
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
-                        let icon =
-                            this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
+                        let icon = this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
                         Some(
                             ui::list_row::list_row(&theme, ix, is_selected)
-                                // Full path on hover — the row truncates it below.
+                                .h(px((theme.row_height + 16.).max(44.)))
                                 .tooltip(ui::tooltip::text_tooltip(path_label.clone(), theme))
                                 .child(icon)
-                                .child(div().flex_none().text_sm().whitespace_nowrap().child(name))
-                                // flex_1 + min_w_0 lets the cell shrink; the inner
-                                // w_full gives the text a *definite* width, which
-                                // gpui needs to actually paint the … ellipsis
-                                // (a bare flex child never truncates).
-                                .child(
-                                    div().flex_1().min_w_0().child(
-                                        div()
-                                            .w_full()
-                                            .text_xs()
-                                            .text_color(theme.text_dim)
-                                            .truncate()
-                                            .child(path_label),
-                                    ),
-                                )
+                                .child(ui::list_row::search_label(&theme, name, path_label))
                                 .on_click(cx.listener(
                                     move |this, event: &ClickEvent, _window, cx| {
                                         if event.click_count() >= 2 {

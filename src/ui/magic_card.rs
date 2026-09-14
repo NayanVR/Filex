@@ -44,7 +44,7 @@ pub fn refusal(theme: &Theme, text: impl Into<SharedString>) -> Div {
 /// the cells they name.
 const ARROW_COL_WIDTH: f32 = 12.;
 /// Width of the checkbox column, likewise shared with the header.
-const CHECK_COL_WIDTH: f32 = 13.;
+const CHECK_COL_WIDTH: f32 = 18.;
 
 /// One operation in the plan, on a single density-aware line (so the list
 /// can virtualize): a checkbox, then equal-width columns for the source
@@ -113,12 +113,12 @@ pub fn op_row(
         // Density-aware like every other row in the app. The previous
         // fixed 28px ignored the density setting from block 1, so the
         // plan was the one list that did not respond to it.
-        .h(px(theme.row_height))
+        .h(px(theme.row_height.max(34.)))
         .rounded_md()
         .cursor_pointer()
         // Same alternating stripe as the browse list, which is what makes
         // a long plan scannable.
-        .when(ix % 2 == 1, |s| s.bg(theme.stripe))
+        .when(checked, |s| s.bg(theme.selected))
         .hover(move |s| s.bg(hover))
         .child(checkbox(theme, checked))
         .child(content)
@@ -165,7 +165,7 @@ pub fn plan_header(theme: &Theme, dest_label: Option<&'static str>) -> Div {
 fn checkbox(theme: &Theme, checked: bool) -> Div {
     let base = div()
         .flex_none()
-        .size(px(13.))
+        .size(px(18.))
         .rounded_sm()
         .border_1()
         .flex()
@@ -198,8 +198,8 @@ pub fn confirm_button(
     let base = div()
         .id(id)
         .px_3()
-        .py_1()
-        .rounded_md()
+        .py_2()
+        .rounded_lg()
         .text_sm()
         .child(label.into());
     if enabled {
@@ -225,8 +225,8 @@ pub fn secondary_button(
     div()
         .id(id)
         .px_3()
-        .py_1()
-        .rounded_md()
+        .py_2()
+        .rounded_lg()
         .cursor_pointer()
         .text_sm()
         .border_1()
@@ -250,7 +250,13 @@ pub fn pane() -> Div {
     // `flex_1` already claims the width from the row parent; the old
     // `size_full` set an explicit w/h on top of that, which fights the
     // flex sizing instead of cooperating with it.
-    div().flex().flex_1().min_h_0().flex_col()
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .flex_col()
+        .overflow_hidden()
 }
 
 /// The scroll region holding the plan rows. Carries the same small
@@ -265,6 +271,7 @@ pub fn pane_list() -> Div {
 /// and any notes. Does not scroll; the plan rows below it do.
 pub fn pane_header(theme: &Theme) -> Div {
     div()
+        .flex_none()
         .flex()
         .flex_col()
         .gap_1()
@@ -280,6 +287,7 @@ pub fn pane_header(theme: &Theme) -> Div {
 /// The action bar pinned to the bottom of the pane (Cancel / confirm).
 pub fn pane_actions(theme: &Theme) -> Div {
     div()
+        .flex_none()
         .flex()
         .items_center()
         .justify_end()

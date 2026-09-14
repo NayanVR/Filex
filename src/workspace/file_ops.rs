@@ -316,6 +316,10 @@ impl Workspace {
     /// Reload the active directory (refresh button / cmd-r / F5). A no-op
     /// while a search is active — the results are recomputed live.
     pub(super) fn reload_dir(&mut self, cx: &mut Context<Self>) {
+        if self.in_magic_view() && !self.query.is_empty() {
+            self.update_search(cx);
+            return;
+        }
         if !self.query.is_empty() || self.settings_open {
             return;
         }

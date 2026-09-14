@@ -715,3 +715,154 @@ fn ten_thousand_changes_converge_during_queries() {
     stop.store(true, Ordering::Relaxed);
     thread.join().unwrap();
 }
+
+#[test]
+fn magic_scope_stream_is_exhaustive_and_avoids_unrelated_folders() {
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let mut records = vec![
+        record(1, 0, b"root", true),
+        record(2, 1, b"work", true),
+        record(3, 2, b"nested", true),
+        record(4, 3, b"report.pdf", false),
+    ];
+    for id in 5..10005 {
+        records.push(record(id, 1, format!("outside-{id}.pdf").as_bytes(), false));
+    }
+    let mut overlay = filex::daemon::view::Overlay::default();
+    overlay.put(5, Some(record(5, 2, b"moved-in.pdf", false)));
+    overlay.put(4, None);
+    let view = View {
+        base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        layers: vec![Arc::new(overlay)],
+        roots,
+        epoch: 1,
+    };
+    let cancel = AtomicBool::new(false);
+    let mut full = Vec::new();
+    query::stream(&view, &Query::default(), &cancel, |b| {
+        full.extend(b.hits);
+        Ok(())
+    })
+    .unwrap();
+    let scope = std::path::PathBuf::from("/test/work");
+    let expected: Vec<_> = full
+        .iter()
+        .filter(|h| h.path.starts_with(&scope))
+        .map(|h| h.id)
+        .collect();
+    let mut found = Vec::new();
+    let mut scanned = 0;
+    query::stream(
+        &view,
+        &Query {
+            scope: Some(scope),
+            ..Default::default()
+        },
+        &cancel,
+        |b| {
+            scanned = b.scanned;
+            found.extend(b.hits.into_iter().map(|h| h.id));
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(found, expected);
+    assert_eq!(scanned, 3);
+}
+
+#[test]
+fn magic_large_scope_falls_back_without_truncating() {
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let mut records = vec![record(1, 0, b"root", true)];
+    for id in 2..16400 {
+        records.push(record(id, 1, format!("file-{id}.txt").as_bytes(), false));
+    }
+    let view = View {
+        base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        layers: vec![],
+        roots,
+        epoch: 1,
+    };
+    let mut count = 0;
+    let mut total = None;
+    query::stream(
+        &view,
+        &Query {
+            scope: Some("/test".into()),
+            ..Default::default()
+        },
+        &AtomicBool::new(false),
+        |b| {
+            count += b.hits.len();
+            total = b.total;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(count, 16398);
+    assert_eq!(total, Some(16398));
+}
+
+#[test]
+fn magic_literal_postings_include_renames_and_keep_complete_matches() {
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let mut records = vec![record(1, 0, b"root", true)];
+    for id in 2..10002 {
+        records.push(record(id, 1, format!("file-{id}.txt").as_bytes(), false));
+    }
+    let mut overlay = filex::daemon::view::Overlay::default();
+    overlay.put(2, Some(record(2, 1, b"rare-report.txt", false)));
+    overlay.put(3, None);
+    let view = View {
+        base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        layers: vec![Arc::new(overlay)],
+        roots,
+        epoch: 1,
+    };
+    let cancel = AtomicBool::new(false);
+    let mut all = Vec::new();
+    query::stream(&view, &Query::default(), &cancel, |b| {
+        all.extend(b.hits);
+        Ok(())
+    })
+    .unwrap();
+    for text in ["rare", "file-2", ".txt", "absent"] {
+        let expected: Vec<_> = all
+            .iter()
+            .filter(|h| h.name.contains(text))
+            .map(|h| h.id)
+            .collect();
+        let mut found = Vec::new();
+        let mut scanned = 0;
+        query::stream(
+            &view,
+            &Query {
+                text: text.into(),
+                ..Default::default()
+            },
+            &cancel,
+            |b| {
+                scanned = b.scanned;
+                found.extend(b.hits.into_iter().map(|h| h.id));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(found, expected, "{text}");
+        if text == "rare" {
+            assert!(scanned <= 2);
+        }
+    }
+}

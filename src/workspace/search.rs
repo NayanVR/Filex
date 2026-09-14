@@ -239,6 +239,11 @@ impl Workspace {
         // must invalidate scans still in flight immediately, so their
         // results can't land under the newer query.
         self.search_generation += 1;
+        self.notice = None;
+        if let Some(state) = &mut self.magic {
+            state.loading = true;
+            state.error = None;
+        }
         self.search_page_query = None;
         self.search_paging = false;
         self.search_more = false;
@@ -297,14 +302,51 @@ impl Workspace {
         // one click from executing.
         let previous = self.magic.take();
         self.magic = command.as_ref().map(|command| match previous {
-            Some(state) if state.command == *command => state,
+            Some(mut state) if state.source_query == self.query => {
+                // Relative dates resolve against a newer clock on refresh. The
+                // unchanged query still owns the user's per-operation choices.
+                state.command = command.clone();
+                state
+            }
             _ => MagicState {
+                source_query: self.query.clone(),
                 command: command.clone(),
                 outcome: None,
                 checked: Vec::new(),
+                loading: true,
+                error: None,
+                progress: Default::default(),
             },
         });
 
+        let progress = std::sync::Arc::new(MagicProgress::default());
+        if let Some(state) = &mut self.magic {
+            self.search_selection.clear();
+            state.loading = true;
+            state.error = None;
+            state.progress = progress.clone();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(150))
+                        .await;
+                    let running = this
+                        .update(cx, |this, cx| {
+                            let running = this.search_generation == generation
+                                && this.magic.as_ref().is_some_and(|s| s.loading);
+                            if running {
+                                cx.notify();
+                            }
+                            running
+                        })
+                        .unwrap_or(false);
+                    if !running {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let (text, all_filters, limit) = match &command {
             Some(command) => (
                 command.selection.text.clone(),
@@ -324,6 +366,7 @@ impl Workspace {
                 if self.magic_mode == MagicMode::On {
                     self.results.clear();
                     self.search_selection.clear();
+                    cx.notify();
                     return;
                 }
                 let parsed = filex::search_filter::parse_query(&self.query, now);
@@ -337,6 +380,7 @@ impl Workspace {
                     // Leave the browse selection intact; only the search's
                     // own selection goes away with the results.
                     self.search_selection.clear();
+                    cx.notify();
                     return;
                 }
                 let filters = parsed
@@ -363,12 +407,18 @@ impl Workspace {
             self.results.clear();
             self.search_hits.clear();
             self.notice = Some("Search unavailable — reconnecting to filex-indexd".into());
+            if let Some(state) = &mut self.magic {
+                state.loading = false;
+                state.error = Some("Search is reconnecting. Try again shortly.".into());
+            }
             cx.notify();
             return;
         };
         let store = self.tags.clone();
         let cancel = self.search_cancel.clone();
         let command_query = command.is_some();
+        let cwd = self.cwd.clone();
+        let dirs = self.user_dirs.clone();
         let scope = match self.search_scope {
             SearchScope::Anywhere => None,
             SearchScope::CurrentDir => Some(self.cwd.clone()),
@@ -400,17 +450,40 @@ impl Workspace {
                         let mut epoch = 0;
                         client.stream_matches(query, &cancel, |batch| {
                             epoch = batch.epoch;
+                            progress
+                                .scanned
+                                .store(batch.scanned, std::sync::atomic::Ordering::Relaxed);
                             hits.extend(batch.hits);
+                            progress
+                                .matched
+                                .store(hits.len() as u64, std::sync::atomic::Ordering::Relaxed);
                             hits.len() <= filex::magic::MAX_PLAN_OPS
                         })?;
                         hits.truncate(filex::magic::MAX_PLAN_OPS + 1);
-                        for hit in &hits {
-                            filex::daemon::query::verify(hit)?;
-                        }
-                        Ok::<_, anyhow::Error>((hits, epoch, false, None, false))
+                        // Preview uses the index snapshot. Identity checks still run
+                        // before the batch and immediately before each operation.
+                        let paths = hits.iter().map(|hit| hit.path.clone()).collect::<Vec<_>>();
+                        let plan = command.as_ref().map(|command| {
+                            filex::magic::build(
+                                command,
+                                &paths,
+                                &filex::magic::PlanContext {
+                                    cwd: &cwd,
+                                    dirs: &dirs,
+                                },
+                            )
+                        });
+                        Ok::<_, anyhow::Error>((hits, epoch, false, None, false, plan))
                     } else {
                         let page = client.search(query.clone(), &cancel)?;
-                        Ok((page.hits, page.epoch, page.more, Some(query), page.partial))
+                        Ok((
+                            page.hits,
+                            page.epoch,
+                            page.more,
+                            Some(query),
+                            page.partial,
+                            None,
+                        ))
                     }
                 })
                 .await;
@@ -419,7 +492,7 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok((hits, epoch, more, query, partial)) => {
+                    Ok((hits, epoch, more, query, partial, plan)) => {
                         this.search_page_query = query.map(|mut q| {
                             q.epoch_hint = Some(epoch);
                             q
@@ -438,17 +511,20 @@ impl Workspace {
                                 target: hit.path,
                             })
                             .collect();
-                        this.rebuild_magic_plan();
-                        this.select_first_result();
-                        this.refresh_preview(cx);
+                        if let (Some(state), Some(plan)) = (&mut this.magic, plan) {
+                            state.install_plan(plan);
+                        } else {
+                            this.select_first_result();
+                            this.refresh_preview(cx);
+                        }
                     }
                     Err(e) => {
                         this.results.clear();
                         this.search_hits.clear();
                         this.notice = Some(e.to_string().into());
                         if let Some(state) = &mut this.magic {
-                            state.outcome = None;
-                            state.checked.clear();
+                            state.loading = false;
+                            state.error = Some(e.to_string());
                         }
                     }
                 }
@@ -515,39 +591,6 @@ impl Workspace {
         })
         .detach();
         cx.notify();
-    }
-
-    /// Resolve the pending Magic command against the rows the search just
-    /// returned. No-op unless the query parsed as a command. Plans build
-    /// from `results`, which is why a Magic query raises the limit to
-    /// `MAX_PLAN_OPS + 1` — that one past the cap is what lets `build`
-    /// tell "1000 files, reviewable" from "more than we act on blind".
-    pub(super) fn rebuild_magic_plan(&mut self) {
-        let Some(state) = self.magic.as_mut() else {
-            return;
-        };
-        let matches: Vec<PathBuf> = self.results.iter().map(|row| row.target.clone()).collect();
-        let ctx = filex::magic::PlanContext {
-            cwd: &self.cwd,
-            dirs: &self.user_dirs,
-        };
-        let outcome = filex::magic::build(&state.command, &matches, &ctx);
-        // Only re-tick when the plan actually changed. This runs on every
-        // FS event burst, so rebuilding `checked` unconditionally would
-        // restore rows the user unticked — silently re-arming a destructive
-        // batch. Comparing the ops, not their count, is what makes "same
-        // plan" mean the same files in the same order.
-        let unchanged = matches!(
-            (&outcome, &state.outcome),
-            (Ok(new), Some(Ok(old))) if new.ops == old.ops
-        );
-        if !unchanged {
-            state.checked = match &outcome {
-                Ok(plan) => vec![true; plan.ops.len()],
-                Err(_) => Vec::new(),
-            };
-        }
-        state.outcome = Some(outcome);
     }
 
     /// Toggle one op's checkbox in the Magic card.

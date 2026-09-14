@@ -36,6 +36,9 @@ macro_rules! icon {
 const ICONS: &[(&str, &[u8])] = &[
     // File-type marks.
     icon!("folder"),
+    // Filex folder artwork: separate masks for the tab and front face.
+    icon!("folder-back"),
+    icon!("folder-front"),
     icon!("image"),
     icon!("film"),
     icon!("music"),
@@ -45,7 +48,9 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("file"),
     // UI glyphs.
     icon!("arrow-up"),
+    icon!("download"),
     icon!("settings"),
+    icon!("shield"),
     icon!("search"),
     icon!("chevron-left"),
     icon!("chevron-right"),

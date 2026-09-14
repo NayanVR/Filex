@@ -391,3 +391,30 @@ original 1→5 order no longer describes the work.
    `Journal`.~~ **Done — `Workspace::confirm_magic`, one job, one undo
    batch, same path as paste.**
 5. *(Separate gate, not this doc's scope)* LLM fallback per §4.
+
+
+## September 2026 usability pass
+
+- Magic's status bar follows the plan checkboxes and shows loading progress or
+  an actionable failure instead of an unrelated search selection.
+- Separate Select all / Deselect all controls sit above the virtualized rows.
+  The footer stays visible, includes the selected count on the apply button,
+  and disables applying during loading or when nothing is selected.
+- Failed searches leave loading and expose Retry / Cancel. Empty or oversized
+  plans suggest narrowing the command or choosing Current folder. Refresh (and
+  Cmd+R/Ctrl+R) rebuilds the preview; unchanged operations retain exclusions.
+  Newly discovered operations in a refreshed plan start unchecked.
+- Plan construction runs on a background executor. Preview avoids per-hit
+  filesystem identity checks; execution retains both the whole-batch check and
+  the check immediately before each operation.
+- Exhaustive streams use complete child-range or literal-posting candidate sets
+  when small. Overlay changes remain included. Exceeding the candidate bound
+  falls back to the full scan rather than truncating the plan.
+- Benchmarks on a synthetic 100,000-entry catalog: 100-file folder ~67 µs,
+  rare literal name ~2.6 µs, full broad stream ~67 ms. These measure catalog
+  retrieval, excluding IPC and plan construction.
+
+Validation: app unit tests, index-v2 integration tests (including scope,
+posting/overlay completeness, and large-scope fallback), and native macOS
+inspection of loading progress, oversized-query guidance, ready-plan controls,
+and selected counts. The existing long churn qualification remains opt-in.

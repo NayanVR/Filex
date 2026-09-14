@@ -18,7 +18,7 @@ use super::theme::Theme;
 
 /// Menu card width; callers use it to clamp the anchor so the menu
 /// never opens past the window edge.
-pub const MENU_WIDTH: f32 = 200.;
+pub const MENU_WIDTH: f32 = 220.;
 
 /// Transparent overlay covering the window; a click anywhere on it
 /// (i.e. outside the menu) should close — callers chain `.on_click`.
@@ -86,6 +86,6 @@ pub fn heading(theme: &Theme, label: impl Into<SharedString>) -> Div {
         .pb_1()
         .text_xs()
         .text_color(theme.text_dim)
-        .overflow_hidden()
+        .truncate()
         .child(label.into())
 }

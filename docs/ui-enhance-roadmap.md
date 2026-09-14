@@ -12,6 +12,38 @@ Everything here renders through GPUI's native pipeline — no webview,
 ever (CLAUDE.md). Zed proves this level of UI is reachable at native
 speed with the same stack.
 
+## September 2026 layout refresh
+
+Implemented 2026-09-13:
+
+- Recessed light/dark chrome, clearer typography, larger toolbar targets,
+  and a folder heading that owns list/grid, zoom, and preview controls.
+- Sidebar shortcuts for the OS-provided Desktop, Documents, Downloads,
+  and Pictures folders, resolved from the existing startup cache.
+- Filled folder artwork, quieter list rows, and grid cards that share
+  spare width evenly. List and grid rendering remain virtualized.
+- Search results put paths below names; a visible clear control returns
+  to browsing. Empty/error states have bounded, explanatory copy.
+- Preview width fits the current window while retaining the saved width;
+  details scroll, long names wrap, and metadata exposes full values on hover.
+- Settings now has a persistent category sidebar: Appearance, Files & folders,
+  Search, Keyboard, and Privacy. The active page scrolls within the dialog.
+- Cmd+K (Ctrl+K on Windows/Linux) focuses search. Settings → Keyboard records
+  app shortcuts, rejects conflicts, supports unassign/reset, and applies saved
+  changes immediately. Standard text editing retains its system shortcuts.
+- The editable path field replaces breadcrumbs. Cmd+L/Ctrl+L selects the path;
+  Enter opens a folder, Escape restores the current location. Absolute, relative,
+  quoted, and home-relative paths are supported. Destination validation runs in
+  the background; failed paths preserve the current listing and navigation history.
+
+Validation: native macOS review of light/dark, list/grid, search/clear,
+settings, and preview at normal and 860 × 520 window sizes. Verified Cmd+K,
+path submission/cancellation/errors, shortcut conflicts and live remapping,
+and remap persistence across restart. All 56 app tests and 7 settings tests
+pass, including combined text/app keymap dispatch and path validation.
+`cargo build --bin filex` succeeds without warnings.
+Windows/Linux visual verification remains outstanding.
+
 ## Ground rules (unchanged, restated because a visual overhaul is
 where they die)
 

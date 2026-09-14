@@ -26,16 +26,21 @@ pub fn backdrop(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// The dialog card.
 pub fn panel(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    super::card(theme).id(id).w(px(400.)).p_4().gap_2()
+    super::card(theme).id(id).w(px(440.)).p_5().gap_3()
 }
 
 pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
-    div().text_sm().text_color(theme.text).child(text.into())
+    div()
+        .text_lg()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(text.into())
 }
 
 pub fn message(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
-        .text_xs()
+        .w_full()
+        .text_sm()
         .text_color(theme.text_dim)
         .child(text.into())
 }
@@ -55,9 +60,13 @@ pub fn button(
 ) -> Stateful<Div> {
     let base = div()
         .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .min_w(px(84.))
+        .h(px(34.))
         .px_3()
-        .py_1()
-        .rounded_md()
+        .rounded_lg()
         .cursor_pointer()
         .text_sm()
         .child(label.into());

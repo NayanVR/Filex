@@ -41,6 +41,9 @@ impl Workspace {
         self.tabs[self.active_tab] = self.snapshot_active();
         let target = std::mem::replace(&mut self.tabs[i], TabSnapshot::placeholder());
         self.restore_tab(target);
+        self.path_request = self.path_request.wrapping_add(1);
+        self.path_loading = false;
+        self.sync_path(cx);
         self.active_tab = i;
         self.refresh_preview(cx);
         cx.notify();
@@ -109,6 +112,9 @@ impl Workspace {
             let new_active = i.min(self.tabs.len() - 1);
             let target = std::mem::replace(&mut self.tabs[new_active], TabSnapshot::placeholder());
             self.restore_tab(target);
+            self.path_request = self.path_request.wrapping_add(1);
+            self.path_loading = false;
+            self.sync_path(cx);
             self.active_tab = new_active;
             self.refresh_preview(cx);
         } else {

@@ -14,8 +14,8 @@ use filex::ingest as manager;
 use filex::settings::{Settings, default_settings_file};
 
 pub enum SettingsEvent {
-    /// Some setting changed; read the store for the new values.
-    Changed,
+    /// Previous settings snapshot; read the store for the new values.
+    Changed(Settings),
 }
 
 pub struct SettingsStore {
@@ -69,9 +69,10 @@ impl SettingsStore {
 
     /// Apply a mutation, persist it, and notify subscribers.
     pub fn update(&mut self, cx: &mut Context<Self>, apply: impl FnOnce(&mut Settings)) {
+        let previous = self.settings.clone();
         apply(&mut self.settings);
         self.persist(cx);
-        cx.emit(SettingsEvent::Changed);
+        cx.emit(SettingsEvent::Changed(previous));
         cx.notify();
     }
 

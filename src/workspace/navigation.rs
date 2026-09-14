@@ -5,42 +5,55 @@ use super::*;
 
 impl Workspace {
     pub(super) fn load_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.path_request = self.path_request.wrapping_add(1);
+        self.path_loading = false;
         let settings = self.settings.read(cx).settings();
-        let (sort, show_hidden) = (settings.sort, settings.show_hidden_files);
+        let sort = settings.sort;
         match read_dir_sorted(path, &sort) {
-            Ok(mut entries) => {
-                if !show_hidden {
-                    entries.retain(|entry| !entry.is_hidden);
-                }
-                let changed = self.cwd != path;
-                self.cwd = path.to_path_buf();
-                self.entries = entries;
-                self.load_error = None;
-                self.selection.clear();
-                // Any in-flight rename or armed delete points at rows
-                // that no longer exist; drop them.
-                self.renaming = None;
-                self.pending_delete = None;
-                // Only jump to the top when this is a real navigation. A
-                // same-directory refresh (after a delete, paste, or rename)
-                // must keep the user's scroll position — yanking back to
-                // row 0 after every file op was jarring.
-                if changed {
-                    self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
-                }
-                // A "Current Dir" search follows the folder you're in, so
-                // navigating with a scoped query live must re-scope it to
-                // the new directory. "Anywhere" is cwd-independent, so it
-                // is left untouched.
-                if changed && self.search_scope == SearchScope::CurrentDir && !self.query.is_empty()
-                {
-                    self.update_search(cx);
-                }
+            Ok(entries) => {
+                self.apply_directory(path, entries, cx);
             }
             Err(err) => {
                 self.load_error = Some(format!("{err:#}").into());
             }
         }
+    }
+
+    /// Install an already-read listing; typed paths do all filesystem work off-thread.
+    pub(super) fn apply_directory(
+        &mut self,
+        path: &Path,
+        mut entries: Vec<Entry>,
+        cx: &mut Context<Self>,
+    ) {
+        let show_hidden = self.settings.read(cx).settings().show_hidden_files;
+        if !show_hidden {
+            entries.retain(|entry| !entry.is_hidden);
+        }
+        let changed = self.cwd != path;
+        self.cwd = path.to_path_buf();
+        self.entries = entries;
+        self.load_error = None;
+        self.selection.clear();
+        // Any in-flight rename or armed delete points at rows
+        // that no longer exist; drop them.
+        self.renaming = None;
+        self.pending_delete = None;
+        // Only jump to the top when this is a real navigation. A
+        // same-directory refresh (after a delete, paste, or rename)
+        // must keep the user's scroll position — yanking back to
+        // row 0 after every file op was jarring.
+        if changed {
+            self.browse_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        }
+        // A "Current Dir" search follows the folder you're in, so
+        // navigating with a scoped query live must re-scope it to
+        // the new directory. "Anywhere" is cwd-independent, so it
+        // is left untouched.
+        if changed && self.search_scope == SearchScope::CurrentDir && !self.query.is_empty() {
+            self.update_search(cx);
+        }
+        self.sync_path(cx);
     }
 
     /// Schedule a thumbnail decode for a visible image row (no-op if
@@ -106,6 +119,16 @@ impl Workspace {
     /// Arrow-key navigation. `extend` (shift held) grows the range from
     /// the anchor instead of moving a single selection.
     pub(super) fn move_selection(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        if self.in_magic_view() {
+            return;
+        }
+        if self.renaming.is_some()
+            || self.tag_editor.is_some()
+            || self.conflict.is_some()
+            || self.settings_open
+        {
+            return;
+        }
         let len = self.active_list_len();
         let next = if extend {
             self.active_selection_mut().extend_lead(delta, len)
@@ -201,6 +224,9 @@ impl Workspace {
     }
 
     pub(super) fn activate_selected(&mut self, cx: &mut Context<Self>) {
+        if self.in_magic_view() {
+            return;
+        }
         if let Some(ix) = self.active_selection().lead() {
             self.activate(ix, cx);
         }
@@ -227,6 +253,10 @@ impl Workspace {
     }
 
     pub(super) fn select_all(&mut self, cx: &mut Context<Self>) {
+        if self.in_magic_view() {
+            self.set_all_magic_ops(true, cx);
+            return;
+        }
         if self.renaming.is_some() || self.settings_open {
             return;
         }
@@ -238,6 +268,8 @@ impl Workspace {
 
     pub(super) fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if path == self.cwd {
+            self.sync_path(cx);
+            cx.notify();
             return;
         }
         // A new destination severs the forward history (the tab owns

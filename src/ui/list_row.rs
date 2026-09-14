@@ -11,13 +11,14 @@ use super::theme::Theme;
 /// Enable tabular (fixed-width) figures on a text element, so a column of
 /// sizes and dates aligns digit-for-digit instead of jittering.
 pub fn tabular(mut el: Div) -> Div {
-    el.text_style().get_or_insert_with(Default::default).font_features =
-        Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    el.text_style()
+        .get_or_insert_with(Default::default)
+        .font_features = Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
     el
 }
 
 /// Width of the Modified column (rows and header must agree).
-pub const MODIFIED_COL_WIDTH: f32 = 64.;
+pub const MODIFIED_COL_WIDTH: f32 = 84.;
 /// Width of the Size column (rows and header must agree).
 pub const SIZE_COL_WIDTH: f32 = 72.;
 
@@ -43,7 +44,9 @@ pub fn header_row(theme: &Theme, icon_col_width: f32) -> Div {
         .items_center()
         .gap_2()
         .px_3()
-        .h(px(22.))
+        .h(px(34.))
+        .flex_none()
+        .mb_1()
         .border_b_1()
         .border_color(theme.border)
         .text_xs()
@@ -89,6 +92,29 @@ pub fn header_cell(
         .children(chevron)
 }
 
+/// Search results put the path below the name so both remain readable
+/// in narrow panes and long names cannot push the location offscreen.
+pub fn search_label(
+    theme: &Theme,
+    name: impl Into<SharedString>,
+    path: impl Into<SharedString>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .child(div().w_full().text_sm().truncate().child(name.into()))
+        .child(
+            div()
+                .w_full()
+                .text_xs()
+                .text_color(theme.text_dim)
+                .truncate()
+                .child(path.into()),
+        )
+}
+
 /// The common list-row container: fixed height, selection background,
 /// hover feedback. Callers chain their cells (icon, name, detail
 /// column) and an `.on_click` handler onto the returned element.
@@ -109,9 +135,7 @@ pub fn list_row(theme: &Theme, ix: usize, is_selected: bool) -> Stateful<Div> {
         // Rounded selection/hover, Finder-style, so the fill reads as a
         // pill on the row rather than a full-bleed band.
         .rounded_md()
-        // Subtle alternating stripes (Finder list view); selection and
-        // hover paint over them.
-        .when(!is_selected && ix % 2 == 1, |s| s.bg(theme.stripe))
+        // Keep unselected rows quiet; selection and hover establish hierarchy.
         .when(is_selected, |s| s.bg(theme.selected))
         .when(!is_selected, move |s| s.hover(move |s| s.bg(hover)))
 }

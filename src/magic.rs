@@ -437,7 +437,8 @@ impl UserDirs {
             .insert(name.into().to_ascii_lowercase(), path.into());
     }
 
-    fn get(&self, name: &str) -> Option<&Path> {
+    /// Look up a cached well-known folder without querying the OS again.
+    pub fn get(&self, name: &str) -> Option<&Path> {
         self.by_name
             .get(&name.to_ascii_lowercase())
             .map(PathBuf::as_path)

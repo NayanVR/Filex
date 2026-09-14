@@ -1,5 +1,4 @@
-//! Settings form controls: the pane container, toggle rows, and the
-//! footnote line.
+//! Settings form controls: the categorized pane, choice controls, and toggle rows.
 //!
 //! Hand-rolled after checking the references (gpui ships no form
 //! widgets; gpui-component's Switch is the pattern followed here, but
@@ -15,22 +14,14 @@ use gpui::{
 use super::theme::Theme;
 
 /// The settings card: a centred modal panel floating over the browse
-/// view. Fixed width, sized to its content. Callers chain `.on_click`
+/// view. Fixed width with a scrollable page. Callers chain `.on_click`
 /// (to stop the backdrop's click-through) and the rows.
 pub fn settings_card(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    super::card(theme).id(id).w(px(480.)).p_4().gap_1()
-}
-
-/// The card's header: a heading on the left and a close ✕ on the right.
-/// The caller supplies the close button as the trailing control.
-pub fn card_header(theme: &Theme, text: impl Into<SharedString>, close: AnyElement) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .pb_2()
-        .child(div().text_sm().text_color(theme.text).child(text.into()))
-        .child(close)
+    super::card(theme)
+        .id(id)
+        .w(px(780.))
+        .bg(theme.bg)
+        .overflow_hidden()
 }
 
 /// The label + explanation stack shared by every settings row.
@@ -61,6 +52,7 @@ fn row_label(
 fn row_shell() -> Div {
     div()
         .flex()
+        .flex_none()
         .items_center()
         .justify_between()
         .gap_4()
@@ -87,9 +79,9 @@ pub fn toggle_row(
         .child(switch(theme, on))
 }
 
-/// A setting picked from a small fixed set of choices: label on the
-/// left, a [`segmented`] control on the right. The caller builds the
-/// segments (each its own click target) and passes them in.
+/// A setting picked from a small fixed set of choices: explanation above
+/// the controls, so swatches never squeeze the label into a narrow column.
+/// The caller supplies the segments, each with its own click target.
 pub fn choice_row(
     theme: &Theme,
     label: impl Into<SharedString>,
@@ -97,7 +89,10 @@ pub fn choice_row(
     control: AnyElement,
 ) -> Div {
     row_shell()
-        .child(row_label(theme, label, description))
+        .flex_col()
+        .items_start()
+        .gap_2()
+        .child(row_label(theme, label, description).flex_none().w_full())
         .child(control)
 }
 
@@ -136,15 +131,10 @@ pub fn segment(
     }
 }
 
-/// The container for a row of accent [`swatch`]es. Wraps and right-aligns
+/// The container for a row of accent [`swatch`]es. Wraps
 /// so the swatches + hex field never overflow the settings row.
 pub fn swatch_row() -> Div {
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .justify_end()
-        .gap(px(6.))
+    div().flex().flex_wrap().items_center().gap(px(6.))
 }
 
 /// One accent-color swatch: a filled dot, ringed when selected. Callers
@@ -191,12 +181,172 @@ fn switch(theme: &Theme, on: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// Dim footnote at the bottom of the pane (e.g. where settings live
-/// on disk).
-pub fn footnote(theme: &Theme, text: impl Into<SharedString>) -> Div {
+/// Stable outer header for the settings window.
+pub fn shell_header(theme: &Theme, title: impl Into<SharedString>, close: impl IntoElement) -> Div {
     div()
-        .pt_3()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_between()
+        .h(px(64.))
+        .px_5()
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .text_lg()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title.into()),
+        )
+        .child(close)
+}
+
+pub fn navigation(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(px(176.))
+        .p_3()
+        .gap_1()
+        .bg(theme.panel)
+        .border_r_1()
+        .border_color(theme.border)
+}
+
+pub fn navigation_item(
+    theme: &Theme,
+    label: &'static str,
+    icon: &'static str,
+    active: bool,
+) -> Stateful<Div> {
+    let color = if active { theme.accent } else { theme.text_dim };
+    div()
+        .id(label)
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(38.))
+        .px_3()
+        .gap_2()
+        .rounded_lg()
+        .text_sm()
+        .text_color(color)
+        .cursor_pointer()
+        .when(active, |s| {
+            s.bg(theme.selected).font_weight(gpui::FontWeight::MEDIUM)
+        })
+        .when(!active, |s| s.hover(|s| s.bg(theme.hover)))
+        .child(super::icon::ui_icon(icon, color).size(px(16.)))
+        .child(label)
+}
+
+pub fn page(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("settings-page-{id}")))
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_y_scroll()
+        .p_5()
+        .gap_5()
+}
+
+pub fn page_heading(theme: &Theme, title: &'static str, description: &'static str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .gap_1()
+        .child(
+            div()
+                .text_xl()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.text_dim)
+                .child(description),
+        )
+}
+
+pub fn group(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .p_1()
+        .gap_1()
+        .rounded_xl()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg)
+}
+
+pub fn note(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div()
+        .min_w_0()
         .text_xs()
         .text_color(theme.text_dim)
         .child(text.into())
+}
+
+pub fn shortcut_row(theme: &Theme, label: &'static str, aliases: String) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_2()
+        .min_h(px(48.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().child(label))
+                .when(!aliases.is_empty(), |s| {
+                    s.child(note(theme, format!("Also {aliases}")))
+                }),
+        )
+}
+
+pub fn shortcut_button(
+    theme: &Theme,
+    id: &'static str,
+    label: String,
+    recording: bool,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("shortcut-{id}")))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .min_w(px(86.))
+        .h(px(30.))
+        .px_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if recording {
+            theme.accent
+        } else {
+            theme.border
+        })
+        .bg(if recording {
+            theme.selected
+        } else {
+            theme.panel
+        })
+        .text_xs()
+        .text_color(if recording { theme.accent } else { theme.text })
+        .cursor_pointer()
+        .hover(|s| s.border_color(theme.accent))
+        .child(label)
 }

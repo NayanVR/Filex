@@ -13,11 +13,11 @@ use super::icon;
 use super::theme::Theme;
 
 /// Sidebar width. One place so panels/overlays can align to it later.
-pub const SIDEBAR_WIDTH: f32 = 200.;
+pub const SIDEBAR_WIDTH: f32 = 216.;
 
 /// Fixed height of a standard sidebar row. Every row is this tall so the
 /// panel scrolls cleanly instead of compressing rows into each other.
-pub const ROW_HEIGHT: f32 = 30.;
+pub const ROW_HEIGHT: f32 = 34.;
 
 /// Definite width for a row's truncating label: the panel width minus the
 /// row's horizontal margins (`mx_2`) and padding (`px_2`), a leading icon
@@ -33,6 +33,7 @@ pub fn sidebar_panel(theme: &Theme) -> Div {
         .flex()
         .flex_col()
         .w(px(SIDEBAR_WIDTH))
+        .flex_none()
         .h_full()
         .py_2()
         .border_r_1()
@@ -63,11 +64,13 @@ pub fn collapsible_header(
         .gap_1()
         .mx_2()
         .px_1()
-        .pt_3()
+        .mt_3()
+        .pt_1()
         .pb_1()
-        .rounded_md()
+        .rounded_lg()
         .cursor_pointer()
         .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_dim)
         .hover(move |s| s.text_color(text).bg(hover))
         .child(icon::ui_icon(chevron, theme.text_dim).size(px(11.)))
@@ -86,8 +89,8 @@ pub fn drive_row(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
         .gap_1()
         .mx_2()
         .px_2()
-        .py(px(5.))
-        .rounded_md()
+        .py_2()
+        .rounded_lg()
         .cursor_pointer()
         .overflow_hidden()
         .hover(move |s| s.bg(hover))
@@ -136,7 +139,7 @@ pub fn sidebar_row(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
         .mx_2()
         .px_2()
         .h(px(ROW_HEIGHT))
-        .rounded_md()
+        .rounded_lg()
         .cursor_pointer()
         .text_sm()
         // Long labels clip at the sidebar edge instead of painting

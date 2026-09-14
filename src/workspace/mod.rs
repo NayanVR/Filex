@@ -14,7 +14,7 @@ use gpui::{
 };
 
 use filex::drives::Drive;
-use filex::listing::{Entry, format_modified, format_size, path_segments, read_dir_sorted};
+use filex::listing::{Entry, format_modified, format_size, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
 use filex::search_filter::Filter;
@@ -47,6 +47,14 @@ actions!(
         DeleteSelected,
         Undo,
         FocusSearch,
+        FocusPath,
+        SubmitPath,
+        CancelPath,
+        SelectPrevious,
+        SelectNext,
+        ExtendPrevious,
+        ExtendNext,
+        OpenSelected,
         ToggleShortcuts,
         ToggleView
     ]
@@ -459,8 +467,18 @@ impl SearchScope {
 /// `results` is what the user is looking at, `ops`/`checked` is what would
 /// run — which is what lets a row be unchecked without disturbing the
 /// result list.
+#[derive(Default)]
+struct MagicProgress {
+    scanned: std::sync::atomic::AtomicU64,
+    matched: std::sync::atomic::AtomicU64,
+}
+
 struct MagicState {
+    source_query: String,
     command: filex::magic::Command,
+    loading: bool,
+    error: Option<String>,
+    progress: std::sync::Arc<MagicProgress>,
     /// The resolved plan, or why there isn't one. `None` until the search
     /// lands, so a still-indexing root doesn't claim the command matched
     /// nothing. An error still shows a card — "no folder called Archive"
@@ -473,8 +491,77 @@ struct MagicState {
 }
 
 impl MagicState {
+    fn selection_count(&self) -> usize {
+        match &self.outcome {
+            Some(Ok(plan)) => plan
+                .ops
+                .iter()
+                .zip(&self.checked)
+                .filter(|(_, checked)| **checked)
+                .count(),
+            _ => 0,
+        }
+    }
+
+    fn status(&self) -> String {
+        if let Some(error) = &self.error {
+            return format!("Couldn’t prepare preview: {error}");
+        }
+        if self.loading {
+            let scanned = self
+                .progress
+                .scanned
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let matched = self
+                .progress
+                .matched
+                .load(std::sync::atomic::Ordering::Relaxed);
+            return if scanned == 0 {
+                "Finding matching files…".into()
+            } else {
+                format!("{matched} matches found · {scanned} entries checked…")
+            };
+        }
+        match &self.outcome {
+            Some(Ok(plan)) => format!("{} of {} selected", self.selection_count(), plan.ops.len()),
+            Some(Err(error)) => error.to_string(),
+            None => "Preparing preview…".into(),
+        }
+    }
+
+    fn install_plan(&mut self, outcome: Result<filex::magic::Plan, filex::magic::PlanError>) {
+        let previous = match &self.outcome {
+            Some(Ok(plan)) => plan
+                .ops
+                .iter()
+                .zip(&self.checked)
+                .map(|(op, checked)| (op.source(), (op, *checked)))
+                .collect::<std::collections::HashMap<_, _>>(),
+            _ => Default::default(),
+        };
+        self.checked = match &outcome {
+            Ok(plan) => plan
+                .ops
+                .iter()
+                .map(|op| {
+                    previous
+                        .get(op.source())
+                        .filter(|(old, _)| *old == op)
+                        .map_or(previous.is_empty(), |(_, checked)| *checked)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        self.outcome = Some(outcome);
+        self.loading = false;
+        self.error = None;
+    }
+
     /// The ops the user has left checked.
     fn selected_ops(&self) -> Vec<FileOp> {
+        if self.loading || self.error.is_some() {
+            return Vec::new();
+        }
         let Some(Ok(plan)) = &self.outcome else {
             return Vec::new();
         };
@@ -574,6 +661,11 @@ struct Workspace {
     /// Mirror of the search input's content (the input entity owns it).
     query: String,
     search_input: gpui::Entity<SearchInput>,
+    path_input: gpui::Entity<SearchInput>,
+    _path_subscription: gpui::Subscription,
+    path_error: Option<SharedString>,
+    path_request: u64,
+    path_loading: bool,
     _search_input_subscription: gpui::Subscription,
     /// The accent hex field in Settings (its own text input, parsed into a
     /// `Custom` accent on change).
@@ -608,7 +700,10 @@ struct Workspace {
     /// still takes precedence, Spotlight-style).
     settings_open: bool,
     /// Whether the keyboard-shortcuts overlay is up (toggled by `?`).
-    shortcuts_open: bool,
+    settings_section: preferences::SettingsSection,
+    settings_focus: FocusHandle,
+    recording_shortcut: Option<&'static str>,
+    shortcut_error: Option<SharedString>,
     /// In-flight rename; `None` when no row is being edited.
     renaming: Option<RenameState>,
     /// Undo stack of completed file operations.
@@ -683,13 +778,16 @@ struct Workspace {
 
 mod file_ops;
 mod input;
+mod location;
 mod navigation;
+mod preferences;
 mod render;
 mod render_lists;
 mod render_menus;
 mod roots;
 mod search;
 mod services;
+mod shortcuts;
 mod sidebar;
 mod tabs;
 mod tags;
@@ -709,6 +807,7 @@ impl Workspace {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         let cwd = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let search_input = cx.new(SearchInput::new);
+        search_input.update(cx, |input, _| input.set_propagate_empty(false));
         let subscription = cx.subscribe(&search_input, |this, _input, event, cx| match event {
             SearchInputEvent::Changed(text) => {
                 if this.query != *text {
@@ -719,7 +818,24 @@ impl Workspace {
             SearchInputEvent::BackspaceWhenEmpty => this.go_up(cx),
             SearchInputEvent::Dismissed => {} // escape just clears the query
         });
+        let path_input = cx.new(SearchInput::new);
+        path_input.update(cx, |input, cx| {
+            input.set_propagate_empty(false);
+            input.set_placeholder("Enter a folder path", cx);
+            input.set_text(cwd.to_string_lossy().into_owned(), cx);
+        });
+        let path_subscription = cx.subscribe(&path_input, |this, _, event, cx| {
+            if matches!(event, SearchInputEvent::Changed(_)) {
+                if this.path_loading {
+                    this.path_request = this.path_request.wrapping_add(1);
+                    this.path_loading = false;
+                }
+                this.path_error = None;
+                cx.notify();
+            }
+        });
         let accent_hex = cx.new(SearchInput::new);
+        accent_hex.update(cx, |input, _| input.set_propagate_empty(false));
         accent_hex.update(cx, |input, cx| input.set_placeholder("#RRGGBB", cx));
         let accent_hex_subscription = cx.subscribe(&accent_hex, |this, _input, event, cx| {
             if let SearchInputEvent::Changed(text) = event
@@ -736,7 +852,7 @@ impl Workspace {
         // active color theme).
         let settings_subscription =
             cx.subscribe(&settings, |this, _store, event, cx| match event {
-                SettingsEvent::Changed => {
+                SettingsEvent::Changed(previous) => {
                     let include_system = this.settings.read(cx).settings().index_system_files;
                     if this.index_system_files != include_system {
                         this.index_system_files = include_system;
@@ -748,14 +864,25 @@ impl Workspace {
                                 .detach();
                         }
                     }
-                    let cwd = this.cwd.clone();
-                    this.load_dir(&cwd, cx);
+                    let current = this.settings.read(cx).settings();
+                    let reload = previous.sort != current.sort
+                        || previous.show_hidden_files != current.show_hidden_files;
+                    let remap = previous.keyboard_shortcuts != current.keyboard_shortcuts;
+                    if remap {
+                        let overrides = current.keyboard_shortcuts.clone();
+                        shortcuts::install(&overrides, cx);
+                    }
+                    if reload {
+                        let cwd = this.cwd.clone();
+                        this.load_dir(&cwd, cx);
+                    }
                     this.apply_theme(cx);
                 }
             });
         let recents = filex::recents::default_recents_file()
             .map(|file| Recents::load(&file))
             .unwrap_or_default();
+        shortcuts::install(&settings.read(cx).settings().keyboard_shortcuts.clone(), cx);
         let index_system_files = settings.read(cx).settings().index_system_files;
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -784,6 +911,11 @@ impl Workspace {
                 ^ u64::from(std::process::id()),
             query: String::new(),
             search_input,
+            path_input,
+            _path_subscription: path_subscription,
+            path_error: None,
+            path_request: 0,
+            path_loading: false,
             _search_input_subscription: subscription,
             accent_hex,
             _accent_hex_subscription: accent_hex_subscription,
@@ -793,7 +925,10 @@ impl Workspace {
             magic_mode: MagicMode::Auto,
             search_scope: SearchScope::Anywhere,
             scope_menu: None,
-            shortcuts_open: false,
+            settings_section: preferences::SettingsSection::Appearance,
+            settings_focus: cx.focus_handle(),
+            recording_shortcut: None,
+            shortcut_error: None,
             user_dirs: filex::magic::UserDirs::from_os(),
             selection: Selection::default(),
             search_selection: Selection::default(),
@@ -901,77 +1036,6 @@ pub fn run() {
             // soon as a window exists (see the open-window closure below).
             cx.set_global(Theme::dark());
             cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.bind_keys([
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-q", Quit, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-w", CloseTab, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-t", NewTab, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-up", GoUp, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-[", GoBack, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-]", GoForward, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-r", Refresh, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-,", ToggleSettings, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-i", TogglePreview, None),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-z", Undo, None),
-                // Finder's delete shortcut. Plain Delete can't work here:
-                // the always-focused search input consumes it as text
-                // editing.
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-backspace", DeleteSelected, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-q", Quit, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-w", CloseTab, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-t", NewTab, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("alt-up", GoUp, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("alt-left", GoBack, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("alt-right", GoForward, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-r", Refresh, None),
-                // F5 refreshes on every platform (Explorer convention).
-                KeyBinding::new("f5", Refresh, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-,", ToggleSettings, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-i", TogglePreview, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-z", Undo, None),
-                // Not plain Delete: the always-focused search input
-                // consumes that for text editing.
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-delete", DeleteSelected, None),
-                // Tab cycling is ctrl-tab on every platform.
-                KeyBinding::new("ctrl-tab", NextTab, None),
-                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-                KeyBinding::new("f2", RenameSelected, None),
-                // Single-key shortcuts, scoped to `!SearchInput` so they
-                // type normally once the search box has focus. `/` focuses
-                // search; the mod accelerator does the same from anywhere.
-                KeyBinding::new("/", FocusSearch, Some("!SearchInput")),
-                #[cfg(target_os = "macos")]
-                KeyBinding::new("cmd-f", FocusSearch, None),
-                #[cfg(not(target_os = "macos"))]
-                KeyBinding::new("ctrl-f", FocusSearch, None),
-                // `?` (and its shift-/ spelling) opens the shortcuts overlay.
-                KeyBinding::new("?", ToggleShortcuts, Some("!SearchInput")),
-                KeyBinding::new("shift-/", ToggleShortcuts, Some("!SearchInput")),
-                KeyBinding::new("v", ToggleView, Some("!SearchInput")),
-                KeyBinding::new("p", TogglePreview, Some("!SearchInput")),
-            ]);
-            search_input::bind_keys(cx);
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -979,7 +1043,7 @@ pub fn run() {
             })
             .detach();
 
-            let bounds = Bounds::centered(None, size(px(1000.), px(700.)), cx);
+            let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
             // macOS: unified titlebar — the system bar goes transparent
             // and the traffic lights inset into our top bar, which pads
             // left to clear them. Elsewhere the native titlebar stays.
@@ -1002,6 +1066,7 @@ pub fn run() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(860.), px(520.))),
                     titlebar: Some(titlebar),
                     ..Default::default()
                 },
@@ -1053,9 +1118,13 @@ mod magic_ui_tests {
     /// them would have been renamed on confirm.
     fn state(outcome: Result<Plan, filex::magic::PlanError>, checked: Vec<bool>) -> MagicState {
         MagicState {
+            source_query: "delete screenshots older than 30 days".into(),
             command: filex::magic::parse("delete screenshots older than 30 days", 1_785_067_200)
                 .expect("fixture should parse"),
             outcome: Some(outcome),
+            loading: false,
+            error: None,
+            progress: Default::default(),
             checked,
         }
     }
@@ -1072,6 +1141,38 @@ mod magic_ui_tests {
         FileOp::Delete {
             path: PathBuf::from(path),
         }
+    }
+
+    #[test]
+    fn magic_status_counts_checkboxes_and_blocks_loading_or_failed_plans() {
+        let mut state = state(
+            Ok(plan(vec![delete("/a"), delete("/b")])),
+            vec![false, true],
+        );
+        assert_eq!(state.status(), "1 of 2 selected");
+        state.checked.fill(false);
+        assert_eq!(state.status(), "0 of 2 selected");
+        state.loading = true;
+        assert!(state.selected_ops().is_empty());
+        state
+            .progress
+            .scanned
+            .store(4096, std::sync::atomic::Ordering::Relaxed);
+        assert!(state.status().contains("4096 entries checked"));
+        state.error = Some("Disconnected".into());
+        assert!(state.status().contains("Disconnected"));
+        assert!(!state.status().contains("Finding"));
+    }
+
+    #[test]
+    fn refreshed_plan_preserves_exclusions_when_rows_change_order() {
+        let mut state = state(
+            Ok(plan(vec![delete("/a"), delete("/b")])),
+            vec![false, true],
+        );
+        state.install_plan(Ok(plan(vec![delete("/b"), delete("/c"), delete("/a")])));
+        assert_eq!(state.checked, vec![true, false, false]);
+        assert_eq!(state.selected_ops(), vec![delete("/b")]);
     }
 
     #[test]

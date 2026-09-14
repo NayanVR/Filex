@@ -68,6 +68,8 @@ pub struct Settings {
     /// stays `crash_reports` for back-compat though it now governs the
     /// whole `observability` transport.
     pub crash_reports: bool,
+    /// App shortcut overrides by stable command id; empty means unassigned.
+    pub keyboard_shortcuts: std::collections::BTreeMap<String, String>,
 }
 
 /// The two browse layouts (block 4).
@@ -143,6 +145,7 @@ impl Default for Settings {
             favorites: Vec::new(),
             collapsed_sections: Vec::new(),
             crash_reports: true,
+            keyboard_shortcuts: Default::default(),
         }
     }
 }
@@ -242,6 +245,7 @@ mod tests {
         assert_eq!(settings.preview_width, 280.);
         assert!(settings.favorites.is_empty());
         assert!(settings.collapsed_sections.is_empty());
+        assert!(settings.keyboard_shortcuts.is_empty());
     }
 
     #[test]
@@ -253,6 +257,12 @@ mod tests {
         settings.show_hidden_files = true;
         settings.sort.by = SortBy::Modified;
         settings.sort.ascending = false;
+        settings
+            .keyboard_shortcuts
+            .insert("search".into(), "ctrl-alt-s".into());
+        settings
+            .keyboard_shortcuts
+            .insert("view".into(), String::new());
 
         settings.save(&file).unwrap();
         let loaded = Settings::load(&file, None).unwrap();
@@ -306,6 +316,7 @@ mod tests {
         let settings = Settings::load(&file, None).unwrap();
         assert!(settings.show_hidden_files);
         assert_eq!(settings.sort, SortSettings::default());
+        assert!(settings.keyboard_shortcuts.is_empty());
     }
 
     #[test]

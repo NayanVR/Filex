@@ -21,9 +21,8 @@ pub const ACCENT_PRESETS: [AccentColor; 7] = [
     AccentColor::Teal,
 ];
 
-/// Comfortable-density list metrics — the pre-density defaults, so the
-/// dark look doesn't shift under the metrics migration.
-const COMFORTABLE_ROW_HEIGHT: f32 = 28.;
+/// Shared list metrics. Comfortable gives names and thumbnails room to breathe.
+const COMFORTABLE_ROW_HEIGHT: f32 = 36.;
 const COMFORTABLE_ICON_SIZE: f32 = 20.;
 
 /// The rgb for an accent preset, or `None` for `Default` (keep the
@@ -86,7 +85,7 @@ pub struct Theme {
     pub hover: Rgba,
     /// Background of a selected list row (accent-tinted, Finder-style).
     pub selected: Rgba,
-    /// Alternating list-row stripe (barely off [`Theme::bg`]).
+    /// Subtle inset surfaces, such as unselected grid cards.
     pub stripe: Rgba,
     /// Panel and control borders.
     pub border: Rgba,
@@ -118,22 +117,21 @@ pub struct Theme {
 impl Global for Theme {}
 
 impl Theme {
-    /// The original dark palette. Kept pixel-for-pixel from the pre-theme
-    /// constants so the dark look doesn't shift under the migration.
+    /// Cool charcoal content with subtly recessed chrome.
     pub fn dark() -> Self {
         Self {
-            bg: rgb(0x1e2227),
-            panel: rgb(0x23272e),
-            hover: rgb(0x2f343c),
-            selected: rgb(0x2a4a63),
-            stripe: rgb(0x22262c),
-            border: rgb(0x363c45),
-            text: rgb(0xd7dae0),
-            text_dim: rgb(0x8b929e),
+            bg: rgb(0x181b20),
+            panel: rgb(0x14171b),
+            hover: rgb(0x252b33),
+            selected: rgb(0x233e50),
+            stripe: rgb(0x1b1f25),
+            border: rgb(0x2b313a),
+            text: rgb(0xe8edf3),
+            text_dim: rgb(0x9aa5b3),
             accent: rgb(0x5ac8fa),
             // The light-cyan accent reads as a "light" fill, so dark ink
             // sits on it (this was the old `BG` the primary button used).
-            on_accent: rgb(0x1e2227),
+            on_accent: rgb(0x181b20),
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
@@ -148,16 +146,16 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             bg: rgb(0xffffff),
-            panel: rgb(0xf6f7f9),
-            hover: rgb(0xeceef1),
-            selected: rgb(0xd8ecf9),
-            stripe: rgb(0xfafbfc),
-            border: rgb(0xe4e6ea),
-            text: rgb(0x1c1e22),
-            text_dim: rgb(0x82868e),
-            accent: rgb(0x0e8fce),
+            panel: rgb(0xf4f6f8),
+            hover: rgb(0xe9edf2),
+            selected: rgb(0xe0effa),
+            stripe: rgb(0xf9fafc),
+            border: rgb(0xe2e7ee),
+            text: rgb(0x202936),
+            text_dim: rgb(0x697586),
+            accent: rgb(0x087eaf),
             on_accent: rgb(0xffffff),
-            accent_selection: rgba(0x0e8fce3d),
+            accent_selection: rgba(0x087eaf3d),
             warn: rgb(0xc0851a),
             success: rgb(0x2ba55a),
             row_height: COMFORTABLE_ROW_HEIGHT,
@@ -177,7 +175,7 @@ impl Theme {
             stripe: rgb(0x070708),
             border: rgb(0x242529),
             text: rgb(0xe6e8ec),
-            text_dim: rgb(0x8b929e),
+            text_dim: rgb(0x9aa5b3),
             accent: rgb(0x5ac8fa),
             on_accent: rgb(0x000000),
             accent_selection: rgba(0x5ac8fa40),
@@ -259,21 +257,37 @@ mod tests {
     use super::*;
 
     fn light() -> Theme {
-        Theme::resolve(ThemeMode::Light, WindowAppearance::Dark, AccentColor::Default)
+        Theme::resolve(
+            ThemeMode::Light,
+            WindowAppearance::Dark,
+            AccentColor::Default,
+        )
     }
 
     #[test]
     fn explicit_modes_ignore_appearance() {
         assert_eq!(
-            Theme::resolve(ThemeMode::Light, WindowAppearance::Dark, AccentColor::Default),
+            Theme::resolve(
+                ThemeMode::Light,
+                WindowAppearance::Dark,
+                AccentColor::Default
+            ),
             Theme::light()
         );
         assert_eq!(
-            Theme::resolve(ThemeMode::Dark, WindowAppearance::Light, AccentColor::Default),
+            Theme::resolve(
+                ThemeMode::Dark,
+                WindowAppearance::Light,
+                AccentColor::Default
+            ),
             Theme::dark()
         );
         assert_eq!(
-            Theme::resolve(ThemeMode::Oled, WindowAppearance::Light, AccentColor::Default),
+            Theme::resolve(
+                ThemeMode::Oled,
+                WindowAppearance::Light,
+                AccentColor::Default
+            ),
             Theme::oled()
         );
     }
@@ -281,11 +295,19 @@ mod tests {
     #[test]
     fn system_follows_appearance() {
         assert_eq!(
-            Theme::resolve(ThemeMode::System, WindowAppearance::Light, AccentColor::Default),
+            Theme::resolve(
+                ThemeMode::System,
+                WindowAppearance::Light,
+                AccentColor::Default
+            ),
             Theme::light()
         );
         assert_eq!(
-            Theme::resolve(ThemeMode::System, WindowAppearance::Dark, AccentColor::Default),
+            Theme::resolve(
+                ThemeMode::System,
+                WindowAppearance::Dark,
+                AccentColor::Default
+            ),
             Theme::dark()
         );
     }
@@ -313,13 +335,20 @@ mod tests {
 
     #[test]
     fn custom_accent_uses_its_hex() {
-        assert_eq!(accent_rgb(AccentColor::Custom(0x123456)), Some(rgb(0x123456)));
+        assert_eq!(
+            accent_rgb(AccentColor::Custom(0x123456)),
+            Some(rgb(0x123456))
+        );
     }
 
     #[test]
     fn accent_override_recolors_and_stays_legible() {
         let plain = light();
-        let purple = Theme::resolve(ThemeMode::Light, WindowAppearance::Dark, AccentColor::Purple);
+        let purple = Theme::resolve(
+            ThemeMode::Light,
+            WindowAppearance::Dark,
+            AccentColor::Purple,
+        );
         // The accent changed and dragged the selection tints with it.
         assert_ne!(purple.accent, plain.accent);
         assert_eq!(purple.accent, accent_rgb(AccentColor::Purple).unwrap());
@@ -328,7 +357,12 @@ mod tests {
         assert_eq!(purple.on_accent, rgb(0xffffff));
         // Default keeps the palette's own accent untouched.
         assert_eq!(
-            Theme::resolve(ThemeMode::Light, WindowAppearance::Dark, AccentColor::Default).accent,
+            Theme::resolve(
+                ThemeMode::Light,
+                WindowAppearance::Dark,
+                AccentColor::Default
+            )
+            .accent,
             plain.accent
         );
     }

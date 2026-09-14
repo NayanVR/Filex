@@ -20,7 +20,6 @@ use filex::listing::FileKind;
 
 use super::theme::Theme;
 
-
 /// A themed UI glyph (chevrons, gear, search, markers…) from an asset
 /// path like `"icons/settings.svg"`. Caller sizes it (`.size(px(..))`)
 /// and may add a transformation for animation.
@@ -66,6 +65,24 @@ pub fn thumbnail_icon(imagery: Arc<RenderImage>, edge: f32) -> AnyElement {
 
 /// The file-type mark for `kind` at `edge` px, colored by [`kind_color`].
 pub fn file_icon(theme: &Theme, kind: FileKind, edge: f32) -> AnyElement {
+    if kind == FileKind::Directory {
+        return div()
+            .relative()
+            .size(px(edge))
+            .flex_none()
+            .child(
+                ui_icon("icons/folder-back.svg", theme.accent)
+                    .absolute()
+                    .size_full()
+                    .opacity(0.45),
+            )
+            .child(
+                ui_icon("icons/folder-front.svg", theme.accent)
+                    .absolute()
+                    .size_full(),
+            )
+            .into_any_element();
+    }
     svg()
         .path(kind_asset(kind))
         .w(px(edge))
