@@ -146,6 +146,7 @@ impl Workspace {
                         )
                         .into(),
                     );
+                    this.sync_folder_icons(&applied, false, cx);
                     this.journal.record(applied);
                 }
                 if let Some(error) = failure {

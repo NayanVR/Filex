@@ -6,7 +6,8 @@
 //! the visible rows — never one element per file. The column math is a
 //! pure function so it can be unit-tested without GPUI.
 
-use gpui::{Div, ElementId, Stateful, div, prelude::*, px};
+use gpui::{App, Div, ElementId, LineFragment, Stateful, div, font, prelude::*, px};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::theme::Theme;
 
@@ -20,11 +21,10 @@ const CARD_PAD: f32 = 8.;
 /// detail line — see [`card_name`]. Fixed so every card is the same
 /// height and a long name can't push into the row below.
 const LABEL_HEIGHT: f32 = 74.;
-/// Fixed height of the name block: exactly two `text_xs` line-boxes. gpui
-/// defaults line height to φ·font-size (≈1.618 × 12px ≈ 19px), so two
-/// lines need ~38px — a shorter box clips descenders (y, g, p) on the
-/// second line.
-const NAME_HEIGHT: f32 = 38.;
+/// Explicit metrics keep filename measurement and the two rendered lines in sync.
+const NAME_FONT_SIZE: f32 = 12.;
+const NAME_LINE_HEIGHT: f32 = 19.;
+const NAME_HEIGHT: f32 = NAME_LINE_HEIGHT * 2.;
 /// Gap between cards (and the row's own inset).
 pub const CARD_GAP: f32 = 8.;
 
@@ -122,28 +122,86 @@ pub fn card_icon_area(size: f32) -> Div {
         .flex_none()
 }
 
-/// A card's name block: centered, wrapping to at most two lines with a
-/// trailing ellipsis. gpui only truncates against a *definite* width, so
-/// the explicit card width here (not a flex-derived width) is what makes
-/// the ellipsis reliable; the line wrapper force-breaks over-long words,
-/// so no single line can spill past the card edge. Fixed height keeps the
-/// detail line aligned across cards. Pair it with a tooltip for the full
-/// name.
-pub fn card_name(theme: &Theme, width: f32) -> Div {
+/// Two independently bounded lines. GPUI 0.2's combined line-clamp/ellipsis
+/// truncates against twice the width before wrapping; a short first word can
+/// leave an over-wide final line whose beginning gets clipped when centered.
+pub fn card_name(theme: &Theme, width: f32, name: &str, cx: &App) -> Div {
+    let width = px((width - CARD_PAD * 2.).max(1.));
+    // Filenames may contain line breaks; treat those as spaces in the label.
+    let name = name.replace(['\n', '\r', '\t'], " ");
+    let mut wrapper = cx
+        .text_system()
+        .line_wrapper(font(super::fonts::UI_FONT_FAMILY), px(NAME_FONT_SIZE));
+    let boundary = wrapper
+        .wrap_line(&[LineFragment::text(&name)], width)
+        .next()
+        .map_or(name.len(), |boundary| boundary.ix);
+    let (first, second) = split_filename(&name, boundary);
     div()
-        .w(px(width - CARD_PAD * 2.))
+        .flex()
+        .flex_col()
+        .w(width)
         .flex_none()
         .h(px(NAME_HEIGHT))
         .text_center()
-        .text_xs()
+        .font_family(super::fonts::UI_FONT_FAMILY)
+        .text_size(px(NAME_FONT_SIZE))
+        .line_height(px(NAME_LINE_HEIGHT))
         .text_color(theme.text)
-        .line_clamp(2)
-        .text_ellipsis()
+        .children([first, second].map(|line| {
+            div()
+                .w(width)
+                .h(px(NAME_LINE_HEIGHT))
+                .flex_none()
+                .truncate()
+                .child(line.to_owned())
+        }))
+}
+
+/// Keep the remainder intact for end truncation, without dividing a grapheme
+/// if the line wrapper chose a boundary inside a combining or emoji sequence.
+fn split_filename(name: &str, boundary: usize) -> (&str, &str) {
+    let boundary = name
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .chain(std::iter::once(name.len()))
+        .take_while(|index| *index <= boundary)
+        .last()
+        .unwrap_or(0);
+    let (first, second) = name.split_at(boundary);
+    (first.trim_end(), second.trim_start())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filename_second_line_keeps_its_leading_characters() {
+        for name in [
+            "Background Verification Form.doc",
+            "Background Verification Form.pages",
+        ] {
+            let (first, second) = split_filename(name, "Background ".len());
+            assert_eq!(first, "Background");
+            assert_eq!(second, name.strip_prefix("Background ").unwrap());
+            assert!(second.starts_with("Verification"));
+        }
+    }
+
+    #[test]
+    fn filename_wrap_does_not_split_unicode_graphemes() {
+        assert_eq!(
+            split_filename("Cafe\u{301}.txt", 4),
+            ("Caf", "e\u{301}.txt")
+        );
+        assert_eq!(split_filename("a👩‍💻.png", 5), ("a", "👩‍💻.png"));
+        assert_eq!(
+            split_filename("报告.pdf", "报告.pdf".len()),
+            ("报告.pdf", "")
+        );
+        assert_eq!(split_filename("", 0), ("", ""));
+    }
 
     #[test]
     fn columns_never_below_one() {

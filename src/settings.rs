@@ -45,6 +45,8 @@ pub struct Settings {
     pub theme: ThemeMode,
     /// The accent color applied over whichever palette is active.
     pub accent: AccentColor,
+    /// Per-folder icon choices. An absent path uses the automatic kind.
+    pub folder_icons: std::collections::BTreeMap<PathBuf, FolderIcon>,
     /// List density (row height / icon size).
     pub density: Density,
     /// Browse layout: a detailed list or a card grid.
@@ -114,6 +116,22 @@ pub enum AccentColor {
     Custom(u32),
 }
 
+/// Symbol drawn on a folder's front face. `Plain` explicitly hides a
+/// symbol, even when the folder name would otherwise imply a type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderIcon {
+    Plain,
+    Pictures,
+    Music,
+    Videos,
+    Documents,
+    Downloads,
+    Code,
+    Archives,
+    Desktop,
+}
+
 /// List density: row heights and icon sizes. `Compact` packs more rows in
 /// view; `Comfortable` is the roomier default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -137,6 +155,7 @@ impl Default for Settings {
             thumbnails_enabled: true,
             theme: ThemeMode::System,
             accent: AccentColor::Default,
+            folder_icons: Default::default(),
             density: Density::Comfortable,
             view: ViewMode::List,
             grid_zoom: 1,
@@ -180,6 +199,38 @@ pub enum SortBy {
 }
 
 impl Settings {
+    /// Carry explicit folder symbols through a move or rename. Copies keep
+    /// the source choices and duplicate them for the new path. Descendant
+    /// choices follow a moved/copied parent folder too.
+    pub fn remap_folder_icons(&mut self, from: &Path, to: &Path, copy: bool) {
+        let mapped: Vec<_> = self
+            .folder_icons
+            .iter()
+            .filter_map(|(path, icon)| {
+                path.strip_prefix(from).ok().map(|suffix| {
+                    let new_path = if suffix.as_os_str().is_empty() {
+                        to.to_path_buf()
+                    } else {
+                        to.join(suffix)
+                    };
+                    (path.clone(), new_path, *icon)
+                })
+            })
+            .collect();
+        for (old, new, icon) in mapped {
+            if !copy {
+                self.folder_icons.remove(&old);
+            }
+            self.folder_icons.insert(new, icon);
+        }
+    }
+
+    /// Remove choices for a deleted copy. A trashed folder's choices are
+    /// retained so undo can restore them at the original path.
+    pub fn clear_folder_icons_under(&mut self, root: &Path) {
+        self.folder_icons.retain(|path, _| !path.starts_with(root));
+    }
+
     /// Load settings from `file`. A missing file is first launch, not an
     /// error: defaults, with roots migrated from the legacy `roots.list`.
     /// A file that exists but doesn't parse *is* an error, so the caller
@@ -239,6 +290,7 @@ mod tests {
         assert!(settings.delete_to_trash);
         assert!(settings.thumbnails_enabled);
         assert_eq!(settings.theme, ThemeMode::System);
+        assert!(settings.folder_icons.is_empty());
         assert_eq!(settings.view, ViewMode::List);
         assert_eq!(settings.grid_zoom, 1);
         assert!(!settings.preview_open);
@@ -254,6 +306,9 @@ mod tests {
         let file = dir.path().join("nested").join("settings.json");
         let mut settings = Settings::default();
         settings.roots = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")];
+        settings
+            .folder_icons
+            .insert(PathBuf::from("/tmp/holiday"), FolderIcon::Pictures);
         settings.show_hidden_files = true;
         settings.sort.by = SortBy::Modified;
         settings.sort.ascending = false;
@@ -267,6 +322,28 @@ mod tests {
         settings.save(&file).unwrap();
         let loaded = Settings::load(&file, None).unwrap();
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn folder_icon_choices_follow_parent_moves_and_copies() {
+        let mut settings = Settings::default();
+        settings
+            .folder_icons
+            .insert(PathBuf::from("/old/Photos"), FolderIcon::Pictures);
+        settings.remap_folder_icons(Path::new("/old"), Path::new("/new"), false);
+        assert!(!settings.folder_icons.contains_key(Path::new("/old/Photos")));
+        assert_eq!(
+            settings.folder_icons.get(Path::new("/new/Photos")),
+            Some(&FolderIcon::Pictures)
+        );
+        settings.remap_folder_icons(Path::new("/new"), Path::new("/copy"), true);
+        assert!(settings.folder_icons.contains_key(Path::new("/new/Photos")));
+        settings.clear_folder_icons_under(Path::new("/copy"));
+        assert!(
+            !settings
+                .folder_icons
+                .contains_key(Path::new("/copy/Photos"))
+        );
     }
 
     #[test]
@@ -317,6 +394,7 @@ mod tests {
         assert!(settings.show_hidden_files);
         assert_eq!(settings.sort, SortSettings::default());
         assert!(settings.keyboard_shortcuts.is_empty());
+        assert!(settings.folder_icons.is_empty());
     }
 
     #[test]

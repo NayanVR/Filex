@@ -3,7 +3,53 @@
 
 use super::*;
 
+fn apply_folder_icon_op(settings: &mut filex::settings::Settings, op: &ops::AppliedOp, undo: bool) {
+    match op {
+        ops::AppliedOp::Moved { from, to } | ops::AppliedOp::Renamed { from, to } => {
+            if undo {
+                settings.remap_folder_icons(to, from, false);
+            } else {
+                settings.remap_folder_icons(from, to, false);
+            }
+        }
+        ops::AppliedOp::Copied { from, to } => {
+            if undo {
+                settings.clear_folder_icons_under(to);
+            } else {
+                settings.remap_folder_icons(from, to, true);
+            }
+        }
+        ops::AppliedOp::Deleted { .. } => {}
+    }
+}
+
 impl Workspace {
+    /// Follow successful Filex moves/copies/renames, including undo. A
+    /// choice remains path-based when changes come from outside Filex.
+    pub(super) fn sync_folder_icons(
+        &mut self,
+        applied: &[ops::AppliedOp],
+        undo: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.read(cx).settings().folder_icons.is_empty() {
+            return;
+        }
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| {
+                if undo {
+                    for op in applied.iter().rev() {
+                        apply_folder_icon_op(settings, op, true);
+                    }
+                } else {
+                    for op in applied {
+                        apply_folder_icon_op(settings, op, false);
+                    }
+                }
+            });
+        });
+    }
+
     /// Validate search row identities at the action boundary. Browse rows use
     /// the normal operation checks; a stale search selection is never retargeted.
     pub(super) fn validate_search_paths(
@@ -420,6 +466,7 @@ impl Workspace {
                     this.notice = Some(
                         format!("{verb} {} {}", applied.len(), plural_items(applied.len())).into(),
                     );
+                    this.sync_folder_icons(&applied, false, cx);
                     this.journal.record(applied);
                 }
                 if let Some(error) = failure {
@@ -498,6 +545,7 @@ impl Workspace {
                         }
                         .into(),
                     );
+                    this.sync_folder_icons(&applied, false, cx);
                     this.journal.record(applied);
                 }
                 if let Some(error) = failure {
@@ -616,6 +664,7 @@ impl Workspace {
                 match result {
                     Ok(applied) => {
                         this.notice = Some(applied.describe().into());
+                        this.sync_folder_icons(std::slice::from_ref(&applied), false, cx);
                         this.journal.record(vec![applied]);
                     }
                     Err(err) if err.is::<ops::OpCanceled>() => {
@@ -692,6 +741,7 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(()) => {
+                        this.sync_folder_icons(&batch, true, cx);
                         let label = if batch.len() == 1 {
                             batch[0].describe()
                         } else {

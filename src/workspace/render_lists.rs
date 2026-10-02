@@ -4,7 +4,7 @@ use super::*;
 
 impl Workspace {
     /// The icon cell for a row: a decoded thumbnail for image files when
-    /// ready, otherwise the kind glyph. May schedule a decode as a side
+    /// ready, otherwise folder or document artwork. May schedule a decode as a side
     /// effect — only rows the virtualized list renders get here.
     pub(super) fn render_icon_cell(
         &mut self,
@@ -24,7 +24,18 @@ impl Workspace {
                 None => self.request_thumbnail(path.to_path_buf(), cx),
             }
         }
-        ui::icon::file_icon(cx.theme(), kind, edge)
+        if is_dir {
+            let icon = self
+                .settings
+                .read(cx)
+                .settings()
+                .folder_icons
+                .get(path)
+                .copied()
+                .unwrap_or_else(|| ui::icon::automatic_folder_icon(path));
+            return ui::icon::folder_icon(cx.theme(), icon, edge);
+        }
+        ui::icon::file_icon(cx.theme(), kind, name, edge)
     }
 
     /// The full-pane magic view (`docs/design-magic-mode.md` v2): the plan
@@ -407,7 +418,7 @@ impl Workspace {
         let card = ui::grid::card(theme, ("card", ix), size, width, is_selected)
             .tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
             .child(ui::grid::card_icon_area(size).child(icon))
-            .child(ui::grid::card_name(theme, width).child(name))
+            .child(ui::grid::card_name(theme, width, &name, cx))
             .child(ui::list_row::tabular(
                 div()
                     .flex_none()

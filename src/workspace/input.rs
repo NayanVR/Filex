@@ -97,7 +97,7 @@ impl Workspace {
             self.active_selection_mut().select_one(ix);
         }
         self.context_menu = Some(ContextMenu {
-            position: Self::clamped_menu_position(position, 280., window),
+            position: Self::clamped_menu_position(position, 320., window),
             target,
         });
         cx.notify();
@@ -125,10 +125,23 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = Some(ContextMenu {
-            position: Self::clamped_menu_position(position, 130., window),
+            position: Self::clamped_menu_position(position, 150., window),
             target: MenuTarget::Favorite { path },
         });
         cx.notify();
+    }
+
+    pub(super) fn open_folder_icon_menu(
+        &mut self,
+        path: PathBuf,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(menu) = self.context_menu.as_mut() {
+            menu.position = Self::clamped_menu_position(menu.position, 350., window);
+            menu.target = MenuTarget::FolderIcon { path };
+            cx.notify();
+        }
     }
 
     pub(super) fn close_menu(&mut self, cx: &mut Context<Self>) {

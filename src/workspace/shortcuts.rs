@@ -212,6 +212,16 @@ pub fn catalog() -> Vec<Shortcut> {
             true,
             TogglePreview
         ),
+        #[cfg(target_os = "macos")]
+        entry!(
+            "quick_look",
+            "Quick Look selected files",
+            "View",
+            "space",
+            &[],
+            false,
+            QuickLook
+        ),
         entry!(
             "settings",
             "Open settings",
@@ -318,6 +328,7 @@ pub fn validate(
     }
     if !key.modifiers.modified()
         && matches!(key.key.as_str(), "backspace" | "delete" | "tab" | "space")
+        && !(id == "quick_look" && key.key == "space")
     {
         return Err("This key is reserved for editing and navigation.".into());
     }
@@ -486,6 +497,7 @@ pub fn label(chord: &str) -> String {
         "backspace" => "⌫".into(),
         "tab" => "Tab".into(),
         "delete" => "Delete".into(),
+        "space" => "Space".into(),
         _ => key.key.to_uppercase(),
     });
     parts.join(" ")
@@ -503,6 +515,40 @@ pub fn hint(id: &str, overrides: &BTreeMap<String, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quick_look_space_is_only_bound_outside_text_editing_and_settings() {
+        let overrides = BTreeMap::new();
+        assert_eq!(
+            actions_for("space", &["Workspace"], &overrides),
+            vec!["filex::QuickLook"]
+        );
+        for contexts in [
+            vec!["Workspace", "SearchInput"],
+            vec!["Workspace", "PathInput", "SearchInput"],
+            vec!["Workspace", "Settings"],
+        ] {
+            assert!(actions_for("space", &contexts, &overrides).is_empty());
+        }
+        assert!(validate("quick_look", "space", &overrides).is_ok());
+        assert!(validate("search", "space", &overrides).is_err());
+        assert_eq!(label("space"), "Space");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quick_look_can_be_disabled_or_remapped_without_taking_text_keys() {
+        let mut overrides = BTreeMap::from([("quick_look".into(), String::new())]);
+        assert!(actions_for("space", &["Workspace"], &overrides).is_empty());
+        overrides.insert("quick_look".into(), "cmd-y".into());
+        assert!(validate("quick_look", "cmd-y", &overrides).is_ok());
+        assert!(actions_for("space", &["Workspace"], &overrides).is_empty());
+        assert_eq!(
+            actions_for("cmd-y", &["Workspace"], &overrides),
+            vec!["filex::QuickLook"]
+        );
+        assert!(actions_for("cmd-y", &["Workspace", "SearchInput"], &overrides).is_empty());
+    }
     fn actions_for(
         chord: &str,
         contexts: &[&str],

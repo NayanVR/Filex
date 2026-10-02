@@ -11,6 +11,8 @@
 //! Icons are single-color: gpui rasterizes the SVG to a coverage mask
 //! and fills it with the element's `text_color`, so the stroke geometry
 //! is what matters and every glyph is tinted from the active theme.
+//! The full-color document artwork in `file.svg` is rasterized separately
+//! by `ui::icon`; its registered mask is only a fallback silhouette.
 
 use std::borrow::Cow;
 
@@ -36,9 +38,6 @@ macro_rules! icon {
 const ICONS: &[(&str, &[u8])] = &[
     // File-type marks.
     icon!("folder"),
-    // Filex folder artwork: separate masks for the tab and front face.
-    icon!("folder-back"),
-    icon!("folder-front"),
     icon!("image"),
     icon!("film"),
     icon!("music"),
@@ -46,6 +45,9 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("file-code"),
     icon!("file-text"),
     icon!("file"),
+    icon!("code"),
+    icon!("text"),
+    icon!("video"),
     // UI glyphs.
     icon!("arrow-up"),
     icon!("download"),

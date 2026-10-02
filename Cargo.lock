@@ -1976,8 +1976,13 @@ dependencies = [
  "memmap2",
  "memory-stats",
  "notify",
+ "objc2",
+ "objc2-app-kit",
  "objc2-foundation",
+ "objc2-quick-look-ui",
  "plist",
+ "raw-window-handle",
+ "resvg",
  "semver",
  "sentry",
  "sentry-tracing",
@@ -4143,6 +4148,17 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-metal",
+]
+
+[[package]]
+name = "objc2-quick-look-ui"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef5bce23577f7bcbb88339d4f4fcba83bcc376ca6a7f556d1707e49e7986d329"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
 ]
 
 [[package]]

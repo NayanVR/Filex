@@ -479,6 +479,17 @@ impl Workspace {
                             .into_any_element(),
                     );
                 }
+                if count <= 1 && is_dir {
+                    let p = path.clone();
+                    items.push(
+                        ui::menu::item(&theme, "menu-folder-icon", "Folder Icon…", false)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.open_folder_icon_menu(p.clone(), window, cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
                 items.push(ui::menu::separator(&theme).into_any_element());
                 items.push(
                     ui::menu::item(&theme, "menu-trash", "Move to Trash", true)
@@ -532,6 +543,15 @@ impl Workspace {
                 items.push(ui::menu::separator(&theme).into_any_element());
                 let p = path.clone();
                 items.push(
+                    ui::menu::item(&theme, "fav-folder-icon", "Folder Icon…", false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_folder_icon_menu(p.clone(), window, cx);
+                        }))
+                        .into_any_element(),
+                );
+                let p = path.clone();
+                items.push(
                     ui::menu::item(&theme, "fav-unpin", "Unpin from Sidebar", true)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
@@ -539,6 +559,52 @@ impl Workspace {
                         }))
                         .into_any_element(),
                 );
+            }
+            MenuTarget::FolderIcon { path } => {
+                items.push(ui::menu::heading(&theme, "Folder Icon").into_any_element());
+                let current = self
+                    .settings
+                    .read(cx)
+                    .settings()
+                    .folder_icons
+                    .get(path)
+                    .copied();
+                let choices = [
+                    (None, "Automatic"),
+                    (Some(FolderIcon::Plain), "Plain"),
+                    (Some(FolderIcon::Pictures), "Pictures"),
+                    (Some(FolderIcon::Music), "Music"),
+                    (Some(FolderIcon::Videos), "Videos"),
+                    (Some(FolderIcon::Documents), "Documents"),
+                    (Some(FolderIcon::Downloads), "Downloads"),
+                    (Some(FolderIcon::Code), "Code"),
+                    (Some(FolderIcon::Archives), "Archives"),
+                    (Some(FolderIcon::Desktop), "Desktop"),
+                ];
+                for (ix, (choice, label)) in choices.into_iter().enumerate() {
+                    let p = path.clone();
+                    let label = if current == choice {
+                        format!("✓ {label}")
+                    } else {
+                        format!("   {label}")
+                    };
+                    items.push(
+                        ui::menu::item(&theme, ("folder-icon-choice", ix), label, false)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                this.close_menu(cx);
+                                this.settings.update(cx, |store, cx| {
+                                    store.update(cx, |settings| {
+                                        if let Some(icon) = choice {
+                                            settings.folder_icons.insert(p.clone(), icon);
+                                        } else {
+                                            settings.folder_icons.remove(&p);
+                                        }
+                                    });
+                                });
+                            }))
+                            .into_any_element(),
+                    );
+                }
             }
         }
         Some(

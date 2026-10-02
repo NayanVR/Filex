@@ -1,0 +1,80 @@
+name: Windows Thumbnail Benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thumbnail-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-thumbnail-benchmark
+
+      - name: Record benchmark scope and environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force benchmark-results | Out-Null
+          @"
+          # Windows thumbnail benchmark
+
+          Compares Filex's previous image decoder with its bounded decoder.
+          Uses a generated 1600 x 1200 JPEG and 128-pixel thumbnails.
+          Also measures cache admission and lookup overhead.
+
+          This does not yet benchmark the Windows Shell thumbnail API.
+          Measurements use warm local I/O and a shared hosted runner.
+          Compare variants within this run, not absolute timings across runners.
+
+          Commit: $env:GITHUB_SHA
+          Runner image: $env:ImageOS / $env:ImageVersion
+          "@ | Set-Content benchmark-results/scope.md
+          Get-Content benchmark-results/scope.md | Add-Content $env:GITHUB_STEP_SUMMARY
+          & {
+            Get-CimInstance Win32_OperatingSystem |
+              Select-Object Caption, Version, BuildNumber, TotalVisibleMemorySize |
+              Format-List
+            Get-CimInstance Win32_Processor |
+              Select-Object Name, NumberOfCores, NumberOfLogicalProcessors |
+              Format-List
+            rustc --version --verbose
+            cargo --version
+          } | Out-File benchmark-results/environment.txt
+
+      - name: Check thumbnail regression tests
+        run: cargo test --locked --bin filex thumbnails::tests
+
+      - name: Run release benchmark
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          cargo bench --locked --bench thumbnail_bench -- --noplot 2>&1 |
+            Tee-Object -FilePath benchmark-results/benchmark.log
+          $benchmarkExitCode = $LASTEXITCODE
+          if ($benchmarkExitCode -ne 0) { exit $benchmarkExitCode }
+          "Results are available in the windows-thumbnail-benchmark artifact." |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-thumbnail-benchmark
+          path: |
+            benchmark-results/
+            target/criterion/
+          retention-days: 14
+          if-no-files-found: warn

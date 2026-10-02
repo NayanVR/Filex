@@ -19,7 +19,7 @@ use filex::ops::{self, FileOp};
 use filex::recents::Recents;
 use filex::search_filter::Filter;
 use filex::selection::Selection;
-use filex::settings::{AccentColor, Density, SortBy, ThemeMode, ViewMode};
+use filex::settings::{AccentColor, Density, FolderIcon, SortBy, ThemeMode, ViewMode};
 use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
 
 use crate::settings_store::{SettingsEvent, SettingsStore};
@@ -39,6 +39,7 @@ actions!(
         Refresh,
         ToggleSettings,
         TogglePreview,
+        QuickLook,
         NewTab,
         CloseTab,
         NextTab,
@@ -406,6 +407,8 @@ enum MenuTarget {
     Root { path: PathBuf },
     /// A pinned folder in the sidebar's Favorites section.
     Favorite { path: PathBuf },
+    /// Icon choices for one folder, opened from its context menu.
+    FolderIcon { path: PathBuf },
 }
 
 struct ContextMenu {
@@ -730,9 +733,11 @@ struct Workspace {
     browse_scrollbar: ui::scrollbar::ScrollbarState,
     results_scrollbar: ui::scrollbar::ScrollbarState,
     magic_scrollbar: ui::scrollbar::ScrollbarState,
-    thumbnails: std::collections::HashMap<PathBuf, ThumbnailState>,
+    thumbnails: thumbnails::Cache,
     /// Lazily-fetched metadata for the details panel's current item.
     preview_meta: Option<PreviewMeta>,
+    /// Lazily attached native full-file viewer (separate from details/thumbnails).
+    quick_look: Option<crate::quick_look::Viewer>,
     /// The lead item's tags, cached so rendering never reads the store
     /// (which on macOS is an xattr syscall). Refreshed off-thread when the
     /// selection changes or an edit lands.
@@ -781,6 +786,7 @@ mod input;
 mod location;
 mod navigation;
 mod preferences;
+mod quick_look;
 mod render;
 mod render_lists;
 mod render_menus;
@@ -947,8 +953,9 @@ impl Workspace {
             browse_scrollbar: ui::scrollbar::ScrollbarState::new(),
             results_scrollbar: ui::scrollbar::ScrollbarState::new(),
             magic_scrollbar: ui::scrollbar::ScrollbarState::new(),
-            thumbnails: std::collections::HashMap::new(),
+            thumbnails: thumbnails::Cache::default(),
             preview_meta: None,
+            quick_look: None,
             preview_tags: Vec::new(),
             tag_editor: None,
             sidebar_tags: Vec::new(),

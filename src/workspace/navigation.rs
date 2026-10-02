@@ -26,6 +26,7 @@ impl Workspace {
         mut entries: Vec<Entry>,
         cx: &mut Context<Self>,
     ) {
+        self.close_quick_look();
         let show_hidden = self.settings.read(cx).settings().show_hidden_files;
         if !show_hidden {
             entries.retain(|entry| !entry.is_hidden);
@@ -60,14 +61,9 @@ impl Workspace {
     /// cached or in flight). Called from the list processor, so only
     /// rows that actually render ever spawn work.
     pub(super) fn request_thumbnail(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.thumbnails.contains_key(&path) {
+        if !self.thumbnails.start(&path) {
             return;
         }
-        if self.thumbnails.len() >= thumbnails::CACHE_CAP {
-            self.thumbnails.clear(); // visible rows repopulate immediately
-        }
-        self.thumbnails
-            .insert(path.clone(), ThumbnailState::Loading);
         cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_executor()
@@ -77,11 +73,7 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                let state = match decoded {
-                    Ok(imagery) => ThumbnailState::Ready(imagery),
-                    Err(_) => ThumbnailState::Failed,
-                };
-                this.thumbnails.insert(path, state);
+                this.thumbnails.finish(&path, decoded);
                 cx.notify();
             })
             .ok();
@@ -352,6 +344,7 @@ impl Workspace {
     /// off-thread when the selection moved (or clearing it when the panel
     /// is closed / nothing is selected). Called after selection changes.
     pub(super) fn refresh_preview(&mut self, cx: &mut Context<Self>) {
+        self.sync_quick_look();
         if !self.settings.read(cx).settings().preview_open {
             self.preview_meta = None;
             self.clear_tag_state();

@@ -840,6 +840,9 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleView, _window, cx| this.toggle_view(cx)))
+            .on_action(cx.listener(|this, _: &QuickLook, window, cx| {
+                this.toggle_quick_look(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &GoUp, _window, cx| this.go_up(cx)))
             .on_action(cx.listener(|this, _: &GoBack, _window, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _window, cx| this.go_forward(cx)))
@@ -892,7 +895,9 @@ impl Render for Workspace {
             // list so single-key shortcuts work again.
             .on_action(
                 cx.listener(|this, _: &search_input::ClearInput, window, cx| {
-                    if this.context_menu.is_some() {
+                    if this.quick_look.as_ref().is_some_and(|viewer| viewer.is_visible()) {
+                        this.close_quick_look();
+                    } else if this.context_menu.is_some() {
                         this.close_menu(cx);
                     } else if this.scope_menu.is_some() {
                         this.close_scope_menu(cx);

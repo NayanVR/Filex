@@ -11,7 +11,7 @@ index-v2-lab = []
 # The GPUI application. The index library builds without it, so indexing
 # logic can be cross-checked/tested for other platforms without pulling in
 # UI toolchains (cargo check --no-default-features --target ...).
-app = ["dep:gpui", "dep:futures", "dep:image", "dep:ureq", "updater"]
+app = ["dep:gpui", "dep:futures", "dep:image", "dep:resvg", "dep:ureq", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-quick-look-ui", "dep:raw-window-handle", "updater"]
 # Update downloader for the UI. The per-user daemon release is built
 # without default features and has no update or telemetry transport.
 updater = ["dep:ureq"]
@@ -31,6 +31,10 @@ observability = ["dep:sentry", "dep:sentry-tracing", "dep:memory-stats"]
 [[bin]]
 name = "filex"
 path = "src/main.rs"
+required-features = ["app"]
+
+[[example]]
+name = "quick_look_smoke"
 required-features = ["app"]
 
 [dependencies]
@@ -55,6 +59,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = { version = "0.3.32", optional = true }
 gpui = { version = "0.2", optional = true }
 image = { version = "0.25", optional = true }
+resvg = { version = "0.45.1", default-features = false, optional = true }
 # Crash-report upload (UI process only; the daemon has no external network transport).
 ureq = { version = "2.10", optional = true }
 # Observability (UI process only, `observability` feature). Lean transport:
@@ -102,6 +107,11 @@ name = "tag_bench"
 harness = false
 
 [[bench]]
+name = "thumbnail_bench"
+harness = false
+required-features = ["app"]
+
+[[bench]]
 name = "filter_bench"
 harness = false
 
@@ -123,6 +133,11 @@ criterion = "0.8.2"
 tempfile = "3.27.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Native Quick Look viewer; never linked into the index daemon.
+objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSView", "NSWindow", "NSPanel"] }
+objc2-quick-look-ui = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2-app-kit", "QLPreviewPanel", "QLPreviewItem"] }
+raw-window-handle = { version = "0.6", optional = true }
 # Delete-to-trash: NSFileManager reports where the item landed, which
 # the `trash` crate discards — that handle is what makes undo possible.
 objc2-foundation = { version = "0.3.2", features = [

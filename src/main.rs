@@ -4,6 +4,7 @@
 // `RUST_LOG` output and panics stay visible during development.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod quick_look;
 mod settings_store;
 mod thumbnails;
 mod ui;

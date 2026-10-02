@@ -1,4 +1,5 @@
-# Windows and Linux tests and app builds. macOS is exercised locally.
+# Portable tests plus app builds/tests on Windows, Linux, and macOS.
+# The native Quick Look event-loop smoke still requires a local GUI session.
 # Library tests run the portable notify adapters and v2 recovery/IPC path.
 name: CI
 
@@ -39,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +54,11 @@ jobs:
             libx11-xcb-dev libwayland-dev libvulkan-dev
       - name: Build the GPUI application
         run: cargo build --locked
+      - name: Run application regression tests
+        run: cargo test --locked --bin filex
+      - name: Compile native preview lifecycle check
+        if: matrix.os == 'macos-latest'
+        run: cargo check --locked --example quick_look_smoke
 
   # Build the Windows MSI (app + per-user daemon) and smoke-test that it
   # installs the UI and per-user daemon, and uninstalls cleanly.
