@@ -84,18 +84,7 @@ asynchronous navigation change.
 
 ## Run the Windows benchmark on GitHub
 
-After `.github/workflows/thumbnail-benchmark.yml` is on the default branch,
-open **Actions → Windows Thumbnail Benchmark → Run workflow**, select the
-branch, and run it. The workflow is manual so pushes do not spend benchmark
-minutes. Its first build may take longer; subsequent runs reuse Rust caches.
-
-Download **windows-thumbnail-benchmark** from the completed run's artifacts.
-It contains the environment, benchmark log, scope description, and Criterion
-result files. The workflow runs on Windows Server 2022 and needs no GUI or RDP.
-Failures also upload available diagnostics. Results expire after 14 days.
-
-This currently compares the old and bounded Filex decoders, plus cache
-admission/lookup. It does **not** compare against Windows Shell thumbnails:
-that native benchmark adapter still needs to be implemented. The fixture is
-a generated JPEG and I/O is warm; do not interpret these numbers as full
-directory-load, mixed-format, or cold-cache results.
+The expanded [Windows preview benchmark](windows-preview-benchmark.md) measures
+Filex versus Windows Shell thumbnails, memory, a live GPUI scrolling workload,
+and native full-preview handlers in one manual Actions run. That document
+explains the artifacts, failure reporting and limits of a hosted server.
