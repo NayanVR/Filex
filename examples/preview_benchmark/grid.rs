@@ -9,6 +9,8 @@ use std::{path::PathBuf, time::Instant};
 
 struct Grid {
     backend: String,
+    #[cfg(windows)]
+    shell_workers: Option<super::native::ThumbnailWorkers>,
     paths: Vec<PathBuf>,
     output: PathBuf,
     scroll: UniformListScrollHandle,
@@ -36,7 +38,27 @@ impl Grid {
                 self.peak_jobs = self.peak_jobs.max(self.jobs);
                 let backend = self.backend.clone();
                 let start = Instant::now();
+                #[cfg(windows)]
+                let shell_result = self
+                    .shell_workers
+                    .as_ref()
+                    .map(|pool| pool.request(path.clone()));
                 let task = cx.background_executor().spawn(async move {
+                    #[cfg(windows)]
+                    if let Some(result) = shell_result {
+                        let result = result
+                            .await
+                            .map_err(|_| {
+                                anyhow::anyhow!("Shell thumbnail worker dropped its response")
+                            })
+                            .and_then(|result| result)
+                            .map(|pixels| {
+                                std::sync::Arc::new(RenderImage::new(vec![image::Frame::new(
+                                    pixels,
+                                )]))
+                            });
+                        return (path, result);
+                    }
                     let result = decode(&backend, &path, false);
                     (path, result)
                 });
@@ -185,6 +207,14 @@ pub fn run(backend: String, dir: PathBuf, output: PathBuf) -> Result<()> {
     paths.sort();
     anyhow::ensure!(!paths.is_empty(), "empty scroll corpus");
     let initial_memory = memory();
+    #[cfg(windows)]
+    let shell_workers = if backend == "shell" {
+        Some(super::native::ThumbnailWorkers::new(
+            thumbnails::MAX_IN_FLIGHT,
+        )?)
+    } else {
+        None
+    };
     Application::new()
         .with_assets(ui::assets::Assets)
         .run(move |cx| {
@@ -205,6 +235,8 @@ pub fn run(backend: String, dir: PathBuf, output: PathBuf) -> Result<()> {
 
                     cx.new(|_| Grid {
                         backend,
+                        #[cfg(windows)]
+                        shell_workers,
                         paths,
                         output,
                         scroll: UniformListScrollHandle::new(),

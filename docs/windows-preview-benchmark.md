@@ -74,3 +74,18 @@ are not forcibly killed. No documents from the user's machine are read.
 API contracts: [Shell thumbnail flags](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishellitemimagefactory-getimage),
 [preview hosting](https://learn.microsoft.com/en-us/windows/win32/shell/preview-handlers),
 [association discovery](https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-assocquerystringa).
+
+## COM threading regression
+
+The Shell scrolling adapter dispatches onto two dedicated STA threads with a
+bounded queue and message pumping. GPUI background tasks await pixel buffers;
+COM interfaces and bitmap handles remain on the creating STA thread. The
+standalone decoder initializes its own STA before timing as before.
+
+The earlier run's `0x80010106` (`RPC_E_CHANGED_MODE`) was a harness bug:
+`OleInitialize` attempted to change GPUI's existing MTA worker apartment to STA.
+Its three Shell scrolling results had zero successful loads and are invalid for
+comparison. A Windows regression test now recreates an MTA caller, checks the
+original failure, then verifies concurrent Shell decodes and recovery after a
+missing file through the dedicated workers. Failure summaries include the error
+and affected case, not only an overall coverage failure.

@@ -26,6 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-thumbnail-benchmark
+          cache-on-failure: true
 
       - name: Record machine, desktop and installed preview providers
         shell: pwsh

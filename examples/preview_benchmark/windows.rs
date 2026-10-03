@@ -158,6 +158,9 @@ pub fn init_thumbnail_thread() -> Result<()> {
 }
 pub fn thumbnail(path: &Path, cache_only: bool) -> Result<image::RgbaImage> {
     init_thumbnail_thread()?;
+    thumbnail_in_apartment(path, cache_only)
+}
+fn thumbnail_in_apartment(path: &Path, cache_only: bool) -> Result<image::RgbaImage> {
     unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None)?;
@@ -170,6 +173,149 @@ pub fn thumbnail(path: &Path, cache_only: bool) -> Result<image::RgbaImage> {
         pixels(bitmap.0)
     }
 }
+/// A bounded pool of dedicated STA threads. GPUI's Windows background executor
+/// uses threads whose COM apartment is already MTA; OleInitialize cannot change
+/// that apartment. Only owned paths and pixel buffers cross this boundary.
+pub struct ThumbnailWorkers {
+    sender: std::sync::mpsc::SyncSender<ThumbnailJob>,
+}
+struct ThumbnailJob {
+    path: std::path::PathBuf,
+    result: futures::channel::oneshot::Sender<Result<image::RgbaImage>>,
+}
+impl ThumbnailWorkers {
+    pub fn new(count: usize) -> Result<Self> {
+        anyhow::ensure!(count > 0, "thumbnail worker count must be positive");
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<ThumbnailJob>(count);
+        let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+        for index in 0..count {
+            let receiver = receiver.clone();
+            let (ready, initialized) = std::sync::mpsc::sync_channel(1);
+            std::thread::Builder::new()
+                .name(format!("shell-thumbnail-sta-{index}"))
+                .spawn(move || {
+                    // Explicitly owned on this OS thread, including final release.
+                    let apartment = Com::new();
+                    let _ =
+                        ready.send(apartment.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+                    let Ok(_apartment) = apartment else {
+                        return;
+                    };
+                    loop {
+                        pump_pending_messages();
+                        // No COM call or decode occurs while the receiver is locked.
+                        let job = match receiver.lock() {
+                            Ok(receiver) => receiver.recv_timeout(Duration::from_millis(10)),
+                            Err(_) => return,
+                        };
+                        match job {
+                            Ok(job) => {
+                                let _ = job.result.send(thumbnail_in_apartment(&job.path, false));
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                })?;
+            initialized
+                .recv()
+                .context("Shell thumbnail thread stopped during initialization")?
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(Self { sender })
+    }
+
+    pub fn request(
+        &self,
+        path: std::path::PathBuf,
+    ) -> futures::channel::oneshot::Receiver<Result<image::RgbaImage>> {
+        let (result, receiver) = futures::channel::oneshot::channel();
+        let job = ThumbnailJob { path, result };
+        if let Err(error) = self.sender.try_send(job) {
+            let (job, reason) = match error {
+                std::sync::mpsc::TrySendError::Full(job) => (job, "Shell thumbnail queue is full"),
+                std::sync::mpsc::TrySendError::Disconnected(job) => {
+                    (job, "Shell thumbnail workers stopped")
+                }
+            };
+            let _ = job.result.send(Err(anyhow::anyhow!(reason)));
+        }
+        receiver
+    }
+}
+
+fn pump_pending_messages() {
+    unsafe {
+        let mut msg = MSG::default();
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+#[cfg(test)]
+mod thumbnail_thread_tests {
+    use super::*;
+
+    #[test]
+    fn shell_workers_decode_from_an_existing_mta_and_survive_a_bad_file() {
+        // Match GPUI's Windows pool rather than the CLI worker's fresh STA.
+        std::thread::spawn(|| {
+            unsafe {
+                CoInitializeEx(None, COINIT_MULTITHREADED).ok().unwrap();
+            }
+            struct Mta;
+            impl Drop for Mta {
+                fn drop(&mut self) {
+                    unsafe {
+                        CoUninitialize();
+                    }
+                }
+            }
+            let _mta = Mta;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fixture.png");
+            image::RgbImage::from_pixel(256, 128, image::Rgb([40, 100, 220]))
+                .save(&path)
+                .unwrap();
+            let error = thumbnail(&path, false).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<windows::core::Error>().unwrap().code(),
+                RPC_E_CHANGED_MODE
+            );
+            let workers = ThumbnailWorkers::new(2).unwrap();
+            let a = workers.request(path.clone());
+            let b = workers.request(path.clone());
+            let (a, b) = futures::executor::block_on(async { futures::join!(a, b) });
+            for result in [a, b] {
+                let image = result.unwrap().unwrap();
+                assert_eq!(image.dimensions(), (128, 64));
+                assert_eq!(&image.get_pixel(64, 32).0[..3], &[220, 100, 40]); // BGRA
+            }
+            assert!(
+                futures::executor::block_on(workers.request(dir.path().join("missing.png")))
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(
+                futures::executor::block_on(workers.request(path))
+                    .unwrap()
+                    .is_ok()
+            );
+            // Calling the pool must not alter or uninitialize the caller's MTA.
+            let mut apartment = APTTYPE::default();
+            let mut qualifier = APTTYPEQUALIFIER::default();
+            unsafe {
+                CoGetApartmentType(&mut apartment, &mut qualifier).unwrap();
+            }
+            assert_eq!(apartment, APTTYPE_MTA);
+        })
+        .join()
+        .unwrap();
+    }
+}
+
 #[implement(IPreviewHandlerFrame)]
 struct Frame;
 impl IPreviewHandlerFrame_Impl for Frame_Impl {

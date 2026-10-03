@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from preview_benchmark import case, percentile, stats, summarize, report, memory_summary
+from preview_benchmark import case, percentile, stats, summarize, report, memory_summary, failure_details, failure_reason, required_case
 
 class BenchmarkTests(unittest.TestCase):
     def test_percentiles_do_not_hide_slow_tail_or_invent_empty_timings(self):
@@ -44,6 +44,17 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result['cpu_ms'],15)
         self.assertIsNone(result['gdi_handle_delta'])
         self.assertIsNone(result['max_handler_working_set_bytes'])
+
+    def test_com_apartment_failure_is_reported_as_an_invalid_required_case(self):
+        error='Cannot change thread mode after it is set. (0x80010106)'
+        details=failure_details({'loads':[{'ok':False,'error':error} for _ in range(820)]})
+        self.assertEqual(details,[{'error':error,'count':820}])
+        record={'kind':'scroll','status':'partial','result':'scroll-shell-1.json','failure_details':details}
+        self.assertTrue(required_case(record))
+        message=failure_reason(record)
+        self.assertIn('scroll-shell-1.json',message)
+        self.assertIn('820',message)
+        self.assertIn('0x80010106',message)
 
     def test_empty_report_still_states_missing_scope(self):
         with tempfile.TemporaryDirectory() as directory:

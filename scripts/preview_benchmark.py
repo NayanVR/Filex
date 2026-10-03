@@ -4,6 +4,7 @@ Each native operation has an external deadline. Preserve raw failures and partia
 checkpoints, publish the report even when the runner cannot render a window.
 """
 import argparse
+from collections import Counter
 import ctypes
 import html
 import hashlib
@@ -172,6 +173,24 @@ def summarize(result, kind):
             "unload_ms": stats([v['unload_and_release_ms'] for v in result.get('cycles', [])])}
 
 
+def failure_details(result):
+    """Aggregate repeated failures without hiding the native error code."""
+    errors=Counter(v.get('error', 'unknown load failure') for v in result.get('loads', []) if not v.get('ok'))
+    if result.get('error'):
+        errors[result['error']]+=1
+    return [{'error':message, 'count':count} for message,count in errors.most_common()]
+
+
+def required_case(record):
+    return record['kind']=='scroll' or (record['kind']=='decode' and record.get('fixture')=='landscape.jpg' and record.get('mode')!='cache')
+
+
+def failure_reason(record):
+    errors=record.get('failure_details',[])
+    detail='; '.join(f"{v['count']} × {v['error']}" for v in errors[:3])
+    return f"{record['result']}: {record['status']}" + (f" — {detail}" if detail else '')
+
+
 def memory_summary(result):
     before=result.get('memory_before', {})
     after=result.get('memory_after_cleanup', result.get('memory_after', {}))
@@ -208,6 +227,9 @@ def report(output, records, fixtures):
              '**Filex has no Windows full-file viewer; its existing thumbnail/details pane is exercised in the UI test.**', '',
              '## Thumbnails', '', '| Fixture | Backend | Mode | Status | Successes | p50 ms | p95 ms | Worker peak WS MiB |',
              '|---|---|---|---|---:|---:|---:|---:|']
+    failed=[r for r in records if (required_case(r) and r['status']!='ok') or r['status'] in ['timeout','process_failed','missing_result','handler_error']]
+    if failed:
+        lines[2:2]=['## Cases needing attention', '', *['- '+failure_reason(r) for r in failed], '', 'Scrolling cases without successful thumbnail loads are invalid for a thumbnail performance comparison.', '']
     for record in records:
         if record['kind'] != 'decode': continue
         s=record['summary']['latency_ms']; peak=record.get('peak_ws')
@@ -260,7 +282,7 @@ def main():
         print(key, flush=True)
         result=case(executable, arguments, output/f'{key}.json', timeout)
         record={'kind':kind,'result':f'{key}.json','status':result['status'],**metadata,
-                'summary':summarize(result,kind),'gpu':result.get('gpu'),'memory':memory_summary(result),'peak_ws':result['process_memory']['peak_working_set_bytes']}
+                'failure_details':failure_details(result),'summary':summarize(result,kind),'gpu':result.get('gpu'),'memory':memory_summary(result),'peak_ws':result['process_memory']['peak_working_set_bytes']}
         records.append(record)
         report(output,records,fixtures)  # incremental report survives later runner cancellation
     for path,backend,mode in decode_cases:
@@ -276,9 +298,9 @@ def main():
     for path in paths:
         execute('preview',f'preview-{path.name}', ['preview',path], {'fixture':path.name},45)
     failures=[r for r in records if r['status'] in ['timeout','process_failed','missing_result','running'] or (r['status']=='handler_error' and r.get('fixture') not in ['corrupt.png','size-limit.png','dimension-limit.png'])]
-    required=[r for r in records if r['kind']=='scroll' or (r['kind']=='decode' and r['fixture']=='landscape.jpg' and r['mode']!='cache')]
+    required=[r for r in records if required_case(r)]
     missing=[r for r in required if r['status']!='ok']
-    write(output/'coverage.json',{'completed_cases':len(records),'process_failures':len(failures),'required_case_failures':len(missing),
+    write(output/'coverage.json',{'completed_cases':len(records),'process_failures':len(failures),'required_case_failures':len(missing),'required_failure_details':[failure_reason(r) for r in missing],
         'filex_windows_full_preview':'not implemented','video_fixture':fixtures['video'],
         'full_application_scrolling':'not measured; production grid/details component workload measured',
         'native_preview_first_paint':'not measured; API completion and child window creation measured',
@@ -287,6 +309,8 @@ def main():
     if not any(r['kind']=='preview' and r['status']=='ok' for r in records):
         print('::warning::No installed preview handler completed every lifecycle check; inspect provider inventory and per-format results.')
     if failures or missing or fixtures['video']!='ok':
+        for record in {r['result']: r for r in failures+missing}.values():
+            print(failure_reason(record),flush=True)
         print('::error::Benchmark coverage is incomplete or a worker failed; download the report and logs.', flush=True)
         return 1
     return 0
