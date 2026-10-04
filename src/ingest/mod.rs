@@ -236,8 +236,6 @@ pub fn excluded_system(root: &Path, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// A walk whose directory permissions were revoked must degrade rather than
     /// fail: skip and count that directory, keep every readable sibling, and
     /// pick the contents up once the grant returns. Only the `chmod` setup is
@@ -246,6 +244,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn walk_skips_an_unreadable_directory_until_the_grant_returns() {
+        use super::{Root, walk};
         use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
 
         let tree = tempfile::tempdir().unwrap();
