@@ -33,6 +33,7 @@ const OVERLAY_RECORD_LIMIT: usize = 25_000;
 const OVERLAY_BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
 const BUILD_RETRY_DELAY: Duration = Duration::from_secs(30);
+const BUILD_RETRY_LIMIT: Duration = Duration::from_secs(15 * 60);
 const WRITER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub enum Command {
@@ -125,6 +126,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
             let mut deferred = VecDeque::new();
             let mut last_build = std::time::Instant::now();
             let mut retry_after = last_build;
+            let mut retry_delay = BUILD_RETRY_DELAY;
             let mut retired = VecDeque::<(PathBuf, std::sync::Weak<Segment>, u64)>::new();
             let mut current_segment = selected_path;
             loop {
@@ -298,6 +300,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                 })();
                                 match publication {
                                     Ok(()) => {
+                                        retry_delay = BUILD_RETRY_DELAY;
                                         let old = owner.view.read().unwrap().base.clone();
                                         if let Some((path, epoch)) =
                                             current_segment.replace((final_path, manifest_epoch))
@@ -387,21 +390,33 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                         }
                                     }
                                     Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            retry_in_secs = retry_delay.as_secs(),
+                                            "index publication failed"
+                                        );
                                         owner.status.write().unwrap().error =
                                             Some(format!("index publication failed: {e}"));
                                         let scratch = built.path.clone();
                                         drop(built);
                                         let _ = std::fs::remove_file(scratch);
                                         reconcile = true;
-                                        retry_after = std::time::Instant::now() + BUILD_RETRY_DELAY;
+                                        retry_after = std::time::Instant::now() + retry_delay;
+                                        retry_delay = next_retry_delay(retry_delay);
                                     }
                                 }
                             }
                             Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    retry_in_secs = retry_delay.as_secs(),
+                                    "index build incomplete"
+                                );
                                 owner.status.write().unwrap().error =
                                     Some(format!("index build incomplete: {e}"));
                                 reconcile = true;
-                                retry_after = std::time::Instant::now() + BUILD_RETRY_DELAY;
+                                retry_after = std::time::Instant::now() + retry_delay;
+                                retry_delay = next_retry_delay(retry_delay);
                             }
                         }
                     }
@@ -447,6 +462,14 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
         thread: Some(thread),
     })
 }
+/// Successive segment-build failures double the wait, capped at
+/// `BUILD_RETRY_LIMIT`. A persistent failure (a worker whose segment this
+/// build cannot open, a full disk) otherwise re-walks every root on a fixed
+/// 30s cycle forever, which costs a saturated core and publishes nothing.
+fn next_retry_delay(previous: Duration) -> Duration {
+    previous.saturating_mul(2).min(BUILD_RETRY_LIMIT)
+}
+
 fn publish(owner: &Shared, frozen: &[Arc<Overlay>], active: &Overlay, roots: &[Root], epoch: u64) {
     let base = owner.view.read().unwrap().base.clone();
     let mut layers = frozen.to_vec();
@@ -486,5 +509,32 @@ impl Drop for Handle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_doubles_then_holds_at_the_cap() {
+        let mut delay = BUILD_RETRY_DELAY;
+        let mut seen = vec![delay];
+        for _ in 0..16 {
+            delay = next_retry_delay(delay);
+            seen.push(delay);
+        }
+        assert_eq!(
+            seen[..5],
+            [
+                Duration::from_secs(30),
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                Duration::from_secs(240),
+                Duration::from_secs(480),
+            ]
+        );
+        assert!(seen.iter().all(|delay| *delay <= BUILD_RETRY_LIMIT));
+        assert_eq!(seen.last(), Some(&BUILD_RETRY_LIMIT));
     }
 }

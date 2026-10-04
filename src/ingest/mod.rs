@@ -233,3 +233,80 @@ pub fn excluded_system(root: &Path, path: &Path) -> bool {
                 .any(|s| part.as_os_str().to_string_lossy().eq_ignore_ascii_case(s))
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A walk whose directory permissions were revoked must degrade rather than
+    /// fail: skip and count that directory, keep every readable sibling, and
+    /// pick the contents up once the grant returns. Only the `chmod` setup is
+    /// Unix-specific — Windows denies reads through ACLs and needs its own
+    /// setup before these same assertions can run there.
+    #[cfg(unix)]
+    #[test]
+    fn walk_skips_an_unreadable_directory_until_the_grant_returns() {
+        use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
+
+        let tree = tempfile::tempdir().unwrap();
+        fs::create_dir(tree.path().join("open")).unwrap();
+        fs::write(tree.path().join("open/readable.txt"), b"a").unwrap();
+        let locked = tree.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("hidden.txt"), b"b").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root bypasses the mode bits outright, so there is nothing to observe.
+        if fs::read_dir(&locked).is_ok() {
+            return;
+        }
+
+        let root = Root {
+            id: 1,
+            path: tree.path().to_path_buf(),
+            device: 0,
+        };
+        let excluded = tree.path().join("not-the-database");
+        let collect = || {
+            let mut next = 1u64;
+            let mut seen = Vec::new();
+            let skipped = walk(
+                &root,
+                &excluded,
+                |_, _| {
+                    next += 1;
+                    next
+                },
+                |record| {
+                    seen.push(String::from_utf8_lossy(&record.name).into_owned());
+                    Ok(())
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            (seen, skipped)
+        };
+
+        let (seen, skipped) = collect();
+        assert_eq!(skipped, 1, "the unreadable directory is counted, not fatal");
+        assert!(
+            seen.iter().any(|name| name == "readable.txt"),
+            "readable siblings are still indexed: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|name| name == "locked"),
+            "the directory entry itself stays visible: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|name| name == "hidden.txt"),
+            "contents behind the denied grant stay out: {seen:?}"
+        );
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let (seen, skipped) = collect();
+        assert_eq!(skipped, 0, "nothing is skipped once the grant is restored");
+        assert!(
+            seen.iter().any(|name| name == "hidden.txt"),
+            "restored contents are picked up by the next walk: {seen:?}"
+        );
+    }
+}

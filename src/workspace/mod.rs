@@ -1075,6 +1075,7 @@ pub fn run() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(860.), px(520.))),
                     titlebar: Some(titlebar),
+                    app_id: Some("dev.filex.app".into()),
                     ..Default::default()
                 },
                 |window, cx| {

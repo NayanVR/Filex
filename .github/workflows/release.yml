@@ -118,7 +118,12 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           ASSET="filex-${VERSION}-linux-x86_64.tar.gz"
-          tar -C target/release -czf "$ASSET" filex filex-indexd
+          STAGING="$(mktemp -d)"
+          trap 'rm -rf "$STAGING"' EXIT
+          cp target/release/filex target/release/filex-indexd "$STAGING/"
+          cp packaging/linux/dev.filex.app.desktop "$STAGING/dev.filex.app.desktop"
+          cp assets/branding/filex.png "$STAGING/filex.png"
+          tar -C "$STAGING" -czf "$ASSET" filex filex-indexd dev.filex.app.desktop filex.png
           URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ASSET}"
           ./target/release/filex-sign sign \
             --version "$VERSION" --url "$URL" \
@@ -160,9 +165,10 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           APP="Filex.app"
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/release/filex "$APP/Contents/MacOS/filex"
           cp target/release/filex-indexd "$APP/Contents/MacOS/filex-indexd"
+          cp assets/branding/filex.icns "$APP/Contents/Resources/filex.icns"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -172,6 +178,7 @@ jobs:
             <key>CFBundleDisplayName</key><string>Filex</string>
             <key>CFBundleIdentifier</key><string>dev.filex.app</string>
             <key>CFBundleExecutable</key><string>filex</string>
+            <key>CFBundleIconFile</key><string>filex.icns</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundlePackageType</key><string>APPL</string>

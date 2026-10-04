@@ -44,6 +44,11 @@ Do not introduce vector embeddings, ML inference, or content-based search (OCR, 
 - Don't let test coverage lag behind feature work across sessions — if a session adds indexing or search logic without tests, treat that as incomplete, not done.
 
 ## Workflow expectations
+- **Linear is the plan of record.** Team `Filex` (FIL), project `P-FIL-1`:
+  https://linear.app/nayanvr/project/filex-015c98b86862 — check it for what
+  to work on next. The `docs/*.md` files stay the design and decision
+  record; Linear issues point at them rather than restating them. When work
+  lands, close the issue; when a doc records a new open item, file one.
 - This is a solo/small-team project built incrementally across sessions — don't assume prior context beyond what's in this file and the current conversation. If something about scope or architecture seems ambiguous, ask rather than guessing and building the wrong thing.
 - Push back if a request seems to skip ahead of the current phase (see "Current phase" above) or underestimates complexity — the goal is a realistic, shippable project, not scope creep.
 - When in doubt about GPUI API shape, don't hallucinate a plausible-looking API — check GPUI Component or Zed's source first, or flag that it needs verification.

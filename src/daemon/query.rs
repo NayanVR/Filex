@@ -165,8 +165,7 @@ pub fn search(
     } else {
         view.base
             .search
-            .range(needle.as_bytes())
-            .len()
+            .estimate(needle.as_bytes())
             .saturating_mul(3)
     };
     if let Some(paths) = query
@@ -366,6 +365,162 @@ pub fn search(
     })
 }
 pub fn stream(
+    view: &View,
+    query: &Query,
+    cancel: &AtomicBool,
+    emit: impl FnMut(Batch) -> Result<()>,
+) -> Result<()> {
+    ensure!(
+        query.epoch_hint.is_none_or(|e| e == view.epoch),
+        "search epoch expired"
+    );
+    ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+    let need_size = query
+        .filters
+        .iter()
+        .any(|f| matches!(f, crate::search_filter::Filter::Size(_)));
+    let need_mtime = query
+        .filters
+        .iter()
+        .any(|f| matches!(f, crate::search_filter::Filter::Modified(_)));
+    // Small scopes enumerate a complete live-view set; a capped scope is
+    // never treated as complete. Tag paths remain an exact final predicate:
+    // resolving one ID per path could hide transient duplicate paths in overlays.
+    const SCOPE_BOUND: usize = 16_384;
+    let selected = query.scope.as_ref().and_then(|scope| {
+        let root = view.resolve(scope)?;
+        let mut ids = view.scoped_ids(scope, SCOPE_BOUND, cancel);
+        if ids.len() >= SCOPE_BOUND {
+            return None;
+        }
+        ids.push(root);
+        ids.sort_unstable();
+        ids.dedup();
+        Some(ids)
+    });
+    ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+    if let Some(ids) = &selected {
+        return stream_records(
+            view,
+            query,
+            cancel,
+            ids.iter()
+                .filter_map(|id| view.record_projected(*id, need_size, need_mtime)),
+            emit,
+        );
+    }
+    let needle = nfc_fold(&query.text);
+    let mut candidates = view.base.exhaustive_candidates(&query.filters, cancel)?;
+    // Tiny metadata sets are cheaper to verify directly. Signature estimates
+    // can be very loose: don't let them send hundreds of thousands of metadata
+    // candidates through native-name decoding instead of dictionary lookup.
+    // A ubiquitous single byte without metadata can stream immediately; eagerly
+    // materializing its huge posting set delays the preview's early-stop cap.
+    let direct = candidates.as_ref().is_some_and(|set| set.count() <= 4096)
+        || (candidates.is_none()
+            && needle.len() == 1
+            && view.base.search.estimate(needle.as_bytes())
+                >= view.base.search.name_count().div_ceil(2));
+    if !needle.is_empty() && !direct {
+        let text = view
+            .base
+            .search
+            .exhaustive_candidates(&needle, view.base.len(), cancel)?;
+        if let Some(set) = &mut candidates {
+            set.intersect(&text);
+        } else {
+            candidates = Some(text);
+        }
+    }
+    ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+    // Base postings describe the immutable snapshot only. Every changed ID is
+    // evaluated from its newest overlay, including records that newly match.
+    let mut changes = std::collections::BTreeMap::new();
+    for layer in &view.layers {
+        for (&id, record) in &layer.records {
+            ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+            changes.insert(id, record.as_ref());
+        }
+    }
+    let slots: Box<dyn Iterator<Item = usize> + '_> = match &candidates {
+        Some(set) => Box::new(set.iter()),
+        None => Box::new(0..view.base.len()),
+    };
+    // Merge by stable FileId, and reject numeric bucket edges before touching
+    // compressed native names. Paths are resolved only for matching records.
+    let mut base = slots
+        .take_while(|_| !cancel.load(Ordering::Relaxed))
+        .filter_map(|slot| {
+            let id = view.base.id(slot);
+            (!changes.contains_key(&id) && view.base.matches_numeric(slot, &query.filters))
+                .then_some((id, slot))
+        })
+        .peekable();
+    let mut overlays = changes
+        .iter()
+        .filter_map(|(&id, record)| record.map(|r| (id, r)))
+        .peekable();
+    let records = std::iter::from_fn(|| {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        if overlays
+            .peek()
+            .is_some_and(|(id, _)| base.peek().is_none_or(|(next, _)| id < next))
+        {
+            return overlays.next().map(|(_, record)| record.clone());
+        }
+        base.next()
+            .map(|(_, slot)| view.base.record_projected(slot, need_size, need_mtime))
+    });
+    stream_records(view, query, cancel, records, emit)
+}
+
+fn stream_records(
+    view: &View,
+    query: &Query,
+    cancel: &AtomicBool,
+    records: impl Iterator<Item = Record>,
+    mut emit: impl FnMut(Batch) -> Result<()>,
+) -> Result<()> {
+    let allowed = query
+        .allowed
+        .as_ref()
+        .map(|paths| paths.iter().map(|p| p.as_path()).collect::<HashSet<_>>());
+    let needle = nfc_fold(&query.text);
+    let mut batch = Vec::with_capacity(256);
+    let (mut scanned, mut total) = (0u64, 0u64);
+    for record in records {
+        ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+        scanned += 1;
+        if let Some(tier) = literal_tier(&record.name, &needle)
+            && let Some(hit) = hit(view, record, tier, query, &allowed)
+        {
+            batch.push(hit);
+            total += 1;
+        }
+        if batch.len() == 256 || scanned % 4096 == 0 {
+            emit(Batch {
+                epoch: view.epoch,
+                hits: std::mem::take(&mut batch),
+                scanned,
+                total: None,
+            })?;
+            std::thread::yield_now();
+        }
+    }
+    ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+    emit(Batch {
+        epoch: view.epoch,
+        hits: batch,
+        scanned,
+        total: Some(total),
+    })
+}
+
+/// Local benchmark baseline retained to measure Magic separately from ranked search.
+#[cfg(feature = "index-v2-lab")]
+pub fn stream_before_indexed_magic(
     view: &View,
     query: &Query,
     cancel: &AtomicBool,

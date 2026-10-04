@@ -3,7 +3,7 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const VERSION: u32 = 1;
 
-/// Normalization version 1, pinned by the FXSEG002 segment format.
+/// Normalization version 1, shared by segment formats 2 through 4.
 /// Full, non-Turkic folding with canonical composition before and after folding.
 pub fn nfc_fold(name: &str) -> String {
     if name.is_ascii() {

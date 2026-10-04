@@ -1,5 +1,9 @@
 # Index v2 implementation and validation
 
+The later compact-format implementation and validation are described in
+[index-compact.md](index-compact.md). The measurements below remain the historical
+FM-format baseline.
+
 The application and daemon now use v2. The v1 runtime, snapshot reader, local UI
 indexes, and global scan fallback have been removed. The revised contract is
 [design-index-v2.md](design-index-v2.md), especially §19. These are local results

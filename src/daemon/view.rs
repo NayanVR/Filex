@@ -10,6 +10,61 @@ pub struct Overlay {
     pub records: BTreeMap<u64, Option<Record>>,
     children: HashMap<(u64, Vec<u8>), u64>,
 }
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use crate::catalog::segment::{Identity, Root};
+
+    #[test]
+    fn appended_records_keep_base_paths_but_tombstones_hide_descendants() {
+        let record = |id, parent, directory| Record {
+            id,
+            parent,
+            root: 1,
+            name: format!("entry-{id}").into_bytes(),
+            flags: if directory { Record::DIRECTORY } else { 0 },
+            identity: Identity::default(),
+            size: Some(id),
+            mtime: None,
+        };
+        let roots = vec![Root {
+            id: 1,
+            path: "/fixture".into(),
+            device: 0,
+        }];
+        let base = Arc::new(
+            Segment::build(
+                [record(1, 0, true), record(2, 1, true), record(3, 2, false)],
+                roots.clone(),
+                0,
+            )
+            .unwrap(),
+        );
+        let mut changes = Overlay::default();
+        changes.put(4, Some(record(4, 2, false)));
+        changes.put(5, Some(record(5, 999, false)));
+        let mut view = View {
+            roots,
+            base,
+            layers: vec![Arc::new(changes.clone())],
+            epoch: 1,
+        };
+        assert_eq!(
+            view.records().map(|r| r.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert!(
+            view.records_projected(false, false)
+                .all(|r| r.id == 4 || r.size.is_none())
+        );
+        changes.put(2, None);
+        view.layers = vec![Arc::new(changes)];
+        assert_eq!(view.records().map(|r| r.id).collect::<Vec<_>>(), [1]);
+        view.roots.clear();
+        assert_eq!(view.records().count(), 0);
+    }
+}
 impl Overlay {
     pub fn put(&mut self, id: u64, record: Option<Record>) {
         if let Some(Some(old)) = self.records.get(&id) {
@@ -98,7 +153,11 @@ impl View {
             let changed = self.layers.iter().rev().find_map(|l| l.records.get(&id));
             let (parent, root, name) = if let Some(record) = changed {
                 let r = record.as_ref()?;
-                (r.parent, r.root, r.name.as_slice())
+                (
+                    r.parent,
+                    r.root,
+                    std::borrow::Cow::Borrowed(r.name.as_slice()),
+                )
             } else {
                 self.base.path_part(self.base.slot(id)?)
             };
@@ -109,7 +168,7 @@ impl View {
                 }
                 return Some(path);
             }
-            parts.push(name.to_vec());
+            parts.push(name.into_owned());
             id = parent;
         }
         None
@@ -181,10 +240,16 @@ impl View {
         for layer in &self.layers {
             changed.extend(layer.records.keys().copied());
         }
+        // Validated base records retain valid paths when overlays only append
+        // new IDs and roots are unchanged. Avoid millions of redundant parent
+        // walks and ID lookups during compaction and exhaustive streaming.
+        let base_unchanged =
+            self.roots == self.base.roots && changed.iter().all(|id| self.base.slot(*id).is_none());
         let mut extra = changed.into_iter().peekable();
         let mut slot = 0;
         std::iter::from_fn(move || {
             loop {
+                let base_slot = slot;
                 let base = (slot < self.base.len()).then(|| self.base.id(slot));
                 let id = match (base, extra.peek().copied()) {
                     (Some(a), Some(b)) if a == b => {
@@ -206,6 +271,9 @@ impl View {
                     }
                     (None, None) => return None,
                 };
+                if base_unchanged && base == Some(id) {
+                    return Some(self.base.record_projected(base_slot, size, mtime));
+                }
                 if let Some(record) = self.record_projected(id, size, mtime)
                     && self.path(id).is_some()
                 {

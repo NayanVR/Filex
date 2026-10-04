@@ -866,3 +866,200 @@ fn magic_literal_postings_include_renames_and_keep_complete_matches() {
         }
     }
 }
+
+#[test]
+fn magic_indexed_predicates_match_full_scan_with_overlay_changes() {
+    use filex::daemon::view::Overlay;
+    use filex::listing::FileKind;
+    use filex::search_filter::{Bound, Filter, ItemMeta};
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let mut records = vec![record(1, 0, b"root", true), record(2, 1, b"folder", true)];
+    for id in 3..20020 {
+        let ext = if id % 7 == 0 { "pdf" } else { "txt" };
+        let mut r = record(
+            id,
+            if id % 2 == 0 { 2 } else { 1 },
+            format!("École-Straße-{id}.{ext}").as_bytes(),
+            false,
+        );
+        r.size = (id % 11 != 0).then_some(id % 1024);
+        r.mtime = (id % 13 != 0).then_some((id as i64 % 8 - 4) * 86400 + 71);
+        records.push(r);
+    }
+    records.push(record(21000, 1, "native.Ä".as_bytes(), false));
+    records.push(record(21001, 1, b"same-path.pdf", false));
+    records.push(record(21002, 1, b"same-path.pdf", false));
+    records.push(record(22000, 1, &[255, b'.', b'p', b'd', b'f'], false));
+    let mut first = Overlay::default();
+    first.put(7, Some(record(7, 1, b"renamed-out.txt", false)));
+    first.put(8, Some(record(8, 1, b"new-match.pdf", false)));
+    first.put(14, None);
+    first.put(23000, Some(record(23000, 1, b"added.pdf", false)));
+    first.put(23001, Some(record(23001, 999999, b"orphan.pdf", false)));
+    let mut latest = Overlay::default();
+    latest.put(8, Some(record(8, 1, b"latest.pdf", false)));
+    latest.put(23000, None);
+    // Deleting an ancestor hides unchanged descendants even if postings match.
+    latest.put(2, None);
+    let base = Segment::build(records, roots.clone(), 1).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mapped");
+    base.save(&file).unwrap();
+    let view = View {
+        base: Arc::new(unsafe { Segment::open(&file).unwrap() }),
+        roots,
+        layers: vec![Arc::new(first), Arc::new(latest)],
+        epoch: 3,
+    };
+    let filters = vec![
+        vec![],
+        vec![Filter::Ext("pdf".into())],
+        vec![Filter::Ext("Ä".into())],
+        vec![Filter::Kind(FileKind::Document)],
+        vec![Filter::Size(Bound::Range(127, 129))],
+        vec![Filter::Modified(Bound::Range(-86400, 0))],
+        vec![
+            Filter::Ext("pdf".into()),
+            Filter::Size(Bound::Lt(300)),
+            Filter::Modified(Bound::Ge(-172800)),
+        ],
+        vec![Filter::Ext("missing".into())],
+    ];
+    // Independent oracle: evaluate every live record, without index planning.
+    let all: Vec<_> = view.records().collect();
+    for filters in filters {
+        for text in ["", "STRASSE", "latest", ".pdf", "missing"] {
+            for allowed in [
+                None,
+                Some(vec![
+                    "/test/latest.pdf".into(),
+                    "/test/native.Ä".into(),
+                    "/test/same-path.pdf".into(),
+                ]),
+            ] {
+                let q = Query {
+                    text: text.into(),
+                    filters: filters.clone(),
+                    allowed,
+                    limit: 1,
+                    fuzzy: true,
+                    ..Default::default()
+                };
+                let needle = filex::catalog::normalize::nfc_fold(text);
+                let expected: Vec<_> = all
+                    .iter()
+                    .filter_map(|r| {
+                        if r.parent == 0 {
+                            return None;
+                        }
+                        let tier = query::literal_tier(&r.name, &needle)?;
+                        let native = filex::catalog::segment::os_name(&r.name);
+                        let name = native.to_string_lossy();
+                        if !q.filters.iter().all(|f| {
+                            f.matches(&ItemMeta {
+                                name: &name,
+                                is_dir: r.is_dir(),
+                                size: r.size,
+                                mtime: r.mtime,
+                            })
+                        }) {
+                            return None;
+                        }
+                        let path = view.path(r.id)?;
+                        if q.allowed
+                            .as_ref()
+                            .is_some_and(|paths| !paths.contains(&path))
+                        {
+                            return None;
+                        }
+                        Some((r.id, path, tier))
+                    })
+                    .collect();
+                let mut actual = Vec::new();
+                let mut total = None;
+                query::stream(&view, &q, &AtomicBool::new(false), |batch| {
+                    actual.extend(batch.hits.into_iter().map(|h| (h.id, h.path, h.tier)));
+                    total = batch.total;
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(actual, expected, "{q:?}");
+                assert_eq!(total, Some(expected.len() as u64));
+            }
+        }
+    }
+}
+
+#[test]
+fn magic_metadata_skips_non_candidates_and_cancellation_never_completes() {
+    use filex::search_filter::{Bound, Filter};
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let records = (1..=20001).map(|id| {
+        record(
+            id,
+            if id == 1 { 0 } else { 1 },
+            if id == 19999 {
+                b"rare.pdf"
+            } else {
+                b"common.txt"
+            },
+            id == 1,
+        )
+    });
+    let view = View {
+        base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        roots,
+        layers: vec![],
+        epoch: 1,
+    };
+    let q = Query {
+        filters: vec![Filter::Ext("pdf".into()), Filter::Size(Bound::Eq(19999))],
+        ..Default::default()
+    };
+    let mut count = 0;
+    query::stream(&view, &q, &AtomicBool::new(false), |batch| {
+        count += batch.hits.len();
+        assert!(batch.scanned <= 1);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count, 1);
+    let cancel = AtomicBool::new(true);
+    assert!(
+        query::stream(&view, &q, &cancel, |_| panic!(
+            "cancelled query emitted a batch"
+        ))
+        .is_err()
+    );
+    cancel.store(false, Ordering::Relaxed);
+    let mut complete = false;
+    assert!(
+        query::stream(&view, &Query::default(), &cancel, |batch| {
+            complete |= batch.total.is_some();
+            cancel.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(!complete);
+    assert!(
+        query::stream(
+            &view,
+            &Query {
+                epoch_hint: Some(999),
+                ..q
+            },
+            &AtomicBool::new(false),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+}

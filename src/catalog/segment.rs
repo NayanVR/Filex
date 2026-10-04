@@ -1,6 +1,8 @@
-//! Unified immutable catalog plus selected FM search structures.
+//! Immutable catalog with block-packed columns and compact ranked name search.
 use super::{
-    postings::Postings,
+    columns::{Column, ColumnImage},
+    pool::{BytePool, PoolImage},
+    postings::{Postings, PostingsImage},
     storage::{Packed, Reader, Span, Writer},
 };
 use crate::search::literal::{LiteralImage, LiteralIndex};
@@ -8,6 +10,7 @@ use crate::search_filter::{Filter, ItemMeta};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
     ffi::OsString,
     path::{Path, PathBuf},
@@ -58,20 +61,20 @@ pub struct Segment {
     pub search: LiteralIndex,
     pub roots: Vec<Root>,
     pub sequence: u64,
-    ids: Packed<u64>,
-    parents: Packed<u64>,
-    root_ids: Packed<u32>,
-    names: Packed<u32>,
-    devices: Packed<u64>,
-    native_order: Packed<u32>,
+    ids: Column<u64>,
+    parents: Column<u64>,
+    root_ids: Column<u32>,
+    names: Column<u32>,
+    devices: Column<u64>,
+    native_order: Column<u32>,
     flags: Packed<u8>,
-    keys: Packed<u64>,
-    births: Packed<u64>,
-    sizes: Packed<u64>,
-    mtimes: Packed<i64>,
-    raw: Packed<u8>,
-    raw_offsets: Packed<u32>,
-    children: Packed<u32>,
+    keys: Column<u64>,
+    births: Column<u64>,
+    sizes: Column<u64>,
+    mtimes: Column<i64>,
+    raw: BytePool,
+    raw_offsets: Column<u32>,
+    children: Column<u32>,
     meta_keys: Vec<String>,
     meta_postings: Postings,
 }
@@ -82,22 +85,22 @@ struct Image {
     roots: Vec<Root>,
     sequence: u64,
     search: LiteralImage,
-    devices: Span,
-    native_order: Span,
-    ids: Span,
-    parents: Span,
-    root_ids: Span,
-    names: Span,
+    devices: ColumnImage,
+    native_order: ColumnImage,
+    ids: ColumnImage,
+    parents: ColumnImage,
+    root_ids: ColumnImage,
+    names: ColumnImage,
     flags: Span,
-    keys: Span,
-    births: Span,
-    sizes: Span,
-    mtimes: Span,
-    raw: Span,
-    raw_offsets: Span,
-    children: Span,
+    keys: ColumnImage,
+    births: ColumnImage,
+    sizes: ColumnImage,
+    mtimes: ColumnImage,
+    raw: PoolImage,
+    raw_offsets: ColumnImage,
+    children: ColumnImage,
     meta_keys: Vec<String>,
-    meta_postings: (Span, Span),
+    meta_postings: PostingsImage,
 }
 impl Segment {
     pub fn build(
@@ -192,20 +195,9 @@ impl Segment {
         raw.shrink_to_fit();
         raw_offsets.shrink_to_fit();
         let (meta_keys, lists): (Vec<_>, Vec<_>) = metadata.into_iter().unzip();
-        let meta_postings = Postings::build(lists)?;
+        let meta_postings = Postings::build_runs(lists)?;
         ensure!(ids.len() < u32::MAX as usize, "too many catalog files");
         super::storage::release_builder_memory();
-        let search = LiteralIndex::build(names.iter().enumerate().map(|(i, &n)| {
-            if parents[i] == 0 {
-                ""
-            } else {
-                std::str::from_utf8(
-                    &raw[raw_offsets[n as usize] as usize..raw_offsets[n as usize + 1] as usize],
-                )
-                .unwrap_or("")
-            }
-        }))?
-        .into_fm();
         let mut children: Vec<u32> = (0..ids.len() as u32).collect();
         children.sort_unstable_by(|&a, &b| {
             parents[a as usize].cmp(&parents[b as usize]).then_with(|| {
@@ -235,26 +227,48 @@ impl Segment {
                 *root_counts.entry(r).or_insert(0) += 1;
             }
         }
+        let ids: Column<_> = ids.into();
+        let parents: Column<_> = parents.into();
+        let root_ids: Column<_> = root_ids.into();
+        let names: Column<_> = names.into();
+        let devices: Column<_> = devices.into();
+        let native_order: Column<_> = native_order.into();
+        let keys: Column<_> = keys.into();
+        let births: Column<_> = births.into();
+        let sizes: Column<_> = sizes.into();
+        let mtimes: Column<_> = mtimes.into();
+        let children: Column<_> = children.into();
+        super::storage::release_builder_memory();
+        let search = LiteralIndex::build(names.iter().enumerate().map(|(i, n)| {
+            if parents.get(i) == 0 {
+                ""
+            } else {
+                std::str::from_utf8(
+                    &raw[raw_offsets[n as usize] as usize..raw_offsets[n as usize + 1] as usize],
+                )
+                .unwrap_or("")
+            }
+        }))?;
         Ok(Self {
             root_counts,
             root_files,
-            devices: devices.into(),
-            native_order: native_order.into(),
+            devices,
+            native_order,
             search,
             roots,
             sequence,
-            ids: ids.into(),
-            parents: parents.into(),
-            root_ids: root_ids.into(),
-            names: names.into(),
+            ids,
+            parents,
+            root_ids,
+            names,
             flags: flags.into(),
-            keys: keys.into(),
-            births: births.into(),
-            sizes: sizes.into(),
-            mtimes: mtimes.into(),
-            raw: raw.into(),
+            keys,
+            births,
+            sizes,
+            mtimes,
+            raw: BytePool::build(raw)?,
             raw_offsets: raw_offsets.into(),
-            children: children.into(),
+            children,
             meta_keys,
             meta_postings,
         })
@@ -272,30 +286,31 @@ impl Segment {
         self.ids.binary_search(&id).ok()
     }
     pub fn id(&self, slot: usize) -> u64 {
-        self.ids[slot]
+        self.ids.get(slot)
     }
-    pub fn raw_name(&self, slot: usize) -> &[u8] {
-        let n = self.names[slot] as usize;
-        &self.raw[self.raw_offsets[n] as usize..self.raw_offsets[n + 1] as usize]
+    pub fn raw_name(&self, slot: usize) -> Cow<'_, [u8]> {
+        let n = self.names.get(slot) as usize;
+        self.raw
+            .read(self.raw_offsets.get(n) as usize..self.raw_offsets.get(n + 1) as usize)
     }
     pub fn record(&self, slot: usize) -> Record {
         self.record_projected(slot, true, true)
     }
     pub fn record_projected(&self, slot: usize, size: bool, mtime: bool) -> Record {
-        let root = self.root_ids[slot];
+        let root = self.root_ids.get(slot);
         Record {
-            id: self.ids[slot],
-            parent: self.parents[slot],
+            id: self.ids.get(slot),
+            parent: self.parents.get(slot),
             root,
-            name: self.raw_name(slot).to_vec(),
+            name: self.raw_name(slot).into_owned(),
             flags: self.flags[slot] & (Record::DIRECTORY | Record::SYMLINK),
             identity: Identity {
-                device: self.devices[slot],
-                key: self.keys[slot],
-                birth: self.births[slot],
+                device: self.devices.get(slot),
+                key: self.keys.get(slot),
+                birth: self.births.get(slot),
             },
-            size: (size && self.flags[slot] & HAS_SIZE != 0).then(|| self.sizes[slot]),
-            mtime: (mtime && self.flags[slot] & HAS_MTIME != 0).then(|| self.mtimes[slot]),
+            size: (size && self.flags[slot] & HAS_SIZE != 0).then(|| self.sizes.get(slot)),
+            mtime: (mtime && self.flags[slot] & HAS_MTIME != 0).then(|| self.mtimes.get(slot)),
         }
     }
     pub fn find_native(&self, root: u32, key: Identity) -> Option<u64> {
@@ -303,16 +318,16 @@ impl Segment {
             return None;
         }
         self.native_order
-            .binary_search_by_key(&(root, key.device, key.key, key.birth), |&i| {
+            .binary_search_by_key(&(root, key.device, key.key, key.birth), |i| {
                 (
-                    self.root_ids[i as usize],
-                    self.devices[i as usize],
-                    self.keys[i as usize],
-                    self.births[i as usize],
+                    self.root_ids.get(i as usize),
+                    self.devices.get(i as usize),
+                    self.keys.get(i as usize),
+                    self.births.get(i as usize),
                 )
             })
             .ok()
-            .map(|i| self.ids[self.native_order[i] as usize])
+            .map(|i| self.ids.get(self.native_order.get(i) as usize))
     }
     pub fn root_file(&self, root: u32) -> Option<u64> {
         self.root_files
@@ -321,53 +336,61 @@ impl Segment {
             .map(|(_, id)| *id)
     }
     pub fn size(&self, slot: usize) -> Option<u64> {
-        (self.flags[slot] & HAS_SIZE != 0).then(|| self.sizes[slot])
+        (self.flags[slot] & HAS_SIZE != 0).then(|| self.sizes.get(slot))
     }
     pub fn mtime(&self, slot: usize) -> Option<i64> {
-        (self.flags[slot] & HAS_MTIME != 0).then(|| self.mtimes[slot])
+        (self.flags[slot] & HAS_MTIME != 0).then(|| self.mtimes.get(slot))
     }
     pub fn is_dir(&self, slot: usize) -> bool {
         self.flags[slot] & Record::DIRECTORY != 0
     }
-    pub fn path_part(&self, slot: usize) -> (u64, u32, &[u8]) {
-        (self.parents[slot], self.root_ids[slot], self.raw_name(slot))
+    pub fn path_part(&self, slot: usize) -> (u64, u32, Cow<'_, [u8]>) {
+        (
+            self.parents.get(slot),
+            self.root_ids.get(slot),
+            self.raw_name(slot),
+        )
     }
     pub fn parent(&self, slot: usize) -> u64 {
-        self.parents[slot]
+        self.parents.get(slot)
     }
     pub fn child_ids(&self, parent: u64) -> impl Iterator<Item = u64> + '_ {
         let lo = self
             .children
-            .partition_point(|&i| self.parents[i as usize] < parent);
+            .partition_point(|i| self.parents.get(i as usize) < parent);
         let hi = self
             .children
-            .partition_point(|&i| self.parents[i as usize] <= parent);
-        self.children[lo..hi].iter().map(|&i| self.ids[i as usize])
+            .partition_point(|i| self.parents.get(i as usize) <= parent);
+        (lo..hi).map(|i| self.ids.get(self.children.get(i) as usize))
     }
     pub fn child(&self, parent: u64, name: &[u8]) -> Option<usize> {
         self.children
-            .binary_search_by(|&i| {
-                self.parents[i as usize]
+            .binary_search_by(|i| {
+                self.parents
+                    .get(i as usize)
                     .cmp(&parent)
-                    .then_with(|| self.raw_name(i as usize).cmp(name))
+                    .then_with(|| self.raw_name(i as usize).as_ref().cmp(name))
             })
             .ok()
-            .map(|i| self.children[i] as usize)
+            .map(|i| self.children.get(i) as usize)
     }
     pub fn matches(&self, slot: usize, filters: &[Filter]) -> bool {
-        let native = os_name(self.raw_name(slot));
+        if filters.is_empty() {
+            return true;
+        }
+        let native = os_name(&self.raw_name(slot));
         let name = native.to_string_lossy();
         filters.iter().all(|f| {
             f.matches(&ItemMeta {
                 name: &name,
                 is_dir: self.flags[slot] & Record::DIRECTORY != 0,
                 size: if matches!(f, Filter::Size(_)) && self.flags[slot] & HAS_SIZE != 0 {
-                    Some(self.sizes[slot])
+                    Some(self.sizes.get(slot))
                 } else {
                     None
                 },
                 mtime: if matches!(f, Filter::Modified(_)) && self.flags[slot] & HAS_MTIME != 0 {
-                    Some(self.mtimes[slot])
+                    Some(self.mtimes.get(slot))
                 } else {
                     None
                 },
@@ -389,7 +412,7 @@ impl Segment {
                 .collect();
             let bound = keys
                 .iter()
-                .map(|&i| self.meta_postings.encoded_len(i))
+                .map(|&i| self.meta_postings.cardinality_bound(i))
                 .sum::<usize>();
             if best.as_ref().is_none_or(|(n, _)| bound < *n) {
                 best = Some((bound, keys));
@@ -400,6 +423,84 @@ impl Segment {
                 .flat_map(|i| self.meta_postings.get(i as u32))
                 .collect()
         })
+    }
+
+    /// Complete coarse candidates, intersected across metadata predicates.
+    /// Unlike interactive retrieval, this never discards a large posting list.
+    pub(crate) fn exhaustive_candidates(
+        &self,
+        filters: &[Filter],
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<crate::search::candidates::Candidates>> {
+        use crate::search::candidates::Candidates;
+        use std::sync::atomic::Ordering;
+        let mut lists = Vec::new();
+        for filter in filters {
+            ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+            // Historical extension keys use Unicode lowercasing, while exact
+            // predicates use ASCII lowercasing. Verify non-ASCII extensions
+            // directly so old on-disk keys cannot exclude a valid match.
+            if matches!(filter, Filter::Tag(_))
+                || matches!(filter, Filter::Ext(ext) if !ext.is_ascii())
+            {
+                continue;
+            }
+            let mut keys = Vec::new();
+            for (i, key) in self.meta_keys.iter().enumerate() {
+                if i % 4096 == 0 {
+                    ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+                }
+                if coarse_matches(key, filter) {
+                    keys.push(i);
+                }
+            }
+            let bound: usize = keys
+                .iter()
+                .map(|&i| self.meta_postings.cardinality_bound(i))
+                .sum();
+            lists.push((bound, keys));
+        }
+        lists.sort_unstable_by_key(|(bound, _)| *bound);
+        let mut result: Option<Candidates> = None;
+        for (_, keys) in lists {
+            let mut next = Candidates::empty(self.len());
+            for key in keys {
+                for (i, slot) in self.meta_postings.get(key as u32).enumerate() {
+                    if i % 4096 == 0 {
+                        ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+                    }
+                    next.insert(slot as usize);
+                }
+            }
+            if let Some(current) = &mut result {
+                current.intersect(&next);
+            } else {
+                result = Some(next);
+            }
+            if result.as_ref().is_some_and(|set| set.count() == 0) {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Reject numeric bucket-edge false positives without decoding a filename.
+    pub(crate) fn matches_numeric(&self, slot: usize, filters: &[Filter]) -> bool {
+        filters.iter().all(|filter| match filter {
+            Filter::Size(bound) => self.size(slot).is_some_and(|n| bound.matches(n)),
+            Filter::Modified(bound) => self.mtime(slot).is_some_and(|n| bound.matches(n)),
+            _ => true,
+        })
+    }
+
+    #[cfg(feature = "index-v2-lab")]
+    pub fn metadata_postings_equal(&self, other: &Self) -> bool {
+        self.meta_keys == other.meta_keys
+            && (0..self.meta_keys.len()).all(|id| {
+                self.meta_postings
+                    .get(id as u32)
+                    .eq(other.meta_postings.get(id as u32))
+            })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -441,27 +542,27 @@ impl Segment {
         let mut segment = Self {
             root_counts: BTreeMap::new(),
             root_files: image.root_files,
-            devices: Packed::load(&reader, image.devices)?,
-            native_order: Packed::load(&reader, image.native_order)?,
+            devices: Column::load(&reader, image.devices)?,
+            native_order: Column::load(&reader, image.native_order)?,
             search: LiteralIndex::load(&reader, image.search)?,
             roots: image.roots,
             sequence: image.sequence,
-            ids: Packed::load(&reader, image.ids)?,
-            parents: Packed::load(&reader, image.parents)?,
-            root_ids: Packed::load(&reader, image.root_ids)?,
-            names: Packed::load(&reader, image.names)?,
+            ids: Column::load(&reader, image.ids)?,
+            parents: Column::load(&reader, image.parents)?,
+            root_ids: Column::load(&reader, image.root_ids)?,
+            names: Column::load(&reader, image.names)?,
             flags: Packed::load(&reader, image.flags)?,
-            keys: Packed::load(&reader, image.keys)?,
-            births: Packed::load(&reader, image.births)?,
-            sizes: Packed::load(&reader, image.sizes)?,
-            mtimes: Packed::load(&reader, image.mtimes)?,
-            raw: Packed::load(&reader, image.raw)?,
-            raw_offsets: Packed::load(&reader, image.raw_offsets)?,
-            children: Packed::load(&reader, image.children)?,
+            keys: Column::load(&reader, image.keys)?,
+            births: Column::load(&reader, image.births)?,
+            sizes: Column::load(&reader, image.sizes)?,
+            mtimes: Column::load(&reader, image.mtimes)?,
+            raw: BytePool::load(&reader, image.raw)?,
+            raw_offsets: Column::load(&reader, image.raw_offsets)?,
+            children: Column::load(&reader, image.children)?,
             meta_keys: image.meta_keys,
             meta_postings: Postings::load(&reader, image.meta_postings)?,
         };
-        for (&root, &parent) in segment.root_ids.iter().zip(segment.parents.iter()) {
+        for (root, parent) in segment.root_ids.iter().zip(segment.parents.iter()) {
             if parent != 0 {
                 *segment.root_counts.entry(root).or_insert(0) += 1;
             }
@@ -470,6 +571,9 @@ impl Segment {
         // Validation touches every column. Fresh mappings let query-only
         // processes keep cold metadata pages out of their resident working set.
         segment.remap(&reader.fresh_mapping()?)?;
+        // Decoded validation text must not survive as allocator cache in the
+        // long-lived query process after the bounded caches have been reset.
+        super::storage::release_builder_memory();
 
         Ok(segment)
     }
@@ -495,24 +599,24 @@ impl Segment {
             "catalog column mismatch"
         );
         ensure!(
-            self.ids.windows(2).all(|w| w[0] < w[1]) && self.ids.first() != Some(&0),
+            self.ids.pairs().all(|w| w[0] < w[1]) && self.ids.first() != Some(0),
             "invalid file IDs"
         );
         ensure!(
-            self.raw_offsets.first() == Some(&0)
-                && self.raw_offsets.last().copied() == Some(self.raw.len() as u32)
-                && self.raw_offsets.windows(2).all(|w| w[0] <= w[1]),
+            self.raw_offsets.first() == Some(0)
+                && self.raw_offsets.last() == Some(self.raw.len() as u32)
+                && self.raw_offsets.pairs().all(|w| w[0] <= w[1]),
             "invalid raw names"
         );
         ensure!(
             self.names
                 .iter()
-                .all(|&n| (n as usize) + 1 < self.raw_offsets.len())
+                .all(|n| (n as usize) + 1 < self.raw_offsets.len())
                 && self
                     .children
                     .iter()
                     .chain(self.native_order.iter())
-                    .all(|&i| (i as usize) < n),
+                    .all(|i| (i as usize) < n),
             "invalid catalog references"
         );
         let mut root_ids = std::collections::HashSet::new();
@@ -524,10 +628,10 @@ impl Segment {
         );
         for slot in 0..n {
             ensure!(
-                self.roots.iter().any(|r| r.id == self.root_ids[slot]),
+                self.roots.iter().any(|r| r.id == self.root_ids.get(slot)),
                 "unknown root"
             );
-            let parent = self.parents[slot];
+            let parent = self.parents.get(slot);
             ensure!(
                 parent != 0 || self.flags[slot] & Record::DIRECTORY != 0,
                 "root record is not a directory"
@@ -558,14 +662,16 @@ impl Segment {
             );
         }
         ensure!(
-            self.root_files.iter().all(|(r, id)| self
-                .slot(*id)
-                .is_some_and(|i| self.parents[i] == 0 && self.root_ids[i] == *r)),
+            self.root_files
+                .iter()
+                .all(|(r, id)| self
+                    .slot(*id)
+                    .is_some_and(|i| self.parents.get(i) == 0 && self.root_ids.get(i) == *r)),
             "invalid root records"
         );
         let mut root_files = std::collections::HashSet::new();
         ensure!(
-            self.root_files.len() == self.parents.iter().filter(|&&parent| parent == 0).count()
+            self.root_files.len() == self.parents.iter().filter(|&parent| parent == 0).count()
                 && self
                     .root_files
                     .iter()
@@ -579,12 +685,12 @@ impl Segment {
             while color[at] == 0 {
                 color[at] = 1;
                 chain.push(at);
-                if self.parents[at] == 0 {
+                if self.parents.get(at) == 0 {
                     break;
                 }
-                let parent = self.slot(self.parents[at]).unwrap();
+                let parent = self.slot(self.parents.get(at)).unwrap();
                 ensure!(
-                    self.root_ids[parent] == self.root_ids[at],
+                    self.root_ids.get(parent) == self.root_ids.get(at),
                     "parent crosses roots"
                 );
                 at = parent;
@@ -619,12 +725,20 @@ impl Segment {
     }
 
     fn validate_ordered_indexes(&self) -> Result<()> {
+        // Child order jumps between dictionary pages. Decode once for this
+        // startup-only pass, then release the temporary text before remapping.
+        // Queries continue to use the bounded page cache.
+        let raw = self.raw.validation_text()?;
+        let name = |slot: usize| {
+            let id = self.names.get(slot) as usize;
+            &raw[self.raw_offsets.get(id) as usize..self.raw_offsets.get(id + 1) as usize]
+        };
         // Bounds alone are insufficient: duplicate or unsorted ordinals make
         // binary child/native lookups silently miss valid records.
         let mut seen = vec![false; self.len()];
         for (name, ordinals) in [("child", &self.children), ("native", &self.native_order)] {
             seen.fill(false);
-            for &ordinal in ordinals.iter() {
+            for ordinal in ordinals.iter() {
                 ensure!(
                     !std::mem::replace(&mut seen[ordinal as usize], true),
                     "duplicate {name} ordinal"
@@ -632,24 +746,23 @@ impl Segment {
             }
         }
         ensure!(
-            self.children.windows(2).all(|pair| {
+            self.children.pairs().all(|pair| {
                 let (left, right) = (pair[0] as usize, pair[1] as usize);
-                (self.parents[left], self.raw_name(left))
-                    <= (self.parents[right], self.raw_name(right))
+                (self.parents.get(left), name(left)) <= (self.parents.get(right), name(right))
             }),
             "unsorted child lookup"
         );
         let native_key = |slot: usize| {
             (
-                self.root_ids[slot],
-                self.devices[slot],
-                self.keys[slot],
-                self.births[slot],
+                self.root_ids.get(slot),
+                self.devices.get(slot),
+                self.keys.get(slot),
+                self.births.get(slot),
             )
         };
         ensure!(
             self.native_order
-                .windows(2)
+                .pairs()
                 .all(|pair| { native_key(pair[0] as usize) <= native_key(pair[1] as usize) }),
             "unsorted native lookup"
         );
@@ -771,6 +884,54 @@ fn overlaps<T: PartialOrd + Copy>(bound: crate::search_filter::Bound<T>, lo: T, 
 mod tests {
     use super::*;
 
+    #[test]
+    fn compressed_names_roundtrip_native_bytes_across_pages() {
+        let records: Vec<_> = (1..=5000)
+            .map(|id| {
+                let mut name =
+                    format!("shared-École-Straße-東京-XMLHttpRequest-{id:06}.txt").into_bytes();
+                if id % 7 == 0 {
+                    name.push(255);
+                }
+                Record {
+                    id,
+                    parent: if id == 1 { 0 } else { 1 },
+                    root: 1,
+                    name,
+                    flags: u8::from(id == 1),
+                    identity: Identity::default(),
+                    size: Some(id),
+                    mtime: Some(-1),
+                }
+            })
+            .collect();
+        let segment = Segment::build(
+            records.clone(),
+            vec![Root {
+                id: 1,
+                path: "/fixture".into(),
+                device: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        assert!(matches!(segment.raw, BytePool::Deflate { .. }));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compressed");
+        segment.save(&path).unwrap();
+        let mapped = unsafe { Segment::open(&path).unwrap() };
+        for (slot, record) in records.iter().enumerate() {
+            assert_eq!(&mapped.record(slot), record);
+            assert_eq!(mapped.child(record.parent, &record.name), Some(slot));
+        }
+        for query in ["é", "STRASSE", "東京", "http", "txt", "000007", "missing"] {
+            assert_eq!(
+                mapped.search.search(query, 202),
+                segment.search.oracle(query, 202)
+            );
+        }
+    }
+
     fn fixture() -> Segment {
         let records = (1..=3).map(|id| Record {
             id,
@@ -824,5 +985,98 @@ mod tests {
         let mut segment = fixture();
         segment.root_files.clear();
         rejected_after_save(segment);
+    }
+
+    #[test]
+    fn legacy_generation_rebuild_preserves_large_ids_native_identity_and_signed_dates() {
+        use sha2::{Digest, Sha256};
+        let records: Vec<_> = (0..520u64)
+            .map(|i| Record {
+                id: (1 << 40) + i * 3,
+                parent: if i == 0 { 0 } else { 1 << 40 },
+                root: 1,
+                name: format!("File-{i}-Straße.txt").into_bytes(),
+                flags: u8::from(i == 0),
+                identity: Identity {
+                    device: 99,
+                    key: u64::MAX - i,
+                    birth: (1 << 63) + i,
+                },
+                size: Some(u64::MAX - i),
+                mtime: Some(i64::MIN + i as i64),
+            })
+            .collect();
+        let mut old = Segment::build(
+            records.clone(),
+            vec![Root {
+                id: 1,
+                path: "/fixture".into(),
+                device: 99,
+            }],
+            7,
+        )
+        .unwrap();
+        macro_rules! plain {
+            ($($field:ident),+) => { $(old.$field = Column::Legacy(old.$field.iter().collect::<Vec<_>>().into());)+ };
+        }
+        plain!(
+            ids,
+            parents,
+            root_ids,
+            names,
+            devices,
+            native_order,
+            keys,
+            births,
+            sizes,
+            mtimes,
+            children,
+            raw_offsets
+        );
+        old.raw = BytePool::plain(old.raw.read(0..old.raw.len()).into_owned());
+        old.meta_postings = Postings::build(
+            (0..old.meta_postings.len()).map(|i| old.meta_postings.get(i as u32).collect()),
+        )
+        .unwrap();
+        old.meta_postings.use_legacy_offsets();
+        old.search = LiteralIndex::build_suffix(records.iter().map(|r| {
+            if r.parent == 0 {
+                ""
+            } else {
+                std::str::from_utf8(&r.name).unwrap()
+            }
+        }))
+        .unwrap()
+        .into_fm();
+        old.search.use_legacy_offsets();
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old.fx2");
+        old.save(&old_path).unwrap();
+        drop(old);
+        let mut bytes = std::fs::read(&old_path).unwrap();
+        bytes[..8].copy_from_slice(b"FXSEG002");
+        let end = bytes.len() - 32;
+        let hash = Sha256::digest(&bytes[..end]);
+        bytes[end..].copy_from_slice(&hash);
+        std::fs::write(&old_path, bytes).unwrap();
+        let old = unsafe { Segment::open(&old_path) }.unwrap();
+        let new = Segment::build(
+            (0..old.len()).map(|i| old.record(i)),
+            old.roots.clone(),
+            old.sequence,
+        )
+        .unwrap();
+        let new_path = dir.path().join("new.fx3");
+        new.save(&new_path).unwrap();
+        assert_eq!(&std::fs::read(&new_path).unwrap()[..8], b"FXSEG004");
+        let new = unsafe { Segment::open(&new_path) }.unwrap();
+        for (slot, record) in records.iter().enumerate() {
+            assert_eq!(&old.record(slot), record);
+            assert_eq!(&new.record(slot), record);
+            assert_eq!(new.find_native(1, record.identity), Some(record.id));
+        }
+        for query in ["f", "strasse", "txt", "-51", "missing"] {
+            assert_eq!(old.search.search(query, 202), new.search.search(query, 202));
+        }
     }
 }

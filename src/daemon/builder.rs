@@ -23,7 +23,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const REQUEST_VERSION: u32 = 1;
+const REQUEST_VERSION: u32 = 2;
+const RECORD_HEADER_BYTES: usize = 66;
 const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_ERROR_BYTES: u64 = 16 * 1024;
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -90,7 +91,7 @@ pub(super) fn build(request: BuildRequest, stop: &AtomicBool) -> Result<Built> {
     } else {
         for record in request.view.records() {
             ensure!(!stop.load(Ordering::Relaxed), "segment build cancelled");
-            write_line(&mut spool, &record)?;
+            write_record(&mut spool, &record)?;
         }
         0
     };
@@ -141,7 +142,7 @@ fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) 
                 allocated.insert(id);
                 id
             },
-            |record| write_line(spool, &record),
+            |record| write_record(spool, &record),
             stop,
         )?;
     }
@@ -152,6 +153,78 @@ fn write_line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
     serde_json::to_writer(&mut *writer, value)?;
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+// Private worker spool: a JSON header followed by fixed-width metadata and raw
+// name bytes. This is scratch, not the durable WAL or segment format.
+fn write_record(writer: &mut impl Write, record: &Record) -> Result<()> {
+    ensure!(
+        record.name.len() <= MAX_RECORD_BYTES as usize - RECORD_HEADER_BYTES,
+        "segment build record exceeds size limit"
+    );
+    let mut header = [0u8; RECORD_HEADER_BYTES];
+    header[0..8].copy_from_slice(&record.id.to_le_bytes());
+    header[8..16].copy_from_slice(&record.parent.to_le_bytes());
+    header[16..20].copy_from_slice(&record.root.to_le_bytes());
+    header[20] = record.flags;
+    header[21] = u8::from(record.size.is_some()) | (u8::from(record.mtime.is_some()) << 1);
+    header[22..30].copy_from_slice(&record.identity.device.to_le_bytes());
+    header[30..38].copy_from_slice(&record.identity.key.to_le_bytes());
+    header[38..46].copy_from_slice(&record.identity.birth.to_le_bytes());
+    header[46..54].copy_from_slice(&record.size.unwrap_or(0).to_le_bytes());
+    header[54..62].copy_from_slice(&record.mtime.unwrap_or(0).to_le_bytes());
+    header[62..66].copy_from_slice(&(record.name.len() as u32).to_le_bytes());
+    writer.write_all(&header)?;
+    writer.write_all(&record.name)?;
+    Ok(())
+}
+
+fn read_record(
+    reader: &mut impl BufRead,
+    version: u32,
+    line: &mut String,
+) -> Result<Option<Record>> {
+    if version == 1 {
+        return if read_line(reader, line)? == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(
+                serde_json::from_str(line).context("invalid segment build record")?,
+            ))
+        };
+    }
+    let mut header = [0u8; RECORD_HEADER_BYTES];
+    if reader.read(&mut header[..1])? == 0 {
+        return Ok(None);
+    }
+    reader
+        .read_exact(&mut header[1..])
+        .context("truncated segment build record")?;
+    ensure!(header[21] & !3 == 0, "invalid record presence bits");
+    let size = u32::from_le_bytes(header[62..66].try_into()?) as usize;
+    ensure!(
+        size <= MAX_RECORD_BYTES as usize - RECORD_HEADER_BYTES,
+        "segment build record exceeds size limit"
+    );
+    let mut name = vec![0; size];
+    reader
+        .read_exact(&mut name)
+        .context("truncated segment build name")?;
+    Ok(Some(Record {
+        id: u64::from_le_bytes(header[0..8].try_into()?),
+        parent: u64::from_le_bytes(header[8..16].try_into()?),
+        root: u32::from_le_bytes(header[16..20].try_into()?),
+        flags: header[20],
+        identity: crate::catalog::segment::Identity {
+            device: u64::from_le_bytes(header[22..30].try_into()?),
+            key: u64::from_le_bytes(header[30..38].try_into()?),
+            birth: u64::from_le_bytes(header[38..46].try_into()?),
+        },
+        size: (header[21] & 1 != 0).then(|| u64::from_le_bytes(header[46..54].try_into().unwrap())),
+        mtime: (header[21] & 2 != 0)
+            .then(|| i64::from_le_bytes(header[54..62].try_into().unwrap())),
+        name,
+    }))
 }
 
 fn run_process(input: &Path, output: &Path, errors: &Path, stop: &AtomicBool) -> Result<()> {
@@ -217,26 +290,28 @@ fn read_line(reader: &mut impl BufRead, line: &mut String) -> Result<usize> {
 fn compile(input: &Path, output: &Path) -> Result<()> {
     let mut reader = BufReader::new(File::open(input)?);
     let mut line = String::new();
-    ensure!(
-        read_line(&mut reader, &mut line)? != 0,
-        "missing segment build header"
-    );
+    let header_bytes = read_line(&mut reader, &mut line)?;
+    ensure!(header_bytes != 0, "missing segment build header");
     let header: Header = serde_json::from_str(&line).context("invalid segment build header")?;
     ensure!(
-        header.version == REQUEST_VERSION,
+        matches!(header.version, 1 | REQUEST_VERSION),
         "unsupported segment build request"
     );
 
     // A move can preserve an ID smaller than its newly enumerated parent.
     // Sort compact (ID, offset) pairs, never a second arena of complete records.
     let mut order = Vec::new();
+    let mut position = header_bytes as u64;
     loop {
-        let offset = reader.stream_position()?;
-        if read_line(&mut reader, &mut line)? == 0 {
+        let Some(record) = read_record(&mut reader, header.version, &mut line)? else {
             break;
-        }
-        let record: Record = serde_json::from_str(&line).context("invalid segment build record")?;
-        order.push((record.id, offset));
+        };
+        order.push((record.id, position));
+        position += if header.version == 1 {
+            line.len()
+        } else {
+            RECORD_HEADER_BYTES + record.name.len()
+        } as u64;
     }
     order.sort_unstable();
     ensure!(
@@ -246,12 +321,20 @@ fn compile(input: &Path, output: &Path) -> Result<()> {
     let mut failure = None;
     let records = order.into_iter().map_while(|(_, offset)| {
         let record = (|| -> Result<Record> {
-            reader.seek(SeekFrom::Start(offset))?;
-            ensure!(
-                read_line(&mut reader, &mut line)? != 0,
-                "truncated segment build input"
-            );
-            Ok(serde_json::from_str(&line)?)
+            // Compaction spools are already ID-ordered. Preserve the reader's
+            // buffer across adjacent records; enumeration may still need seeks.
+            if position != offset {
+                reader.seek(SeekFrom::Start(offset))?;
+            }
+            let record = read_record(&mut reader, header.version, &mut line)?
+                .context("truncated segment build input")?;
+            position = offset
+                + if header.version == 1 {
+                    line.len()
+                } else {
+                    RECORD_HEADER_BYTES + record.name.len()
+                } as u64;
+            Ok(record)
         })();
         match record {
             Ok(record) => Some(record),
@@ -312,6 +395,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn binary_spool_preserves_native_bytes_and_rejects_every_truncation() {
+        let record = Record {
+            id: u64::MAX,
+            parent: 19,
+            root: u32::MAX,
+            name: vec![255, 254, 13, 10, 0, 128],
+            flags: 2,
+            identity: crate::catalog::segment::Identity {
+                device: u64::MAX,
+                key: 123,
+                birth: 987,
+            },
+            size: Some(u64::MAX),
+            mtime: Some(i64::MIN),
+        };
+        for record in [
+            record.clone(),
+            Record {
+                size: None,
+                mtime: None,
+                ..record
+            },
+        ] {
+            let mut encoded = Vec::new();
+            write_record(&mut encoded, &record).unwrap();
+            let mut reader = encoded.as_slice();
+            let mut line = String::new();
+            assert_eq!(
+                read_record(&mut reader, REQUEST_VERSION, &mut line).unwrap(),
+                Some(record)
+            );
+            assert!(
+                read_record(&mut reader, REQUEST_VERSION, &mut line)
+                    .unwrap()
+                    .is_none()
+            );
+            for end in 1..encoded.len() {
+                assert!(read_record(&mut &encoded[..end], REQUEST_VERSION, &mut line).is_err());
+            }
+            encoded[62..66].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(read_record(&mut encoded.as_slice(), REQUEST_VERSION, &mut line).is_err());
+        }
+    }
+
+    #[test]
+    fn binary_spool_reorders_records_and_reuses_adjacent_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input");
+        let output = directory.path().join("output");
+        let mut file = File::create(&input).unwrap();
+        write_line(
+            &mut file,
+            &Header {
+                version: REQUEST_VERSION,
+                sequence: 9,
+                roots: vec![Root {
+                    id: 1,
+                    path: "/fixture".into(),
+                    device: 1,
+                }],
+            },
+        )
+        .unwrap();
+        for id in [4, 5, 1, 3, 2, 6] {
+            write_record(
+                &mut file,
+                &Record {
+                    id,
+                    parent: if id == 1 { 0 } else { 1 },
+                    root: 1,
+                    name: format!("東京-{}", "x".repeat(id as usize * 2000)).into_bytes(),
+                    flags: u8::from(id == 1),
+                    identity: Default::default(),
+                    size: Some(id),
+                    mtime: Some(-(id as i64)),
+                },
+            )
+            .unwrap();
+        }
+        drop(file);
+        compile(&input, &output).unwrap();
+        let segment = unsafe { Segment::open(&output) }.unwrap();
+        assert_eq!(segment.sequence, 9);
+        assert_eq!(segment.len(), 6);
+        for slot in 0..segment.len() {
+            let record = segment.record(slot);
+            assert_eq!(record.id, slot as u64 + 1);
+            assert_eq!(record.size, Some(record.id));
+            assert_eq!(record.mtime, Some(-(record.id as i64)));
+            assert_eq!(record.name.len(), 7 + record.id as usize * 2000);
+        }
+    }
+
+    #[test]
     fn worker_rejects_duplicate_ids_and_does_not_publish_partial_output() {
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input");
@@ -336,8 +513,8 @@ mod tests {
             size: None,
             mtime: None,
         };
-        write_line(&mut file, &record).unwrap();
-        write_line(&mut file, &record).unwrap();
+        write_record(&mut file, &record).unwrap();
+        write_record(&mut file, &record).unwrap();
         assert!(
             compile(&input, &output)
                 .unwrap_err()

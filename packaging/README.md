@@ -33,6 +33,10 @@ Optional supervisors:
 - Linux: copy `systemd/filex-indexd.service` into
   `~/.config/systemd/user/`, adjust `ExecStart`, and enable it with
   `systemctl --user enable --now filex-indexd`.
+- Linux desktop launcher: the release tarball includes `dev.filex.app.desktop` and
+  `filex.png`. After putting `filex` on your `PATH`, copy them to
+  `~/.local/share/applications/dev.filex.app.desktop` and
+  `~/.local/share/icons/hicolor/256x256/apps/filex.png` respectively.
 - macOS: copy `launchd/dev.filex.indexd.plist` into `~/Library/LaunchAgents/`,
   adjust the application path if necessary, and load it with
   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.filex.indexd.plist`.

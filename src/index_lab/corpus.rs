@@ -1,7 +1,7 @@
 //! Privacy-safe aggregate corpus measurement. No name/path-bearing report fields.
 use super::normalize::{boundaries, nfc_fold, nfkc_fold};
 pub struct Record<'a> {
-    pub raw: &'a [u8],
+    pub raw: std::borrow::Cow<'a, [u8]>,
     pub directory: bool,
     pub size: Option<u64>,
     pub mtime: Option<i64>,
@@ -66,7 +66,7 @@ pub fn analyze<'a>(records: impl Iterator<Item = Record<'a>>) -> CorpusReport {
         report.directories += usize::from(record.directory);
         report.files += usize::from(!record.directory);
         report.raw_bytes += record.raw.len() as u64;
-        raw.insert(record.raw);
+        raw.insert(record.raw.clone().into_owned());
         if let Some(size) = record.size {
             report.known_metadata += 1;
             sizes.insert(if size == 0 {
@@ -78,7 +78,7 @@ pub fn analyze<'a>(records: impl Iterator<Item = Record<'a>>) -> CorpusReport {
         if let Some(mtime) = record.mtime {
             days.insert(mtime.div_euclid(86400));
         }
-        let Ok(name) = std::str::from_utf8(record.raw) else {
+        let Ok(name) = std::str::from_utf8(&record.raw) else {
             report.invalid_utf8 += 1;
             continue;
         };
@@ -143,7 +143,7 @@ mod tests {
             &[255],
         ];
         let report = analyze(names.iter().map(|raw| Record {
-            raw,
+            raw: (*raw).into(),
             directory: false,
             size: Some(0),
             mtime: Some(-1),

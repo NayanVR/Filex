@@ -1,7 +1,7 @@
 //! Bounded acronym and symmetric-delete candidate dictionaries. No corpus scan.
 use crate::catalog::{
-    postings::Postings,
-    storage::{Reader, Span, Writer},
+    postings::{Postings, PostingsImage},
+    storage::{Reader, Writer},
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -17,9 +17,14 @@ pub struct FuzzyIndex {
 #[derive(Serialize, Deserialize)]
 pub struct FuzzyImage {
     keys: Vec<String>,
-    postings: (Span, Span),
+    postings: PostingsImage,
 }
 impl FuzzyIndex {
+    #[cfg(test)]
+    pub(crate) fn use_legacy_offsets(&mut self) {
+        self.postings.use_legacy_offsets();
+    }
+
     pub(crate) fn remap(&mut self, reader: &Reader) -> Result<()> {
         self.postings.remap(reader)?;
         Ok(())

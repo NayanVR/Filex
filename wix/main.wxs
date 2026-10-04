@@ -30,6 +30,9 @@
 
     <MediaTemplate EmbedCab="yes" />
 
+    <Icon Id="Filex.ico" SourceFile="$(sys.SOURCEFILEDIR)..\assets\branding\filex.ico" />
+    <Property Id="ARPPRODUCTICON" Value="Filex.ico" />
+
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="Filex">

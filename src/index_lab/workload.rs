@@ -189,7 +189,7 @@ mod tests {
     use super::*;
     #[test]
     fn observations_do_not_serialize_query_text() {
-        let index = LiteralIndex::build(["test.txt"]).unwrap();
+        let index = LiteralIndex::build_suffix(["test.txt"]).unwrap();
         let report = measure(&index, "private-query-sentinel", 0);
         let output = serde_json::to_string(&report).unwrap();
         assert!(!output.contains("private-query-sentinel"));

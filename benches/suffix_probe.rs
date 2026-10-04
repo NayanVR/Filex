@@ -9,7 +9,7 @@ fn main() {
         .unwrap_or(5000);
     let names = workload::synthetic(dirs);
     let start = Instant::now();
-    let index = LiteralIndex::build(names.iter().map(String::as_str)).unwrap();
+    let index = LiteralIndex::build_suffix(names.iter().map(String::as_str)).unwrap();
     drop(names);
     println!(
         "{}",

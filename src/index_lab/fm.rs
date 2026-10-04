@@ -125,7 +125,7 @@ mod tests {
         ];
         names.extend((0..100).map(|i| format!("report-{i}.rs")));
         for names in [vec![], vec!["a".to_owned()], names] {
-            let index = LiteralIndex::build(names.iter().map(String::as_str)).unwrap();
+            let index = LiteralIndex::build_suffix(names.iter().map(String::as_str)).unwrap();
             for fm in [
                 FmIndex::sampled(index.fm_input().0, index.name_count() + 1),
                 FmIndex::wavelet(index.fm_input().0, index.name_count() + 1),

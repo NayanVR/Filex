@@ -15,11 +15,15 @@ edit before sending a request.
 | Enumeration, record spooling and the isolated segment worker | `src/daemon/builder.rs` |
 | Immutable base plus changed records visible to a query | `src/daemon/view.rs` |
 | Ranked pages, filtering and exhaustive streams | `src/daemon/query.rs` |
-| Catalog columns, lookup validation and mapped files | `src/catalog/segment.rs`, `storage.rs` |
-| FM search, ranked distinct retrieval and bounded fuzzy matches | `src/search/` |
+| Temporary exhaustive candidate intersections | `src/search/candidates.rs`, `src/catalog/segment.rs` |
+| Catalog validation and mapped files | `src/catalog/segment.rs`, `storage.rs` |
+| Packed columns, compressed text pages and posting runs | `src/catalog/columns.rs`, `pool.rs`, `postings.rs` |
+| Compact gram-block search, legacy FM readers and bounded fuzzy matches | `src/search/` |
 | Search input, cancellation, pagination and Magic integration | `src/workspace/search.rs` |
 
-There is one production catalog representation: `Segment`. The earlier mutable
+There is one production catalog representation: `Segment`. New generations use
+the [compact layout](index-compact.md); preceding FM generations remain readable.
+The earlier mutable
 catalog, separate column prototype and DFS tree prototype have been removed.
 Alternate search representations remain under the `index-v2-lab` feature.
 
@@ -36,7 +40,7 @@ time. Enumeration preserves existing native identities where possible; a move
 does not require rewriting every descendant's path.
 
 Construction runs in a short-lived `filex-indexd` worker process. The coordinator
-spools a versioned header and JSON records into its private database directory.
+spools a versioned JSON header and binary records into its private database directory.
 The worker sorts `(file ID, file offset)` pairs, builds an immutable segment and
 syncs it. Exiting the worker releases its construction allocations, including
 allocator caches that previously remained resident in the long-lived daemon.

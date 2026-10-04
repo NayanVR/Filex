@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Filex
+Comment=Fast file explorer and instant filename search
+Exec=filex
+Icon=filex
+Terminal=false
+Categories=System;FileManager;

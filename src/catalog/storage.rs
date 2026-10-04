@@ -118,7 +118,7 @@ impl Writer {
         let data_end = self.file.stream_position()?;
         self.file.rewind()?;
         let mut header = [0; 64];
-        header[..8].copy_from_slice(b"FXSEG002");
+        header[..8].copy_from_slice(b"FXSEG004");
         header[8..16].copy_from_slice(&span.offset.to_le_bytes());
         header[16..24].copy_from_slice(&span.len.to_le_bytes());
         self.file.write_all(&header)?;
@@ -173,7 +173,10 @@ impl Reader {
             "segment checksum mismatch"
         );
         let map = Arc::new(unsafe { Mmap::map(&file)? });
-        ensure!(&map[..8] == b"FXSEG002", "unsupported segment version");
+        ensure!(
+            matches!(&map[..8], b"FXSEG002" | b"FXSEG003" | b"FXSEG004"),
+            "unsupported segment version"
+        );
         let metadata = Span {
             offset: u64::from_le_bytes(map[8..16].try_into()?),
             len: u64::from_le_bytes(map[16..24].try_into()?),
