@@ -213,7 +213,11 @@ mod windows {
             // A provider once shifted/covered the toolbar despite successful
             // SetWindow/DoPreview. Keep native content below its own HWND.
             ensure!(
-                native.rows().take(48).eq(rendered.rows().take(48)),
+                native
+                    .rows()
+                    .take(48)
+                    .zip(rendered.rows().take(48))
+                    .all(|(a, b)| a.eq(b)),
                 "native handler altered or covered the preview toolbar"
             );
             viewer.close();
