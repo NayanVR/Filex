@@ -209,7 +209,13 @@ mod windows {
             viewer.show(vec![text.clone()], 0);
             ready(&viewer, "native")?;
             std::thread::sleep(Duration::from_millis(400));
-            capture(hwnd, "native-text-preview")?;
+            let native = capture(hwnd, "native-text-preview")?;
+            // A provider once shifted/covered the toolbar despite successful
+            // SetWindow/DoPreview. Keep native content below its own HWND.
+            ensure!(
+                native.rows().take(48).eq(rendered.rows().take(48)),
+                "native handler altered or covered the preview toolbar"
+            );
             viewer.close();
             wait(|| unsafe { FindWindowW(w!("FilexIsolatedPreview"), None).is_err() })?;
         }

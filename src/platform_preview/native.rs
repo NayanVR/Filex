@@ -292,7 +292,9 @@ struct Viewer {
     previous: Host,
     next: Host,
     _open: Host,
+    surface: Host,
     host: Host,
+    surface_size: (i32, i32),
     paths: Vec<PathBuf>,
     selected: usize,
     request_id: u64,
@@ -334,6 +336,22 @@ impl Viewer {
                 None,
                 None,
             )?);
+            // Handlers receive a dedicated child HWND with a zero-origin
+            // client rect. Their content can never paint over our toolbar.
+            let surface = Host(CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("FilexIsolatedPreview"),
+                None,
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                0,
+                48,
+                1,
+                1,
+                Some(host.0),
+                None,
+                Some(instance),
+                None,
+            )?);
             let button = |label: PCWSTR, x, width, id: usize| -> Result<Host> {
                 Ok(Host(CreateWindowExW(
                     WINDOW_EX_STYLE::default(),
@@ -359,6 +377,8 @@ impl Viewer {
                 previous,
                 next,
                 _open: open,
+                surface,
+                surface_size: (1, 1),
                 paths: Vec::new(),
                 selected: 0,
                 request_id: 0,
@@ -366,15 +386,24 @@ impl Viewer {
             })
         }
     }
-    fn bounds(&self) -> Result<RECT> {
-        let mut rect = RECT::default();
+    fn bounds(&mut self) -> Result<RECT> {
+        let mut parent = RECT::default();
         unsafe {
-            GetClientRect(self.host.0, &mut rect)?;
+            GetClientRect(self.host.0, &mut parent)?;
         }
-        rect.top = 48;
-        rect.right = rect.right.max(1);
-        rect.bottom = rect.bottom.max(49);
-        Ok(rect)
+        let size = (parent.right.max(1), (parent.bottom - 48).max(1));
+        if size != self.surface_size {
+            self.surface_size = size;
+            unsafe {
+                MoveWindow(self.surface.0, 0, 48, size.0, size.1, true)?;
+            }
+        }
+        Ok(RECT {
+            left: 0,
+            top: 0,
+            right: size.0,
+            bottom: size.1,
+        })
     }
     fn present(&mut self, paths: Vec<Vec<u16>>, selected: usize, request_id: u64) -> Result<()> {
         self.request_id = request_id;
@@ -419,7 +448,7 @@ impl Viewer {
                 Err(_) => self.missing(path, &rect)?,
             }
         } else {
-            match load_handler(path, self.host.0, &rect) {
+            match load_handler(path, self.surface.0, &rect) {
                 Ok(handler) => Content::Native(handler),
                 Err(_) => match image_fallback(path) {
                     Ok(image) => Content::Image(image),
@@ -460,7 +489,7 @@ impl Viewer {
                 rect.top + 30,
                 (rect.right - 40).max(1),
                 (rect.bottom - rect.top - 60).max(1),
-                Some(self.host.0),
+                Some(self.surface.0),
                 None,
                 None,
                 None,
@@ -501,7 +530,7 @@ impl Viewer {
                 )?;
             },
             Some(Content::Image(image)) => unsafe {
-                let dc = GetDC(Some(self.host.0));
+                let dc = GetDC(Some(self.surface.0));
                 if dc.is_invalid() {
                     return Ok(());
                 }
@@ -543,7 +572,7 @@ impl Viewer {
                     DIB_RGB_COLORS,
                     SRCCOPY,
                 );
-                ReleaseDC(Some(self.host.0), dc);
+                ReleaseDC(Some(self.surface.0), dc);
             },
             None => {}
         }
