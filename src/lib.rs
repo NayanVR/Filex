@@ -27,3 +27,6 @@ pub mod update;
 
 pub mod daemon;
 pub mod ingest;
+
+#[cfg(feature = "app")]
+pub mod platform_preview;

@@ -48,7 +48,7 @@ impl Workspace {
                     move |err| {
                         let mut app = app.clone();
                         let _ = workspace.update(&mut app, |this, cx| {
-                            this.notice = Some(format!("Couldn’t open Quick Look: {err}").into());
+                            this.notice = Some(format!("Couldn’t open preview: {err}").into());
                             cx.notify();
                         });
                     },
@@ -60,7 +60,7 @@ impl Workspace {
             Ok(())
         })();
         if let Err(err) = result {
-            self.notice = Some(format!("Couldn’t open Quick Look: {err}").into());
+            self.notice = Some(format!("Couldn’t open preview: {err}").into());
         }
         cx.notify();
     }

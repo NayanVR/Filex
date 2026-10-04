@@ -83,6 +83,29 @@ pub fn decode_thumbnail(path: &Path) -> Result<Arc<RenderImage>> {
     decoder_result(|| decode_image(path))
 }
 
+/// Production routing. Pure Rust decoding remains separately measurable.
+pub fn load_thumbnail(path: &Path) -> Result<Arc<RenderImage>> {
+    #[cfg(windows)]
+    {
+        use filex::platform_preview::{policy, thumbnail};
+        let dimensions = if matches!(policy::extension(path).as_str(), "jpg" | "jpeg") {
+            image::image_dimensions(path).ok()
+        } else {
+            None
+        };
+        if policy::shell_first(path, dimensions) {
+            match thumbnail(path) {
+                Ok(pixels) => {
+                    return Ok(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])));
+                }
+                Err(error) if !policy::rust_image(path) => return Err(error),
+                Err(_) => {} // A failed native large-image request can use Rust's limits.
+            }
+        }
+    }
+    decode_thumbnail(path)
+}
+
 fn decoder_result<T>(decode: impl FnOnce() -> Result<T> + std::panic::UnwindSafe) -> Result<T> {
     std::panic::catch_unwind(decode).map_err(|_| anyhow::anyhow!("thumbnail decoder panicked"))?
 }

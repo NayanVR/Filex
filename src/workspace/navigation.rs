@@ -69,7 +69,7 @@ impl Workspace {
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move { thumbnails::decode_thumbnail(&path) }
+                    async move { thumbnails::load_thumbnail(&path) }
                 })
                 .await;
             this.update(cx, |this, cx| {

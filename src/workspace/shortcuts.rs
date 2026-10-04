@@ -212,10 +212,10 @@ pub fn catalog() -> Vec<Shortcut> {
             true,
             TogglePreview
         ),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         entry!(
             "quick_look",
-            "Quick Look selected files",
+            "Preview selected files",
             "View",
             "space",
             &[],
@@ -515,7 +515,7 @@ pub fn hint(id: &str, overrides: &BTreeMap<String, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn quick_look_space_is_only_bound_outside_text_editing_and_settings() {
         let overrides = BTreeMap::new();
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(label("space"), "Space");
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn quick_look_can_be_disabled_or_remapped_without_taking_text_keys() {
         let mut overrides = BTreeMap::from([("quick_look".into(), String::new())]);

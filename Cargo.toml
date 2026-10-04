@@ -11,7 +11,17 @@ index-v2-lab = []
 # The GPUI application. The index library builds without it, so indexing
 # logic can be cross-checked/tested for other platforms without pulling in
 # UI toolchains (cargo check --no-default-features --target ...).
-app = ["dep:gpui", "dep:futures", "dep:image", "dep:resvg", "dep:ureq", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-quick-look-ui", "dep:raw-window-handle", "updater"]
+app = [
+  "dep:gpui", "dep:futures", "dep:image", "dep:resvg", "dep:ureq",
+  "dep:objc2", "dep:objc2-app-kit", "dep:objc2-quick-look-ui",
+  "dep:raw-window-handle", "dep:windows-core", "updater",
+  "windows/Win32_Graphics_Gdi", "windows/Win32_System_Com",
+  "windows/Win32_System_Com_StructuredStorage", "windows/Win32_System_Ole",
+  "windows/Win32_System_JobObjects", "windows/Win32_System_SystemServices",
+  "windows/Win32_System_LibraryLoader", "windows/Win32_System_Threading", "windows/Win32_UI_Shell",
+  "windows/Win32_UI_Shell_PropertiesSystem", "windows/Win32_UI_WindowsAndMessaging",
+  "windows/Win32_UI_Input_KeyboardAndMouse",
+]
 # Update downloader for the UI. The per-user daemon release is built
 # without default features and has no update or telemetry transport.
 updater = ["dep:ureq"]
@@ -35,6 +45,10 @@ required-features = ["app"]
 
 [[example]]
 name = "quick_look_smoke"
+required-features = ["app"]
+
+[[example]]
+name = "windows_preview_smoke"
 required-features = ["app"]
 
 [[example]]
@@ -159,6 +173,8 @@ libc = "0.2"
 trash = "5.2.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+windows-core = { version = "0.62", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 # Recycle Bin with list/restore (undo) via os_limited.
 trash = "5.2.6"
 windows = { version = "0.62", features = [

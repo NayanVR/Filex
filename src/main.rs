@@ -11,5 +11,9 @@ mod ui;
 mod workspace;
 
 fn main() {
+    #[cfg(windows)]
+    if filex::platform_preview::dispatch_helper() {
+        return;
+    }
     workspace::run();
 }

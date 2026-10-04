@@ -56,6 +56,12 @@ jobs:
         run: cargo build --locked
       - name: Run application regression tests
         run: cargo test --locked --bin filex
+      - name: Test preview routing and bounded protocol
+        run: cargo test --locked --lib platform_preview
+      - name: Run production Windows preview lifecycle and fault checks
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 5
+        run: cargo run --locked --example windows_preview_smoke
       - name: Compile native preview lifecycle check
         if: matrix.os == 'macos-latest'
         run: cargo check --locked --example quick_look_smoke

@@ -15,7 +15,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let kind = FileKind::of(name, is_dir);
-        if kind == FileKind::Image && self.settings.read(cx).settings().thumbnails_enabled {
+        let thumbnail_candidate = kind == FileKind::Image
+            || (cfg!(windows) && !is_dir && filex::platform_preview::policy::shell_candidate(path));
+        if thumbnail_candidate && self.settings.read(cx).settings().thumbnails_enabled {
             match self.thumbnails.get(path) {
                 Some(ThumbnailState::Ready(imagery)) => {
                     return ui::icon::thumbnail_icon(imagery.clone(), edge);
