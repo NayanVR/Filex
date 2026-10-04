@@ -35,6 +35,67 @@ mod windows {
     fn ready(preview: &Preview, kind: &str) -> Result<()> {
         wait(|| preview.ready_kind().as_deref() == Some(kind))
     }
+    fn capture(hwnd: HWND, name: &str) -> Result<image::RgbaImage> {
+        use ::windows::Win32::Graphics::Gdi::*;
+        unsafe {
+            let mut rect = RECT::default();
+            GetClientRect(hwnd, &mut rect)?;
+            let source = GetDC(Some(hwnd));
+            let target = CreateCompatibleDC(Some(source));
+            let bitmap = CreateCompatibleBitmap(source, rect.right, rect.bottom);
+            let old = SelectObject(target, bitmap.into());
+            let copied = BitBlt(
+                target,
+                0,
+                0,
+                rect.right,
+                rect.bottom,
+                Some(source),
+                0,
+                0,
+                SRCCOPY,
+            );
+            SelectObject(target, old);
+            let mut pixels = vec![0; (rect.right * rect.bottom * 4) as usize];
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: rect.right,
+                    biHeight: -rect.bottom,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let rows = GetDIBits(
+                source,
+                bitmap,
+                0,
+                rect.bottom as u32,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(target);
+            ReleaseDC(Some(hwnd), source);
+            copied?;
+            ensure!(rows == rect.bottom, "preview screenshot failed");
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+                pixel[3] = 255;
+            }
+            let image = image::RgbaImage::from_raw(rect.right as u32, rect.bottom as u32, pixels)
+                .ok_or_else(|| anyhow::anyhow!("invalid screenshot dimensions"))?;
+            if let Some(output) = std::env::var_os("FILEX_PREVIEW_SMOKE_OUTPUT") {
+                std::fs::create_dir_all(&output)?;
+                image.save(PathBuf::from(output).join(format!("{name}.png")))?;
+            }
+            Ok(image)
+        }
+    }
     fn fixture() -> Result<(tempfile::TempDir, PathBuf)> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("unicode café 測試.png");
@@ -76,11 +137,11 @@ mod windows {
             );
             let (viewer, mut errors) = Preview::new(0)?;
             viewer.show(vec![path], 0);
-            wait(|| !viewer.is_visible())?;
-            ensure!(
-                errors.try_recv().is_ok(),
-                "preview fault did not reach client"
-            );
+            let mut reported = false;
+            wait(|| {
+                reported |= errors.try_recv().is_ok();
+                !viewer.is_visible() && reported
+            })?;
             println!(
                 "fault recovery passed: {}",
                 std::env::var("FILEX_PREVIEW_SMOKE_FAULT")?
@@ -135,12 +196,20 @@ mod windows {
                 MoveWindow(hwnd, 80, 80, 700, 500, true)?;
             }
             std::thread::sleep(Duration::from_millis(150));
+            let rendered = capture(hwnd, "image-preview")?;
+            let center = rendered.get_pixel(rendered.width() / 2, rendered.height() / 2);
+            ensure!(
+                center.0 == [40, 100, 220, 255],
+                "image fallback did not paint expected pixels: {center:?}"
+            );
             for _ in 0..100 {
                 viewer.show(vec![unknown.clone()], 0);
             }
             ready(&viewer, "unavailable")?;
             viewer.show(vec![text.clone()], 0);
             ready(&viewer, "native")?;
+            std::thread::sleep(Duration::from_millis(400));
+            capture(hwnd, "native-text-preview")?;
             viewer.close();
             wait(|| unsafe { FindWindowW(w!("FilexIsolatedPreview"), None).is_err() })?;
         }

@@ -6,7 +6,7 @@ use std::{
     mem::size_of,
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 use windows::{
@@ -585,26 +585,31 @@ pub fn run(mode: &str) -> Result<()> {
     let first: Request = protocol::read(&mut std::io::stdin().lock())?;
     first.validate()?; // parent has attached the job before this point
     let _com = Com::new()?;
-    let incoming = Arc::new(Mutex::new(Incoming {
-        latest: Some(first),
-        stopped: false,
-    }));
+    let incoming = Arc::new((
+        Mutex::new(Incoming {
+            latest: Some(first),
+            stopped: false,
+        }),
+        Condvar::new(),
+    ));
     let reader = incoming.clone();
     std::thread::Builder::new()
         .name("preview-command-reader".into())
         .spawn(move || {
             loop {
                 let request: Result<Request> = protocol::read(&mut std::io::stdin().lock());
-                let Ok(mut state) = reader.lock() else {
+                let Ok(mut state) = reader.0.lock() else {
                     return;
                 };
                 match request {
                     Ok(request) if request.validate().is_ok() => state.latest = Some(request),
                     _ => {
                         state.stopped = true;
+                        reader.1.notify_one();
                         return;
                     }
                 }
+                reader.1.notify_one();
             }
         })?;
     let mut viewer: Option<Viewer> = None;
@@ -612,6 +617,7 @@ pub fn run(mode: &str) -> Result<()> {
     loop {
         let (request, stopped) = {
             let mut state = incoming
+                .0
                 .lock()
                 .map_err(|_| anyhow::anyhow!("preview command reader failed"))?;
             (state.latest.take(), state.stopped)
@@ -675,7 +681,19 @@ pub fn run(mode: &str) -> Result<()> {
                 heartbeat = Instant::now();
             }
         }
-        std::thread::sleep(Duration::from_millis(10));
+        // Wake immediately for a new file; polling used to add up to 10 ms
+        // to every warm thumbnail request. Idle thumbnail workers need only
+        // occasional message pumping, while the viewer services resize input.
+        let state = incoming
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preview command reader failed"))?;
+        if state.latest.is_none() && !state.stopped {
+            let interval = if viewer.is_some() { 16 } else { 250 };
+            let _ = incoming
+                .1
+                .wait_timeout(state, Duration::from_millis(interval));
+        }
     }
     drop(viewer); // unload native content before reporting a normal close
     if mode == "--filex-preview-helper" {
