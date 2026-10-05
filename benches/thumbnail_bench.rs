@@ -12,7 +12,7 @@ fn previous_decode(path: &Path) -> Arc<gpui::RenderImage> {
         .unwrap()
         .thumbnail(thumbnails::THUMBNAIL_EDGE, thumbnails::THUMBNAIL_EDGE);
     let mut rgba = decoded.to_rgba8();
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Arc::new(gpui::RenderImage::new(vec![image::Frame::new(rgba)]))

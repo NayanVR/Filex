@@ -304,10 +304,9 @@ fn parse_time_bound(value: &str, now: i64) -> Option<Bound<i64>> {
 fn parse_relative_age(value: &str, now: i64) -> Option<Bound<i64>> {
     let (younger, rest) = if let Some(rest) = value.strip_prefix('<') {
         (true, rest) // age < N ⇒ modified more recently than now-N
-    } else if let Some(rest) = value.strip_prefix('>') {
-        (false, rest) // age > N ⇒ modified before now-N
     } else {
-        return None;
+        let rest = value.strip_prefix('>')?;
+        (false, rest) // age > N ⇒ modified before now-N
     };
     let (num, unit) = rest.split_at(rest.find(|c: char| c.is_ascii_alphabetic())?);
     let n: i64 = num.trim().parse().ok()?;

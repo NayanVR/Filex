@@ -49,7 +49,7 @@ fn decode(backend: &str, path: &Path, cache_only: bool) -> Result<Arc<gpui::Rend
 fn save_thumbnail(image: &gpui::RenderImage, path: &Path) -> Result<()> {
     let size = image.size(0);
     let mut bytes = image.as_bytes(0).context("no pixels")?.to_vec();
-    for pixel in bytes.chunks_exact_mut(4) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     image::save_buffer(

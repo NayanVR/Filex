@@ -609,9 +609,7 @@ impl Workspace {
     /// be un-ticked one row at a time.
     pub(super) fn set_all_magic_ops(&mut self, checked: bool, cx: &mut Context<Self>) {
         if let Some(state) = self.magic.as_mut() {
-            for flag in &mut state.checked {
-                *flag = checked;
-            }
+            state.checked.fill(checked);
             cx.notify();
         }
     }

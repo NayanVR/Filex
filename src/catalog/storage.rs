@@ -69,7 +69,7 @@ impl<T: Pod> Packed<T> {
             .checked_add(span.len)
             .ok_or_else(|| anyhow::anyhow!("span overflow"))?;
         ensure!(
-            span.offset >= 64 && end <= reader.data_end && span.offset % 64 == 0,
+            span.offset >= 64 && end <= reader.data_end && span.offset.is_multiple_of(64),
             "invalid segment span"
         );
         let bytes = &reader.map[span.offset as usize..end as usize];

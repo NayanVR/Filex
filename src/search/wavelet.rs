@@ -260,7 +260,7 @@ impl RankBits {
             total += word.count_ones();
         }
         ensure!(total as usize <= bits.len, "invalid bitvector count");
-        if bits.words.len() % 8 == 0 {
+        if bits.words.len().is_multiple_of(8) {
             ensure!(
                 bits.ranks[bits.words.len() / 8] == total,
                 "invalid final rank"

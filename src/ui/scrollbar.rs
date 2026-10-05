@@ -224,10 +224,14 @@ impl Element for Scrollbar {
         cx: &mut App,
     ) -> (LayoutId, ()) {
         // Fill the list's viewport without disturbing its layout.
-        let mut style = Style::default();
-        style.position = Position::Absolute;
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        let style = Style {
+            position: Position::Absolute,
+            size: gpui::Size {
+                width: relative(1.).into(),
+                height: relative(1.).into(),
+            },
+            ..Default::default()
+        };
         (window.request_layout(style, [], cx), ())
     }
 

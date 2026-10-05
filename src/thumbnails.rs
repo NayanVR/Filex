@@ -131,7 +131,7 @@ fn decode_image(path: &Path) -> Result<Arc<RenderImage>> {
         .thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
     let mut rgba = decoded.to_rgba8();
     // gpui's RenderImage is BGRA in an RGBA container: swap channels.
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let frame = image::Frame::new(rgba);
@@ -228,8 +228,10 @@ mod tests {
         assert_eq!(bytes.len(), (THUMBNAIL_EDGE * THUMBNAIL_EDGE * 4) as usize);
         assert!(
             bytes
-                .chunks_exact(4)
-                .all(|pixel| pixel == [30, 20, 10, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [30, 20, 10, 255])
         );
     }
 }

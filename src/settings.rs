@@ -304,12 +304,14 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("nested").join("settings.json");
-        let mut settings = Settings::default();
-        settings.roots = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")];
+        let mut settings = Settings {
+            roots: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            show_hidden_files: true,
+            ..Default::default()
+        };
         settings
             .folder_icons
             .insert(PathBuf::from("/tmp/holiday"), FolderIcon::Pictures);
-        settings.show_hidden_files = true;
         settings.sort.by = SortBy::Modified;
         settings.sort.ascending = false;
         settings

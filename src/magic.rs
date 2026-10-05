@@ -1184,7 +1184,12 @@ mod tests {
 
         let command = cmd("move notes to Downloads").unwrap();
         let from = cwd.path().join("src/notes.md");
-        let plan = build(&command, &[from.clone()], &ctx(cwd.path(), &dirs)).unwrap();
+        let plan = build(
+            &command,
+            std::slice::from_ref(&from),
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
 
         assert_eq!(
             plan.ops,

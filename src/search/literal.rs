@@ -778,7 +778,7 @@ mod tests {
             let actual: Vec<_> = index
                 .search(case["query"].as_str().unwrap(), 100)
                 .into_iter()
-                .map(|(_, id)| index.name(id).to_owned())
+                .map(|(_, id)| index.name(id).into_owned())
                 .collect();
             let expected: Vec<_> = case["expected"]
                 .as_array()
