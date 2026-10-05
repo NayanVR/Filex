@@ -57,7 +57,7 @@ impl Workspace {
     /// silent (retried next launch).
     #[cfg(feature = "updater")]
     pub(super) fn spawn_update_check(&self, cx: &mut Context<Self>) {
-        let url = Self::UPDATE_MANIFEST_URL;
+        let url = platform::UPDATE_MANIFEST_URL;
         if url.is_empty() {
             return;
         }
@@ -78,7 +78,7 @@ impl Workspace {
                 this.update(cx, |this, cx| {
                     this.update_status = filex::update::UpdateStatus::Available {
                         version,
-                        affordance: platform_affordance(),
+                        affordance: platform::update_affordance(),
                     };
                     cx.notify();
                 })

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
     KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy,
-    SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowAppearance, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, size, uniform_list,
+    SharedString, UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, size, uniform_list,
 };
 
 use filex::drives::Drive;
@@ -28,6 +28,7 @@ use crate::ui;
 use crate::ui::search_input::{self, SearchInput, SearchInputEvent};
 use crate::ui::theme::{ActiveTheme as _, Theme};
 use filex::listing::FileKind;
+use platform::{open_with_default_app, open_with_dialog, open_with_supported};
 
 actions!(
     filex,
@@ -133,101 +134,6 @@ fn fetch_preview_meta(path: &Path) -> PreviewMeta {
         modified,
         created,
         dimensions,
-    }
-}
-
-/// Open a file with the platform's default application. Detached — the
-/// launched app owns its own lifetime.
-fn open_with_default_app(path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = std::process::Command::new("open");
-        command.arg(path);
-        command
-    };
-    #[cfg(target_os = "linux")]
-    let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(path);
-        command
-    };
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        use std::os::windows::process::CommandExt as _;
-        // `start` is a cmd builtin; the empty string fills the window
-        // title slot so paths with spaces aren't parsed as one.
-        // CREATE_NO_WINDOW stops a console flashing on every open.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let mut command = std::process::Command::new("cmd");
-        command
-            .args(["/C", "start", ""])
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW);
-        command
-    };
-    command.spawn().map(drop)
-}
-
-/// Whether this platform can show an OS "Open with…" chooser. macOS has no
-/// CLI entry point (it needs LaunchServices), so the entry is hidden there
-/// rather than offering an action that can't work.
-fn open_with_supported() -> bool {
-    !cfg!(target_os = "macos")
-}
-
-/// Show the platform's native "Open with…" application chooser for
-/// `path`, so the user can pick a program other than the default.
-/// Detached — the chosen app owns its own lifetime.
-fn open_with_dialog(path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt as _;
-        // The Shell's classic "How do you want to open this file?" dialog.
-        // CREATE_NO_WINDOW keeps rundll32 from flashing a console.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("rundll32.exe")
-            .arg("shell32.dll,OpenAs_RunDLL")
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map(drop)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // `mimeopen -d` (perl-file-mimeinfo) prompts for the application;
-        // plain `xdg-open` would silently use the default instead.
-        std::process::Command::new("mimeopen")
-            .arg("-d")
-            .arg(path)
-            .spawn()
-            .map(drop)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = path;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Open with… is not yet available on macOS",
-        ))
-    }
-}
-
-/// The update affordance for this platform's UI banner. macOS copies a
-/// `brew` command; Linux opens the releases page to re-download the
-/// tarball. Windows opens the release page for its per-machine MSI.
-#[cfg(feature = "updater")]
-fn platform_affordance() -> filex::update::UpdateAffordance {
-    #[cfg(target_os = "macos")]
-    {
-        filex::update::UpdateAffordance::RunCommand("brew upgrade filex".to_string())
-    }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        // TODO(block 5): point at the real releases URL once the repo is
-        // published.
-        filex::update::UpdateAffordance::OpenUrl(
-            "https://github.com/NayanVR/filex/releases/latest".to_string(),
-        )
     }
 }
 
@@ -785,6 +691,7 @@ mod file_ops;
 mod input;
 mod location;
 mod navigation;
+mod platform;
 mod preferences;
 mod quick_look;
 mod render;
@@ -989,21 +896,6 @@ impl Workspace {
         this.spawn_update_check(cx);
         this
     }
-
-    /// Manifest URL for the UI-side "is there a newer version?" check.
-    /// Per-OS, since each platform publishes its own manifest; the
-    /// `latest/download/…` path always resolves to the newest release.
-    #[cfg(all(target_os = "macos", feature = "updater"))]
-    const UPDATE_MANIFEST_URL: &'static str =
-        "https://github.com/NayanVR/filex/releases/latest/download/filex-macos.json";
-
-    #[cfg(all(target_os = "windows", feature = "updater"))]
-    const UPDATE_MANIFEST_URL: &'static str =
-        "https://github.com/NayanVR/filex/releases/latest/download/filex-windows.json";
-
-    #[cfg(all(target_os = "linux", feature = "updater"))]
-    const UPDATE_MANIFEST_URL: &'static str =
-        "https://github.com/NayanVR/filex/releases/latest/download/filex-linux.json";
 }
 
 pub fn run() {
@@ -1051,25 +943,7 @@ pub fn run() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
-            // macOS: unified titlebar — the system bar goes transparent
-            // and the traffic lights inset into our top bar, which pads
-            // left to clear them. Elsewhere the native titlebar stays.
-            #[cfg(target_os = "macos")]
-            let titlebar = TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                // The tab bar is now the topmost bar, so the inset traffic
-                // lights are centered against its height, not the nav bar's.
-                traffic_light_position: Some(gpui::point(
-                    px(12.),
-                    px((ui::tabs::TAB_BAR_HEIGHT - 12.) / 2.),
-                )),
-            };
-            #[cfg(not(target_os = "macos"))]
-            let titlebar = TitlebarOptions {
-                title: Some("filex".into()),
-                ..Default::default()
-            };
+            let titlebar = platform::titlebar_options();
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
