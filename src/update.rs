@@ -203,12 +203,7 @@ fn decode_public_key(public_key_hex: &str) -> Result<VerifyingKey, UpdateError> 
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
-    }
-    s
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn hex_decode(s: &str, field: &'static str) -> Result<Vec<u8>, UpdateError> {

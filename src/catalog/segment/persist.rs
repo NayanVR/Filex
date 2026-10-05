@@ -214,7 +214,9 @@ impl Segment {
                 if self.parents.get(at) == 0 {
                     break;
                 }
-                let parent = self.slot(self.parents.get(at)).unwrap();
+                let parent = self
+                    .slot(self.parents.get(at))
+                    .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
                 ensure!(
                     self.root_ids.get(parent) == self.root_ids.get(at),
                     "parent crosses roots"
