@@ -5,5 +5,8 @@
 <key>ProgramArguments</key><array><string>/Applications/Filex.app/Contents/MacOS/filex-indexd</string><string>--user</string></array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<!-- Stop sends SIGTERM: the daemon saves snapshots and exits 0 (so KeepAlive
+     leaves it stopped), then launchd escalates to SIGKILL after this many seconds. -->
+<key>ExitTimeOut</key><integer>20</integer>
 <key>ProcessType</key><string>Background</string>
 </dict></plist>

@@ -6,6 +6,10 @@ ExecStart=/usr/local/bin/filex-indexd --user
 Restart=on-failure
 RestartSec=2
 Nice=5
+# Stop sends SIGTERM: the daemon saves snapshots and exits 0 (no restart),
+# escalated to SIGKILL only after this timeout.
+KillSignal=SIGTERM
+TimeoutStopSec=20
 
 [Install]
 WantedBy=default.target

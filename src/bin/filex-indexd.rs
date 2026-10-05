@@ -50,9 +50,13 @@ fn main() -> anyhow::Result<()> {
     }
     let _log = filex::logging::init_in("filex-indexd", None);
     filex::telemetry::install_panic_hook("filex-indexd");
-    filex::daemon::server::run(
-        &directory,
-        roots,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // launchd/systemd stop, logout and upgrades all send SIGTERM. Registering
+    // a handler also replaces an ignored disposition inherited across exec,
+    // which would otherwise leave SIGKILL — and a WAL replay — as the only stop.
+    #[cfg(unix)]
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, stop.clone())?;
+    }
+    filex::daemon::server::run(&directory, roots, stop)
 }

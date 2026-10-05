@@ -155,6 +155,10 @@ tempfile = "3.27.0"
 [build-dependencies]
 winresource = "0.1.31"
 
+[target.'cfg(unix)'.dependencies]
+# filex-indexd's SIGTERM/SIGINT -> stop flag (launchd/systemd clean stop).
+signal-hook = "0.3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native Quick Look viewer; never linked into the index daemon.
 objc2 = { version = "0.6.4", optional = true }

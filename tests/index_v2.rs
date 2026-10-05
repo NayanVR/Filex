@@ -1063,3 +1063,54 @@ fn magic_metadata_skips_non_candidates_and_cancellation_never_completes() {
         .is_err()
     );
 }
+
+/// FIL-22: an inherited `SIG_IGN` (POSIX keeps ignored dispositions across
+/// `exec`) must not stop launchd/systemd from shutting the daemon down
+/// cleanly — it has to exit 0 and remove its endpoint like the in-process stop.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn daemon_shuts_down_cleanly_on_sigterm_and_sigint_even_if_inherited_ignored() {
+    use std::os::unix::process::CommandExt;
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("files");
+        let data = dir.path().join("index");
+        std::fs::create_dir(&root).unwrap();
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_filex-indexd"));
+        command
+            .arg("--data-dir")
+            .arg(&data)
+            .arg(&root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // SAFETY: signal() is async-signal-safe, as pre_exec requires.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        wait_until(|| Client::connect(&data).is_ok());
+        assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            status.is_some_and(|s| s.success()),
+            "signal {signal}: {status:?}"
+        );
+        assert!(!data.join("endpoint.json").exists());
+    }
+}
