@@ -30,7 +30,7 @@ fn bench_phrases(c: &mut Criterion) {
     // probes the full 4-word window before falling through to text.
     group.bench_function("expand_plain", |b| {
         b.iter(|| {
-            black_box(filex::phrases::expand(
+            black_box(filex::search::phrases::expand(
                 black_box("quarterly earnings deck"),
                 NOW,
             ))
@@ -39,7 +39,7 @@ fn bench_phrases(c: &mut Criterion) {
 
     group.bench_function("expand_matching", |b| {
         b.iter(|| {
-            black_box(filex::phrases::expand(
+            black_box(filex::search::phrases::expand(
                 black_box("photos from last week"),
                 NOW,
             ))
@@ -49,7 +49,7 @@ fn bench_phrases(c: &mut Criterion) {
     // The four-word comparative that motivated widening the window.
     group.bench_function("expand_comparative", |b| {
         b.iter(|| {
-            black_box(filex::phrases::expand(
+            black_box(filex::search::phrases::expand(
                 black_box("screenshots older than 30 days"),
                 NOW,
             ))

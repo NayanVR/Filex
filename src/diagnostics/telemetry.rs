@@ -2,7 +2,7 @@
 //!
 //! A panic becomes a [`CrashReport`], **scrubbed** of path-shaped data,
 //! written to a local queue directory. A later launch drains the queue to
-//! Sentry *only with consent* (see [`crate::observability`]).
+//! Sentry *only with consent* (see [`crate::diagnostics::observability`]).
 //!
 //! The pure, SDK-free core: report model, [`scrub`] redactor, panic-hook
 //! capture, queue read/write/prune/drain. No SDK, no UI, no network of its

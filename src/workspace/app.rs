@@ -3,8 +3,8 @@
 use super::*;
 
 pub fn run() {
-    let _logging_guard = filex::logging::init("filex");
-    filex::telemetry::install_panic_hook("filex");
+    let _logging_guard = filex::diagnostics::logging::init("filex");
+    filex::diagnostics::telemetry::install_panic_hook("filex");
     // Sentry (UI process only; on-by-default, opt-out). The
     // `crash_reports` setting is consent and gates the whole integration,
     // so read it from disk before the app exists. The returned guard
@@ -19,7 +19,7 @@ pub fn run() {
                 filex::settings::Settings::load(&file, legacy.as_deref()).ok()
             })
             .is_some_and(|settings| settings.crash_reports);
-        filex::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
+        filex::diagnostics::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
     };
     // A startup line at the default level, so a blank log file means "not
     // writing", not "nothing happened". Names the log directory, and

@@ -9,8 +9,8 @@ use super::{
     postings::{Postings, PostingsImage},
     storage::{Packed, Reader, Span, Writer},
 };
+use crate::search::filter::{Filter, ItemMeta};
 use crate::search::literal::{LiteralImage, LiteralIndex};
-use crate::search_filter::{Filter, ItemMeta};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -532,8 +532,8 @@ fn coarse_matches(key: &str, filter: &Filter) -> bool {
         Filter::Tag(_) => false,
     }
 }
-fn overlaps<T: PartialOrd + Copy>(bound: crate::search_filter::Bound<T>, lo: T, hi: T) -> bool {
-    use crate::search_filter::Bound::*;
+fn overlaps<T: PartialOrd + Copy>(bound: crate::search::filter::Bound<T>, lo: T, hi: T) -> bool {
+    use crate::search::filter::Bound::*;
     match bound {
         Lt(n) => lo < n,
         Le(n) => lo <= n,

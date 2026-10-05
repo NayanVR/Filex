@@ -253,7 +253,7 @@ fn exhaustive_never_includes_fuzzy() {
 
 #[test]
 fn paging_filters_overlay_tombstones_and_cancellation() {
-    use filex::{daemon::view::Overlay, search_filter::Filter};
+    use filex::{daemon::view::Overlay, search::filter::Filter};
     let roots = vec![Root {
         id: 1,
         path: "/test".into(),
@@ -871,7 +871,7 @@ fn magic_literal_postings_include_renames_and_keep_complete_matches() {
 fn magic_indexed_predicates_match_full_scan_with_overlay_changes() {
     use filex::daemon::view::Overlay;
     use filex::listing::FileKind;
-    use filex::search_filter::{Bound, Filter, ItemMeta};
+    use filex::search::filter::{Bound, Filter, ItemMeta};
     let roots = vec![Root {
         id: 1,
         path: "/test".into(),
@@ -996,7 +996,7 @@ fn magic_indexed_predicates_match_full_scan_with_overlay_changes() {
 
 #[test]
 fn magic_metadata_skips_non_candidates_and_cancellation_never_completes() {
-    use filex::search_filter::{Bound, Filter};
+    use filex::search::filter::{Bound, Filter};
     let roots = vec![Root {
         id: 1,
         path: "/test".into(),

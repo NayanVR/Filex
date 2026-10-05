@@ -15,7 +15,7 @@ impl Workspace {
                 let Ok(roots) = this.update(cx, |this, _| this.roots.len()) else {
                     break;
                 };
-                filex::observability::record_resource_sample(0, roots);
+                filex::diagnostics::observability::record_resource_sample(0, roots);
             }
         })
         .detach();
@@ -198,19 +198,19 @@ impl Workspace {
     /// off-thread; each scrubbed report is captured and deleted on success,
     /// failures stay queued for next launch (Phase 2c). Sentry is the only
     /// transport, so without the `observability` feature this is a no-op and
-    /// the durable queue simply caps at [`filex::telemetry::QUEUE_CAP`].
+    /// the durable queue simply caps at [`filex::diagnostics::telemetry::QUEUE_CAP`].
     pub(super) fn spawn_crash_upload(&self, cx: &mut Context<Self>) {
         if !self.settings.read(cx).settings().crash_reports {
             return;
         }
         #[cfg(feature = "observability")]
         {
-            let Some(dir) = filex::telemetry::default_queue_dir() else {
+            let Some(dir) = filex::diagnostics::telemetry::default_queue_dir() else {
                 return; // no data dir
             };
             cx.background_executor()
                 .spawn(async move {
-                    let sent = filex::observability::drain_crashes_to_sentry(&dir);
+                    let sent = filex::diagnostics::observability::drain_crashes_to_sentry(&dir);
                     if sent > 0 {
                         tracing::info!("sent {sent} crash report(s) to Sentry");
                     }

@@ -54,11 +54,11 @@ impl Workspace {
             Some(state) => state.command.selection.source.clone(),
             None => self.query.clone(),
         };
-        let tokens = filex::search_filter::filter_tokens(&source, now);
-        let residual = filex::search_filter::parse_query(&source, now).text;
+        let tokens = filex::search::filter::filter_tokens(&source, now);
+        let residual = filex::search::filter::parse_query(&source, now).text;
         let phrases = match &self.magic {
-            Some(_) => filex::phrases::expand_as_description(&residual, now).phrases,
-            None => filex::phrases::expand(&residual, now).phrases,
+            Some(_) => filex::search::phrases::expand_as_description(&residual, now).phrases,
+            None => filex::search::phrases::expand(&residual, now).phrases,
         };
         if tokens.is_empty() && phrases.is_empty() {
             return None;
@@ -95,7 +95,7 @@ impl Workspace {
         // words the user typed — and clicking removes those words.
         for (i, phrase) in phrases.into_iter().enumerate() {
             for (j, filter) in phrase.filters.iter().enumerate() {
-                let label = filex::phrases::label_for(filter, &phrase.source);
+                let label = filex::search::phrases::label_for(filter, &phrase.source);
                 let source = phrase.source.clone();
                 strip = strip.child(
                     ui::top_bar::filter_chip(&theme, ("phrase-chip", i * 8 + j), label, None)

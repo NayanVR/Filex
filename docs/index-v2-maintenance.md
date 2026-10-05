@@ -15,8 +15,8 @@ edit before sending a request.
 | Enumeration, record spooling and the isolated segment worker | `src/daemon/builder.rs` |
 | Immutable base plus changed records visible to a query | `src/daemon/view.rs` |
 | Ranked pages, filtering and exhaustive streams | `src/daemon/query.rs` |
-| Temporary exhaustive candidate intersections | `src/search/candidates.rs`, `src/catalog/segment.rs` |
-| Catalog validation and mapped files | `src/catalog/segment.rs`, `storage.rs` |
+| Temporary exhaustive candidate intersections | `src/search/candidates.rs`, `src/catalog/segment/mod.rs` |
+| Catalog validation and mapped files | `src/catalog/segment/persist.rs`, `storage.rs` |
 | Packed columns, compressed text pages and posting runs | `src/catalog/columns.rs`, `pool.rs`, `postings.rs` |
 | Compact gram-block search, legacy FM readers and bounded fuzzy matches | `src/search/` |
 | Search input, cancellation, pagination and Magic integration | `src/workspace/search.rs` |

@@ -17,7 +17,7 @@ use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
-use filex::search_filter::Filter;
+use filex::search::filter::Filter;
 use filex::selection::Selection;
 use filex::settings::{AccentColor, Density, FolderIcon, SortBy, ThemeMode, ViewMode};
 use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
