@@ -1,4 +1,4 @@
-//! Categorized preferences and an in-place shortcut recorder.
+//! Categorized preferences, their setting widgets, and an in-place shortcut recorder.
 use super::*;
 use filex::settings::Settings;
 
@@ -423,5 +423,187 @@ impl Workspace {
             );
         }
         content
+    }
+}
+
+impl Workspace {
+    /// Settings live in a centred modal over the browse view (rather
+    /// than replacing it): a dimmed backdrop closes on an outside click,
+    /// Escape closes it too (see the ClearInput handler). `None` while
+    /// closed.
+    /// The three-way light/dark/system segmented control for the
+    /// Appearance setting. Each segment writes the chosen mode straight
+    /// to the store; the Changed event re-resolves and reinstalls the
+    /// theme, restyling the whole app live.
+    pub(super) fn render_theme_selector(
+        &self,
+        theme: &Theme,
+        current: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.segmented_setting(
+            theme,
+            current,
+            &[
+                ("theme-system", "System", ThemeMode::System),
+                ("theme-light", "Light", ThemeMode::Light),
+                ("theme-dark", "Dark", ThemeMode::Dark),
+                ("theme-oled", "OLED", ThemeMode::Oled),
+            ],
+            |s, mode| s.theme = mode,
+            cx,
+        )
+    }
+
+    /// A segmented control bound to an enum setting: one segment per
+    /// option, the current one filled, each writing straight to the store.
+    /// Shared by the Appearance and Density rows.
+    fn segmented_setting<T: PartialEq + Copy + 'static>(
+        &self,
+        theme: &Theme,
+        current: T,
+        options: &[(&'static str, &'static str, T)],
+        set: fn(&mut Settings, T),
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut row = ui::settings_pane::segmented(theme);
+        for &(id, label, value) in options {
+            row = row.child(
+                ui::settings_pane::segment(theme, id, label, current == value).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.settings
+                            .update(cx, |store, cx| store.update(cx, |s| set(s, value)));
+                    }),
+                ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// The Comfortable/Compact list-density control.
+    pub(super) fn render_density_selector(
+        &self,
+        theme: &Theme,
+        current: Density,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.segmented_setting(
+            theme,
+            current,
+            &[
+                ("density-comfortable", "Comfortable", Density::Comfortable),
+                ("density-compact", "Compact", Density::Compact),
+            ],
+            |s, density| s.density = density,
+            cx,
+        )
+    }
+
+    /// The accent-color swatch row: `Default` (the palette's own accent)
+    /// followed by the presets. Clicking one writes it to the store; the
+    /// Changed event re-resolves the theme and recolors the app live.
+    pub(super) fn render_accent_picker(
+        &self,
+        theme: &Theme,
+        current: AccentColor,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let swatch = |ix: usize, accent: AccentColor, color: gpui::Rgba| {
+            ui::settings_pane::swatch(theme, ("accent", ix), color, current == accent).on_click(
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.settings.update(cx, |store, cx| {
+                        store.update(cx, |s| s.accent = accent);
+                    });
+                }),
+            )
+        };
+        // The Default swatch shows the palette's *own* accent (resolved
+        // without any override), so it stays a stable target even while a
+        // custom color is active.
+        let base = self.settings.read(cx).settings().theme;
+        let base_accent = Theme::resolve(base, self.appearance, AccentColor::Default).accent;
+        let mut row =
+            ui::settings_pane::swatch_row().child(swatch(0, AccentColor::Default, base_accent));
+        for (ix, accent) in ui::theme::ACCENT_PRESETS.into_iter().enumerate() {
+            let color = ui::theme::accent_rgb(accent).expect("presets are not Default");
+            row = row.child(swatch(ix + 1, accent, color));
+        }
+        // The free hex field: typing a valid `#RRGGBB` sets a Custom
+        // accent (see the accent_hex subscription). Its border lights when
+        // a custom color is the active one.
+        let custom_active = matches!(current, AccentColor::Custom(_));
+        let hex_box = div()
+            .flex()
+            .items_center()
+            .w(px(84.))
+            .px_1p5()
+            .py(px(2.))
+            .rounded_md()
+            .border_1()
+            .border_color(if custom_active {
+                theme.accent
+            } else {
+                theme.border
+            })
+            .bg(theme.bg)
+            .text_xs()
+            .text_color(theme.text)
+            .child(div().flex_1().min_w_0().child(self.accent_hex.clone()));
+        row.child(hex_box).into_any_element()
+    }
+
+    // `use<>`: the built element owns its data; without opting out of
+    // lifetime capture it couldn't be collected across loop iterations.
+    pub(super) fn render_root_row(
+        &self,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = *cx.theme();
+        let slot = &self.roots[ix];
+        let path = slot.path.clone();
+        // Clicking a healthy root navigates to it; clicking a failed one
+        // surfaces why it failed in the status bar.
+        let failure: Option<SharedString> = match &slot.state {
+            IndexState::Failed(err) => Some(err.clone()),
+            _ => None,
+        };
+        // Building spins (indexing is live); ready/failed are static.
+        // Sidebar rows aren't virtualized, so animating here is fine.
+        let marker = match &slot.state {
+            IndexState::Building => ui::icon::spinner(
+                "icons/loader-circle.svg",
+                theme.text_dim,
+                14.,
+                ("root-spin", ix),
+            ),
+            IndexState::Ready => ui::icon::ui_icon("icons/dot.svg", theme.accent)
+                .size(px(14.))
+                .into_any_element(),
+            IndexState::Failed(_) => ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn)
+                .size(px(14.))
+                .into_any_element(),
+        };
+        let menu_path = slot.path.clone();
+        let tip = slot.path.display().to_string();
+        ui::sidebar::sidebar_row(&theme, ("root", ix))
+            .tooltip(ui::tooltip::text_tooltip(tip, theme))
+            .child(marker)
+            .child(ui::sidebar::sidebar_label(slot.label.clone()))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_root_menu(menu_path.clone(), event.position, window, cx);
+                }),
+            )
+            .on_click(
+                cx.listener(move |this, _: &ClickEvent, _window, cx| match &failure {
+                    Some(err) => {
+                        this.notice = Some(err.clone());
+                        cx.notify();
+                    }
+                    None => this.navigate(path.clone(), cx),
+                }),
+            )
     }
 }

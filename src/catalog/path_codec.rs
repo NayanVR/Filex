@@ -62,9 +62,7 @@ pub fn serialize<S: Serializer>(path: &Path, s: S) -> Result<S::Ok, S::Error> {
     raw_name(path.as_os_str()).serialize(s)
 }
 pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
-    Ok(PathBuf::from(os_name(
-        &Vec::<u8>::deserialize(d)?,
-    )))
+    Ok(PathBuf::from(os_name(&Vec::<u8>::deserialize(d)?)))
 }
 pub mod optional {
     use super::*;
@@ -74,8 +72,7 @@ pub mod optional {
             .serialize(s)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<PathBuf>, D::Error> {
-        Ok(Option::<Vec<u8>>::deserialize(d)?
-            .map(|b| PathBuf::from(super::os_name(&b))))
+        Ok(Option::<Vec<u8>>::deserialize(d)?.map(|b| PathBuf::from(super::os_name(&b))))
     }
 }
 pub mod list {

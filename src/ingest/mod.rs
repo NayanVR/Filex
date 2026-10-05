@@ -3,10 +3,10 @@ mod platform;
 
 use crate::catalog::segment::{Identity, Record, Root, raw_name};
 use anyhow::Result;
+use platform::SYSTEM_DIRS;
 pub use platform::identity;
 #[cfg(target_os = "macos")]
 pub use platform::{has_full_disk_access, open_full_disk_access_settings};
-use platform::SYSTEM_DIRS;
 use std::{
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
