@@ -203,17 +203,12 @@ fn decode_public_key(public_key_hex: &str) -> Result<VerifyingKey, UpdateError> 
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
-    }
-    s
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn hex_decode(s: &str, field: &'static str) -> Result<Vec<u8>, UpdateError> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(UpdateError::BadHex(field));
     }
     let mut out = Vec::with_capacity(s.len() / 2);
@@ -632,9 +627,9 @@ mod tests {
         let (sk, _) = test_key();
         let m = valid_manifest(&sk, "1.4.0", b"x");
         assert!(m.is_newer_than("1.3.9").unwrap());
-        assert!(m.is_newer_than("1.4.0").unwrap() == false);
-        assert!(m.is_newer_than("1.4.1").unwrap() == false);
-        assert!(m.is_newer_than("2.0.0").unwrap() == false);
+        assert!(!m.is_newer_than("1.4.0").unwrap());
+        assert!(!m.is_newer_than("1.4.1").unwrap());
+        assert!(!m.is_newer_than("2.0.0").unwrap());
     }
 
     #[test]

@@ -26,7 +26,7 @@ impl Workspace {
     /// Remove one recognized filter token from the query (clicking its
     /// chip) by rewriting the search input's text.
     pub(super) fn remove_filter_token(&mut self, token: &str, cx: &mut Context<Self>) {
-        let rewritten = filex::search_filter::without_token(&self.query, token);
+        let rewritten = filex::search::filter::without_token(&self.query, token);
         self.search_input
             .update(cx, |input, cx| input.set_text(rewritten, cx));
     }
@@ -34,7 +34,7 @@ impl Workspace {
     /// Remove an inferred natural-language phrase (clicking its chip) by
     /// stripping the words that produced it.
     pub(super) fn remove_phrase(&mut self, source: &str, cx: &mut Context<Self>) {
-        let rewritten = filex::phrases::without_phrase(&self.query, source);
+        let rewritten = filex::search::phrases::without_phrase(&self.query, source);
         self.search_input
             .update(cx, |input, cx| input.set_text(rewritten, cx));
     }
@@ -370,11 +370,11 @@ impl Workspace {
                     cx.notify();
                     return;
                 }
-                let parsed = filex::search_filter::parse_query(&self.query, now);
+                let parsed = filex::search::filter::parse_query(&self.query, now);
                 // Natural-language phrases in the text the `key:value`
                 // parse left over. Rule-based, and shown as removable chips
                 // rather than applied invisibly.
-                let expansion = filex::phrases::expand(&parsed.text, now);
+                let expansion = filex::search::phrases::expand(&parsed.text, now);
                 let text = expansion.text.clone();
                 if text.is_empty() && parsed.filters.is_empty() && expansion.is_empty() {
                     self.results.clear();
@@ -609,9 +609,7 @@ impl Workspace {
     /// be un-ticked one row at a time.
     pub(super) fn set_all_magic_ops(&mut self, checked: bool, cx: &mut Context<Self>) {
         if let Some(state) = self.magic.as_mut() {
-            for flag in &mut state.checked {
-                *flag = checked;
-            }
+            state.checked.fill(checked);
             cx.notify();
         }
     }

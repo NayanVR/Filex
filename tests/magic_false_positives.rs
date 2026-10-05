@@ -25,7 +25,7 @@ const NOW: i64 = 1_785_067_200;
 /// is how a filename reads as typed search text.
 fn queries_for(name: &str) -> Vec<String> {
     let normalized: Vec<&str> = name
-        .split(|c: char| c == '-' || c == '_' || c == '.' || c == ' ')
+        .split(['-', '_', '.', ' '])
         .filter(|w| !w.is_empty())
         .collect();
     (1..=normalized.len())
@@ -183,7 +183,7 @@ fn filename_evidence_separates_commands_from_lookalikes() {
         .expect("reading corpus")
         .lines()
         .map(|name| {
-            name.split(|c: char| c == '-' || c == '_' || c == '.' || c == ' ')
+            name.split(['-', '_', '.', ' '])
                 .filter(|w| !w.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ")

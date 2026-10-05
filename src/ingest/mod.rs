@@ -1,70 +1,17 @@
 //! Read-only filesystem inspection. Notification adapters never mutate catalogs.
+mod platform;
+
 use crate::catalog::segment::{Identity, Record, Root, raw_name};
 use anyhow::Result;
+use platform::SYSTEM_DIRS;
+pub use platform::identity;
+#[cfg(target_os = "macos")]
+pub use platform::{has_full_disk_access, open_full_disk_access_settings};
 use std::{
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
-pub fn identity(path: &Path, metadata: &std::fs::Metadata) -> Identity {
-    let birth = metadata
-        .created()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos() as u64);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let _ = path;
-        Identity {
-            device: metadata.dev(),
-            key: metadata.ino(),
-            birth,
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-        use windows::Win32::{
-            Foundation::HANDLE,
-            Storage::FileSystem::{
-                BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-                FILE_FLAG_OPEN_REPARSE_POINT, GetFileInformationByHandle,
-            },
-        };
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .open(path)
-        {
-            let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            if unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
-                .is_ok()
-            {
-                return Identity {
-                    device: info.dwVolumeSerialNumber as u64,
-                    key: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
-                    birth: ((info.ftCreationTime.dwHighDateTime as u64) << 32)
-                        | info.ftCreationTime.dwLowDateTime as u64,
-                };
-            }
-        }
-        Identity {
-            device: 0,
-            key: 0,
-            birth,
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = path;
-        Identity {
-            device: 0,
-            key: 0,
-            birth,
-        }
-    }
-}
 pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
     let meta = std::fs::symlink_metadata(path)?;
     Ok(Record {
@@ -177,16 +124,6 @@ pub fn validate_new_root(existing: &[PathBuf], path: &Path) -> Result<PathBuf> {
     );
     Ok(canonical)
 }
-#[cfg(target_os = "macos")]
-pub fn has_full_disk_access() -> bool {
-    dirs::home_dir().is_some_and(|home| std::fs::read_dir(home.join("Library/Mail")).is_ok())
-}
-#[cfg(target_os = "macos")]
-pub fn open_full_disk_access_settings() {
-    let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-        .spawn();
-}
 /// Normalize existing ancestors without following the final symlink itself.
 pub fn canonical_event_path(path: &Path) -> PathBuf {
     if let Some(parent) = path.parent()
@@ -197,27 +134,6 @@ pub fn canonical_event_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-#[cfg(windows)]
-const SYSTEM_DIRS: &[&str] = &[
-    "Windows",
-    "Program Files",
-    "Program Files (x86)",
-    "ProgramData",
-    "$Recycle.Bin",
-    "System Volume Information",
-    "$WinREAgent",
-    "Recovery",
-    "PerfLogs",
-];
-#[cfg(target_os = "macos")]
-const SYSTEM_DIRS: &[&str] = &[
-    "System", "Library", "private", "usr", "bin", "sbin", "cores", "opt", "dev",
-];
-#[cfg(not(any(windows, target_os = "macos")))]
-const SYSTEM_DIRS: &[&str] = &[
-    "proc", "sys", "dev", "run", "boot", "usr", "bin", "sbin", "lib", "lib64", "etc", "var", "opt",
-    "srv",
-];
 pub fn include_system_files() -> bool {
     crate::settings::default_settings_file()
         .and_then(|p| crate::settings::Settings::load(&p, None).ok())

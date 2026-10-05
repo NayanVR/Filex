@@ -48,8 +48,8 @@ fn main() -> anyhow::Result<()> {
             roots = filex::drives::default_index_roots();
         }
     }
-    let _log = filex::logging::init_in("filex-indexd", None);
-    filex::telemetry::install_panic_hook("filex-indexd");
+    let _log = filex::diagnostics::logging::init_in("filex-indexd", None);
+    filex::diagnostics::telemetry::install_panic_hook("filex-indexd");
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // launchd/systemd stop, logout and upgrades all send SIGTERM. Registering
     // a handler also replaces an ignored disposition inherited across exec,

@@ -32,7 +32,7 @@ impl FmIndex {
             }
             counts[symbol as usize] += 1;
         }
-        if bwt.len() % BLOCK == 0 {
+        if bwt.len().is_multiple_of(BLOCK) {
             checkpoints.push(counts);
         }
         let cumulative = cumulative(&bwt);

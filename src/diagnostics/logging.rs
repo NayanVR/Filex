@@ -54,7 +54,7 @@ pub fn init_in(component: &str, base: Option<PathBuf>) -> Option<WorkerGuard> {
     // Under `observability`, tracing events also become Sentry signals:
     // its default mapping sends `error` as events and `warn`/`info` as
     // breadcrumbs. Every one is path-scrubbed by the before_send /
-    // before_breadcrumb hooks in `crate::observability` before it leaves
+    // before_breadcrumb hooks in `crate::diagnostics::observability` before it leaves
     // the machine — the tracing strings here are full of `path.display()`.
     #[cfg(feature = "observability")]
     let subscriber = subscriber.with(sentry_tracing::layer());

@@ -81,7 +81,8 @@ mod harness {
     }
     fn key_event(p: &NSWindow, code: u16, chars: &str) -> objc2::rc::Retained<NSEvent> {
         let chars = NSString::from_str(chars);
-        let e = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+
+        NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             NSEventType::KeyDown,
             NSPoint::new(0., 0.),
             NSEventModifierFlags::empty(),
@@ -92,8 +93,7 @@ mod harness {
             &chars,
             false,
             code,
-        ).unwrap();
-        e
+        ).unwrap()
     }
     fn send_key(code: u16, chars: &str) {
         let p = panel();

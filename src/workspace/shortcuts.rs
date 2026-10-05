@@ -454,7 +454,7 @@ pub fn bindings(overrides: &BTreeMap<String, String>) -> Vec<KeyBinding> {
 pub fn install(overrides: &BTreeMap<String, String>, cx: &mut App) {
     cx.clear_key_bindings();
     cx.bind_keys(bindings(overrides));
-    search_input::bind_keys(cx);
+    search_input::keymap::bind_keys(cx);
 }
 
 pub fn label(chord: &str) -> String {
@@ -555,7 +555,7 @@ mod tests {
         overrides: &BTreeMap<String, String>,
     ) -> Vec<String> {
         let mut all_bindings = bindings(overrides);
-        all_bindings.extend(search_input::key_bindings());
+        all_bindings.extend(search_input::keymap::key_bindings());
         let keymap = gpui::Keymap::new(all_bindings);
         let contexts: Vec<_> = contexts
             .iter()

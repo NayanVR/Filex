@@ -1,6 +1,6 @@
 //! Natural-language phrases → the existing `key:value` filter grammar.
 //! `photos from last week` becomes `kind:image` + `modified:…`, reusing
-//! [`crate::search_filter`]'s [`Filter`] rather than a parallel query
+//! [`crate::search::filter`]'s [`Filter`] rather than a parallel query
 //! path. Strictly rule-based (`docs/design-search-ranking.md` block 4).
 //!
 //! Three rules keep it from hiding files: every expansion is a removable
@@ -14,7 +14,7 @@
 //! Month names and years cover the need without guessing.
 
 use crate::listing::FileKind;
-use crate::search_filter::{
+use crate::search::filter::{
     Bound, Filter, SECS_PER_DAY as DAY, civil_from_days, days_from_civil, parse_bytes, start_of_day,
 };
 
@@ -53,7 +53,7 @@ impl Expansion {
 /// `raw` with the first consecutive run of words equal to `source`
 /// removed (case-insensitively) — what removing an inferred chip does.
 /// The counterpart of
-/// [`without_token`](crate::search_filter::without_token), which handles
+/// [`without_token`](crate::search::filter::without_token), which handles
 /// only single `key:value` words.
 pub fn without_phrase(raw: &str, source: &str) -> String {
     let words: Vec<&str> = raw.split_whitespace().collect();

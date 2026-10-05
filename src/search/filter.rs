@@ -225,7 +225,7 @@ fn parse_size_bound(value: &str) -> Option<Bound<u64>> {
 
 /// Parse a size like `2mb`, `1.5gb`, `500kb`, or a bare `1024` into bytes.
 /// Base-1024; the unit is optional (bytes). `None` on anything malformed.
-/// Shared with [`crate::phrases`], whose comparative phrases (`bigger than
+/// Shared with [`crate::search::phrases`], whose comparative phrases (`bigger than
 /// 10mb`) take the same operand spelling as `size:>10mb`.
 pub(crate) fn parse_bytes(text: &str) -> Option<u64> {
     let text = text.trim();
@@ -304,10 +304,9 @@ fn parse_time_bound(value: &str, now: i64) -> Option<Bound<i64>> {
 fn parse_relative_age(value: &str, now: i64) -> Option<Bound<i64>> {
     let (younger, rest) = if let Some(rest) = value.strip_prefix('<') {
         (true, rest) // age < N ⇒ modified more recently than now-N
-    } else if let Some(rest) = value.strip_prefix('>') {
-        (false, rest) // age > N ⇒ modified before now-N
     } else {
-        return None;
+        let rest = value.strip_prefix('>')?;
+        (false, rest) // age > N ⇒ modified before now-N
     };
     let (num, unit) = rest.split_at(rest.find(|c: char| c.is_ascii_alphabetic())?);
     let n: i64 = num.trim().parse().ok()?;
@@ -362,7 +361,7 @@ pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 
 /// The proleptic-Gregorian Y-M-D for a count of days since the unix epoch
 /// — Hinnant's `civil_from_days`, the exact inverse of
-/// [`days_from_civil`]. Needed by [`crate::phrases`] to answer "which
+/// [`days_from_civil`]. Needed by [`crate::search::phrases`] to answer "which
 /// calendar month is it right now?" without an external date crate.
 pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;

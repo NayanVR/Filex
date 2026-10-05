@@ -1,6 +1,6 @@
 //! Versioned authenticated loopback protocol. The endpoint capability is stored
 //! in a private per-user data directory; no privileged filesystem operations.
-use crate::{catalog::segment::Identity, search::literal::Tier, search_filter::Filter};
+use crate::{catalog::segment::Identity, search::filter::Filter, search::literal::Tier};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{

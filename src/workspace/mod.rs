@@ -9,15 +9,15 @@ use std::path::{Path, PathBuf};
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
     KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy,
-    SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowAppearance, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, size, uniform_list,
+    SharedString, UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, size, uniform_list,
 };
 
 use filex::drives::Drive;
 use filex::listing::{Entry, format_modified, format_size, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
-use filex::search_filter::Filter;
+use filex::search::filter::Filter;
 use filex::selection::Selection;
 use filex::settings::{AccentColor, Density, FolderIcon, SortBy, ThemeMode, ViewMode};
 use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
@@ -27,7 +27,10 @@ use crate::thumbnails::{self, ThumbnailState};
 use crate::ui;
 use crate::ui::search_input::{self, SearchInput, SearchInputEvent};
 use crate::ui::theme::{ActiveTheme as _, Theme};
+pub use app::run;
 use filex::listing::FileKind;
+use platform::{open_with_default_app, open_with_dialog, open_with_supported};
+use state::*;
 
 actions!(
     filex,
@@ -136,101 +139,6 @@ fn fetch_preview_meta(path: &Path) -> PreviewMeta {
     }
 }
 
-/// Open a file with the platform's default application. Detached — the
-/// launched app owns its own lifetime.
-fn open_with_default_app(path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = std::process::Command::new("open");
-        command.arg(path);
-        command
-    };
-    #[cfg(target_os = "linux")]
-    let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(path);
-        command
-    };
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        use std::os::windows::process::CommandExt as _;
-        // `start` is a cmd builtin; the empty string fills the window
-        // title slot so paths with spaces aren't parsed as one.
-        // CREATE_NO_WINDOW stops a console flashing on every open.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let mut command = std::process::Command::new("cmd");
-        command
-            .args(["/C", "start", ""])
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW);
-        command
-    };
-    command.spawn().map(drop)
-}
-
-/// Whether this platform can show an OS "Open with…" chooser. macOS has no
-/// CLI entry point (it needs LaunchServices), so the entry is hidden there
-/// rather than offering an action that can't work.
-fn open_with_supported() -> bool {
-    !cfg!(target_os = "macos")
-}
-
-/// Show the platform's native "Open with…" application chooser for
-/// `path`, so the user can pick a program other than the default.
-/// Detached — the chosen app owns its own lifetime.
-fn open_with_dialog(path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt as _;
-        // The Shell's classic "How do you want to open this file?" dialog.
-        // CREATE_NO_WINDOW keeps rundll32 from flashing a console.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("rundll32.exe")
-            .arg("shell32.dll,OpenAs_RunDLL")
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map(drop)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // `mimeopen -d` (perl-file-mimeinfo) prompts for the application;
-        // plain `xdg-open` would silently use the default instead.
-        std::process::Command::new("mimeopen")
-            .arg("-d")
-            .arg(path)
-            .spawn()
-            .map(drop)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = path;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Open with… is not yet available on macOS",
-        ))
-    }
-}
-
-/// The update affordance for this platform's UI banner. macOS copies a
-/// `brew` command; Linux opens the releases page to re-download the
-/// tarball. Windows opens the release page for its per-machine MSI.
-#[cfg(feature = "updater")]
-fn platform_affordance() -> filex::update::UpdateAffordance {
-    #[cfg(target_os = "macos")]
-    {
-        filex::update::UpdateAffordance::RunCommand("brew upgrade filex".to_string())
-    }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        // TODO(block 5): point at the real releases URL once the repo is
-        // published.
-        filex::update::UpdateAffordance::OpenUrl(
-            "https://github.com/NayanVR/filex/releases/latest".to_string(),
-        )
-    }
-}
-
 const SEARCH_RESULT_LIMIT: usize = 100;
 
 /// How long the query must hold still before a scan starts. Sized against
@@ -334,300 +242,6 @@ fn migrate_tags(tags: &PlatformTags, applied: &mut ops::AppliedOp) {
     filex::daemon::ipc::notify_applied(applied);
     if let Err(err) = tags.apply_applied(applied) {
         tracing::error!("failed to migrate tags: {err:#}");
-    }
-}
-
-enum IndexState {
-    Building,
-    Ready,
-    Failed(SharedString),
-}
-struct IndexedRoot {
-    path: PathBuf,
-    label: SharedString,
-    state: IndexState,
-}
-impl IndexedRoot {
-    fn from_status(root: &filex::daemon::ipc::RootStatus) -> Self {
-        let label = root
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.path.display().to_string());
-        let state = if root.state == "Building index" {
-            IndexState::Building
-        } else if root.state == "Ready" {
-            IndexState::Ready
-        } else {
-            IndexState::Failed(root.state.clone().into())
-        };
-        Self {
-            path: root.path.clone(),
-            label: label.into(),
-            state,
-        }
-    }
-}
-
-/// A search hit prepared for display (paths pre-materialized off-thread).
-struct SearchRow {
-    name: SharedString,
-    path_label: SharedString,
-    target: PathBuf,
-    is_dir: bool,
-}
-
-/// What a copy/cut put on the internal file clipboard. This is app
-/// state, not the OS clipboard — pasting files copied in other apps is
-/// out of scope for now.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ClipMode {
-    Copy,
-    Cut,
-}
-
-/// An operation blocked on an occupied destination, awaiting the
-/// user's choice in the conflict dialog.
-struct ConflictState {
-    op: FileOp,
-    dest: PathBuf,
-}
-
-/// What an open context menu is about.
-enum MenuTarget {
-    /// A file row — browse (`from_search: false`) or a search result.
-    Entry {
-        ix: usize,
-        path: PathBuf,
-        name: String,
-        is_dir: bool,
-        from_search: bool,
-    },
-    /// An indexed root in the sidebar.
-    Root { path: PathBuf },
-    /// A pinned folder in the sidebar's Favorites section.
-    Favorite { path: PathBuf },
-    /// Icon choices for one folder, opened from its context menu.
-    FolderIcon { path: PathBuf },
-}
-
-struct ContextMenu {
-    position: Point<Pixels>,
-    target: MenuTarget,
-}
-
-/// One background file-operation job with live progress; shown in the
-/// jobs bar while running.
-struct Job {
-    id: u64,
-    label: SharedString,
-    progress: std::sync::Arc<ops::OpProgress>,
-}
-
-/// How the search bar chooses between normal search and magic mode. Three
-/// states, not a bool, because auto-switch and the explicit toggle can
-/// disagree: the toggle must force magic *off* on a query auto-switch
-/// would light up, and *on* for one that hasn't parsed yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MagicMode {
-    /// The default. A command-shaped query with structured evidence flips
-    /// into magic view on its own; anything else is a normal search. The
-    /// query clearing resets to this.
-    Auto,
-    /// The user toggled magic on. The delete gate is dropped and the plan
-    /// view is shown even before a command parses (it prompts for one).
-    On,
-    /// The user toggled magic off while it was showing. Stays a normal
-    /// search even for a command-shaped query, until the toggle or a
-    /// cleared query returns it to [`Auto`](Self::Auto).
-    Off,
-}
-
-/// Where a query (normal or magic) looks: across every indexed root, or
-/// only within the folder currently on screen. Chosen from the search
-/// bar's scope dropdown; defaults to [`Anywhere`](Self::Anywhere).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchScope {
-    /// Every indexed root — the index's whole reach.
-    Anywhere,
-    /// Only `cwd` and its subtree. Resolved per-scan against the index so
-    /// it costs nothing when off, and a folder the index hasn't caught up
-    /// to yet simply returns nothing.
-    CurrentDir,
-}
-
-impl SearchScope {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Anywhere => "Anywhere",
-            Self::CurrentDir => "Current Dir",
-        }
-    }
-}
-
-/// A parsed Magic command and the plan it resolved to, for the review
-/// card. Held separately from `results` though both come from one search:
-/// `results` is what the user is looking at, `ops`/`checked` is what would
-/// run — which is what lets a row be unchecked without disturbing the
-/// result list.
-#[derive(Default)]
-struct MagicProgress {
-    scanned: std::sync::atomic::AtomicU64,
-    matched: std::sync::atomic::AtomicU64,
-}
-
-struct MagicState {
-    source_query: String,
-    command: filex::magic::Command,
-    loading: bool,
-    error: Option<String>,
-    progress: std::sync::Arc<MagicProgress>,
-    /// The resolved plan, or why there isn't one. `None` until the search
-    /// lands, so a still-indexing root doesn't claim the command matched
-    /// nothing. An error still shows a card — "no folder called Archive"
-    /// beats silence after the user typed a real command.
-    outcome: Option<Result<filex::magic::Plan, filex::magic::PlanError>>,
-    /// One flag per op in the plan, parallel to `Plan::ops`. Everything
-    /// starts checked; the review step is about *removing* what you
-    /// didn't mean, not opting in one file at a time.
-    checked: Vec<bool>,
-}
-
-impl MagicState {
-    fn selection_count(&self) -> usize {
-        match &self.outcome {
-            Some(Ok(plan)) => plan
-                .ops
-                .iter()
-                .zip(&self.checked)
-                .filter(|(_, checked)| **checked)
-                .count(),
-            _ => 0,
-        }
-    }
-
-    fn status(&self) -> String {
-        if let Some(error) = &self.error {
-            return format!("Couldn’t prepare preview: {error}");
-        }
-        if self.loading {
-            let scanned = self
-                .progress
-                .scanned
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let matched = self
-                .progress
-                .matched
-                .load(std::sync::atomic::Ordering::Relaxed);
-            return if scanned == 0 {
-                "Finding matching files…".into()
-            } else {
-                format!("{matched} matches found · {scanned} entries checked…")
-            };
-        }
-        match &self.outcome {
-            Some(Ok(plan)) => format!("{} of {} selected", self.selection_count(), plan.ops.len()),
-            Some(Err(error)) => error.to_string(),
-            None => "Preparing preview…".into(),
-        }
-    }
-
-    fn install_plan(&mut self, outcome: Result<filex::magic::Plan, filex::magic::PlanError>) {
-        let previous = match &self.outcome {
-            Some(Ok(plan)) => plan
-                .ops
-                .iter()
-                .zip(&self.checked)
-                .map(|(op, checked)| (op.source(), (op, *checked)))
-                .collect::<std::collections::HashMap<_, _>>(),
-            _ => Default::default(),
-        };
-        self.checked = match &outcome {
-            Ok(plan) => plan
-                .ops
-                .iter()
-                .map(|op| {
-                    previous
-                        .get(op.source())
-                        .filter(|(old, _)| *old == op)
-                        .map_or(previous.is_empty(), |(_, checked)| *checked)
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        self.outcome = Some(outcome);
-        self.loading = false;
-        self.error = None;
-    }
-
-    /// The ops the user has left checked.
-    fn selected_ops(&self) -> Vec<FileOp> {
-        if self.loading || self.error.is_some() {
-            return Vec::new();
-        }
-        let Some(Ok(plan)) = &self.outcome else {
-            return Vec::new();
-        };
-        plan.ops
-            .iter()
-            .zip(&self.checked)
-            .filter(|(_, checked)| **checked)
-            .map(|(op, _)| op.clone())
-            .collect()
-    }
-}
-
-/// A rename-in-place in progress: which browse row is being edited and
-/// the input that owns the edited text (the SearchInput element reused
-/// as a transient editor, per docs/roadmap.md).
-struct RenameState {
-    ix: usize,
-    input: gpui::Entity<SearchInput>,
-    /// Watches for Dismissed (escape) to cancel.
-    _subscription: gpui::Subscription,
-}
-
-/// An in-progress tag edit in the details panel: target file, the input
-/// owning the typed name, the chosen color, and (when editing rather than
-/// adding) the original name so commit replaces it in place.
-struct TagEditor {
-    path: PathBuf,
-    input: gpui::Entity<SearchInput>,
-    color: Option<TagColor>,
-    /// `Some(original_name)` when recoloring/renaming an existing tag;
-    /// `None` when adding a new one.
-    existing: Option<String>,
-    /// Watches for Dismissed (escape) to cancel.
-    _subscription: gpui::Subscription,
-}
-
-/// One browse tab's saved state. The *active* tab lives directly on the
-/// [`Workspace`]; this holds the inactive ones, refreshed from the live
-/// fields on each switch. Search is global, not per-tab. Transient UI (an
-/// in-progress rename, an armed delete) is dropped on switch.
-struct TabSnapshot {
-    cwd: PathBuf,
-    entries: Vec<Entry>,
-    load_error: Option<SharedString>,
-    selection: Selection,
-    scroll: UniformListScrollHandle,
-    history_back: Vec<PathBuf>,
-    history_forward: Vec<PathBuf>,
-}
-
-impl TabSnapshot {
-    /// A blank slot; the active tab's slot always holds one of these
-    /// until the next switch refreshes it from the live fields.
-    fn placeholder() -> Self {
-        Self {
-            cwd: PathBuf::new(),
-            entries: Vec::new(),
-            load_error: None,
-            selection: Selection::default(),
-            scroll: UniformListScrollHandle::new(),
-            history_back: Vec::new(),
-            history_forward: Vec::new(),
-        }
     }
 }
 
@@ -781,10 +395,12 @@ struct Workspace {
     search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+mod app;
 mod file_ops;
 mod input;
 mod location;
 mod navigation;
+mod platform;
 mod preferences;
 mod quick_look;
 mod render;
@@ -795,6 +411,7 @@ mod search;
 mod services;
 mod shortcuts;
 mod sidebar;
+mod state;
 mod tabs;
 mod tags;
 
@@ -989,130 +606,6 @@ impl Workspace {
         this.spawn_update_check(cx);
         this
     }
-
-    /// Manifest URL for the UI-side "is there a newer version?" check.
-    /// Per-OS, since each platform publishes its own manifest; the
-    /// `latest/download/…` path always resolves to the newest release.
-    #[cfg(all(target_os = "macos", feature = "updater"))]
-    const UPDATE_MANIFEST_URL: &'static str =
-        "https://github.com/NayanVR/filex/releases/latest/download/filex-macos.json";
-
-    #[cfg(all(target_os = "windows", feature = "updater"))]
-    const UPDATE_MANIFEST_URL: &'static str =
-        "https://github.com/NayanVR/filex/releases/latest/download/filex-windows.json";
-
-    #[cfg(all(target_os = "linux", feature = "updater"))]
-    const UPDATE_MANIFEST_URL: &'static str =
-        "https://github.com/NayanVR/filex/releases/latest/download/filex-linux.json";
-}
-
-pub fn run() {
-    let _logging_guard = filex::logging::init("filex");
-    filex::telemetry::install_panic_hook("filex");
-    // Sentry (UI process only; on-by-default, opt-out). The
-    // `crash_reports` setting is consent and gates the whole integration,
-    // so read it from disk before the app exists. The returned guard
-    // flushes pending events on exit and must live for the whole run.
-    // Builds without `observability` never link the SDK — which is how the
-    // elevated `filex-indexd` service is built.
-    #[cfg(feature = "observability")]
-    let _sentry_guard = {
-        let consent = filex::settings::default_settings_file()
-            .and_then(|file| {
-                let legacy = filex::ingest::default_roots_file();
-                filex::settings::Settings::load(&file, legacy.as_deref()).ok()
-            })
-            .is_some_and(|settings| settings.crash_reports);
-        filex::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
-    };
-    // A startup line at the default level, so a blank log file means "not
-    // writing", not "nothing happened". Names the log directory, and
-    // slow-op warnings land here without any RUST_LOG.
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "filex starting — slow operations (>{SLOW_OP_MS}ms) log at warn; \
-         set RUST_LOG=filex=debug for per-scan timing"
-    );
-    Application::new()
-        .with_assets(ui::assets::Assets)
-        .run(|cx: &mut App| {
-            // Register the bundled UI font before anything renders.
-            ui::fonts::register(cx);
-            // A default theme so `cx.theme()` is valid from the first frame;
-            // the workspace refines it against the real window appearance as
-            // soon as a window exists (see the open-window closure below).
-            cx.set_global(Theme::dark());
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_window_closed(|cx| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
-            // macOS: unified titlebar — the system bar goes transparent
-            // and the traffic lights inset into our top bar, which pads
-            // left to clear them. Elsewhere the native titlebar stays.
-            #[cfg(target_os = "macos")]
-            let titlebar = TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                // The tab bar is now the topmost bar, so the inset traffic
-                // lights are centered against its height, not the nav bar's.
-                traffic_light_position: Some(gpui::point(
-                    px(12.),
-                    px((ui::tabs::TAB_BAR_HEIGHT - 12.) / 2.),
-                )),
-            };
-            #[cfg(not(target_os = "macos"))]
-            let titlebar = TitlebarOptions {
-                title: Some("filex".into()),
-                ..Default::default()
-            };
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(860.), px(520.))),
-                    titlebar: Some(titlebar),
-                    app_id: Some("dev.filex.app".into()),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    cx.activate(true);
-                    let workspace = cx.new(|cx| {
-                        let workspace = Workspace::new(cx);
-                        // Focus the workspace, not the search box, so the
-                        // app starts on the file list and single-key
-                        // shortcuts work at once. `/` moves focus in.
-                        window.focus(&workspace.focus_handle);
-                        workspace
-                    });
-                    // A window now exists, so its OS appearance is known:
-                    // resolve the theme against it, and keep it in sync as
-                    // the user flips the OS between light and dark.
-                    workspace.update(cx, |ws, cx| {
-                        ws.appearance = window.appearance();
-                        ws.apply_theme(cx);
-                    });
-                    window
-                        .observe_window_appearance({
-                            let workspace = workspace.downgrade();
-                            move |window, cx| {
-                                workspace
-                                    .update(cx, |ws, cx| {
-                                        ws.appearance = window.appearance();
-                                        ws.apply_theme(cx);
-                                    })
-                                    .ok();
-                            }
-                        })
-                        .detach();
-                    workspace
-                },
-            )
-            .expect("failed to open the main window");
-        });
 }
 
 #[cfg(test)]

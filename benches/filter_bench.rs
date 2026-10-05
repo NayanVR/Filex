@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use filex::{
     catalog::segment::{Identity, Record, Root, Segment},
-    search_filter::Filter,
+    search::filter::Filter,
 };
 fn bench(c: &mut Criterion) {
     let records = (0..50_000).map(|i| Record {

@@ -169,7 +169,7 @@ pub fn upsert_tag(tags: &[Tag], replacing: Option<&str>, new: Tag) -> Vec<Tag> {
     out
 }
 
-// `tag:` parsing lives in [`crate::search_filter::parse_query`] now, which
+// `tag:` parsing lives in [`crate::search::filter::parse_query`] now, which
 // emits `Filter::Tag`. What follows serves the sidecar intersect and the
 // sidebar list, which operate on the store rather than the query string.
 

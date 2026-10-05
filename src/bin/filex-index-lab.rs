@@ -129,7 +129,7 @@ fn main() -> Result<()> {
         use filex::{
             daemon::{ipc::Query, query, view::View},
             listing::FileKind,
-            search_filter::{Bound, Filter},
+            search::filter::{Bound, Filter},
         };
         use std::sync::{Arc, atomic::AtomicBool};
         let view = View {

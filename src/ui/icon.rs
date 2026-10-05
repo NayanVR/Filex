@@ -169,14 +169,14 @@ pub fn automatic_folder_icon(path: &Path) -> FolderIcon {
 /// for each accent change, then every visible folder shares the same image ID
 /// and GPUI atlas entry. The center symbol remains a separate SVG mask.
 fn folder_image(accent: Rgba) -> Option<Arc<RenderImage>> {
-    static CACHE: LazyLock<Mutex<Option<(u32, Arc<RenderImage>)>>> =
-        LazyLock::new(|| Mutex::new(None));
+    type Cached = Option<(u32, Arc<RenderImage>)>;
+    static CACHE: LazyLock<Mutex<Cached>> = LazyLock::new(|| Mutex::new(None));
     let accent = color_hex(accent);
     let mut cached = CACHE.lock().unwrap_or_else(|err| err.into_inner());
-    if let Some((previous, image)) = cached.as_ref() {
-        if *previous == accent {
-            return Some(image.clone());
-        }
+    if let Some((previous, image)) = cached.as_ref()
+        && *previous == accent
+    {
+        return Some(image.clone());
     }
     let svg = recolored_folder_svg(accent);
     match render_icon_svg(&svg) {
@@ -211,7 +211,7 @@ fn render_icon_svg(svg: &str) -> anyhow::Result<Arc<RenderImage>> {
     // tiny-skia gives us premultiplied RGBA. GPUI's RenderImage expects
     // straight-alpha BGRA, as in its own SVG image loading path.
     let mut data = pixmap.take();
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         if pixel[3] > 0 {
             let alpha = pixel[3] as f32 / 255.;

@@ -8,8 +8,8 @@ use crate::{
         normalize::{boundaries, nfc_fold},
         segment::Record,
     },
+    search::filter::ItemMeta,
     search::literal::Tier,
-    search_filter::ItemMeta,
 };
 use anyhow::{Result, ensure};
 use std::{
@@ -121,11 +121,11 @@ pub fn search(
     let need_size = query
         .filters
         .iter()
-        .any(|f| matches!(f, crate::search_filter::Filter::Size(_)));
+        .any(|f| matches!(f, crate::search::filter::Filter::Size(_)));
     let need_mtime = query
         .filters
         .iter()
-        .any(|f| matches!(f, crate::search_filter::Filter::Modified(_)));
+        .any(|f| matches!(f, crate::search::filter::Filter::Modified(_)));
     let needle = nfc_fold(&query.text);
     let limit = query.limit + query.offset + 1;
     let changed_ids: HashSet<u64> = view
@@ -378,11 +378,11 @@ pub fn stream(
     let need_size = query
         .filters
         .iter()
-        .any(|f| matches!(f, crate::search_filter::Filter::Size(_)));
+        .any(|f| matches!(f, crate::search::filter::Filter::Size(_)));
     let need_mtime = query
         .filters
         .iter()
-        .any(|f| matches!(f, crate::search_filter::Filter::Modified(_)));
+        .any(|f| matches!(f, crate::search::filter::Filter::Modified(_)));
     // Small scopes enumerate a complete live-view set; a capped scope is
     // never treated as complete. Tag paths remain an exact final predicate:
     // resolving one ID per path could hide transient duplicate paths in overlays.
@@ -537,11 +537,11 @@ pub fn stream_before_indexed_magic(
     let need_size = query
         .filters
         .iter()
-        .any(|f| matches!(f, crate::search_filter::Filter::Size(_)));
+        .any(|f| matches!(f, crate::search::filter::Filter::Size(_)));
     let need_mtime = query
         .filters
         .iter()
-        .any(|f| matches!(f, crate::search_filter::Filter::Modified(_)));
+        .any(|f| matches!(f, crate::search::filter::Filter::Modified(_)));
     let needle = nfc_fold(&query.text);
     let mut batch = Vec::with_capacity(256);
     let (mut scanned, mut total) = (0u64, 0u64);

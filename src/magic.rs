@@ -18,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ops::FileOp;
-use crate::phrases;
-use crate::search_filter::{Filter, parse_query};
+use crate::search::filter::{Filter, parse_query};
+use crate::search::phrases;
 
 /// The most operations one Magic plan may contain. The bound is about
 /// *review* — nobody reads ten thousand rows before clicking confirm.
@@ -247,7 +247,7 @@ fn is_separator(word: &str, verb: Verb) -> bool {
 }
 
 /// Leading quantifiers to drop: "delete **all** screenshots". Here rather
-/// than in [`crate::phrases`]'s filler because they are command grammar —
+/// than in [`crate::search::phrases`]'s filler because they are command grammar —
 /// a plain search for `all hands notes` must keep its "all".
 const QUANTIFIERS: &[&str] = &["all", "every", "any", "my", "the"];
 
@@ -666,7 +666,7 @@ fn is_valid_file_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::listing::FileKind;
-    use crate::search_filter::Bound;
+    use crate::search::filter::Bound;
 
     /// 2026-07-26 12:00 UTC, matching `phrases`'s test anchor.
     const NOW: i64 = 1_785_067_200;
@@ -1184,7 +1184,12 @@ mod tests {
 
         let command = cmd("move notes to Downloads").unwrap();
         let from = cwd.path().join("src/notes.md");
-        let plan = build(&command, &[from.clone()], &ctx(cwd.path(), &dirs)).unwrap();
+        let plan = build(
+            &command,
+            std::slice::from_ref(&from),
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
 
         assert_eq!(
             plan.ops,

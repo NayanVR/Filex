@@ -37,7 +37,6 @@ impl Workspace {
             if keystroke.key.as_str() == "enter" {
                 self.commit_tag_editor(window, cx);
             }
-            return;
         }
         // Selection/navigation now comes from the editable action registry.
     }

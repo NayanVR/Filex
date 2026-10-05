@@ -2,16 +2,16 @@
 //! crash/error reporting, measurements, and release-health sessions.
 //! On-by-default, opt-out: the `crash_reports` setting is consent.
 //!
-//! Same privacy invariant as [`crate::telemetry`]: **no path-shaped data
+//! Same privacy invariant as [`crate::diagnostics::telemetry`]: **no path-shaped data
 //! ever leaves the machine**, enforced twice — drained crash reports were
-//! [`scrub`](crate::telemetry::scrub)bed at capture, and the `before_send`
+//! [`scrub`](crate::diagnostics::telemetry::scrub)bed at capture, and the `before_send`
 //! / `before_breadcrumb` hooks scrub every live event (including what
 //! `sentry-tracing` feeds in) as a backstop. Init requires both consent and
 //! a DSN in the environment, so a build without a CI-provided DSN phones
 //! home to nothing.
 //!
 //! Panics are *not* delivered live — Sentry's `panic` integration is
-//! disabled (see Cargo.toml). [`crate::telemetry`]'s hook queues them on
+//! disabled (see Cargo.toml). [`crate::diagnostics::telemetry`]'s hook queues them on
 //! disk and [`drain_crashes_to_sentry`] sends them next launch, which
 //! survives aborts and SIGKILL where an in-process flush would be lost.
 
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use sentry::protocol::{Event, Level, Value};
 use sentry::{ClientInitGuard, ClientOptions};
 
-use crate::telemetry::{self, CrashReport};
+use crate::diagnostics::telemetry::{self, CrashReport};
 
 /// Environment variable holding the Sentry DSN. Unset or empty disables the
 /// integration entirely, so a build with no CI-provided DSN sends nothing
@@ -95,7 +95,7 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
 /// Scrub every free-text field of an outgoing event. Queue-drained crashes
 /// are already scrubbed, but live tracing-layer events are not, and a stack
 /// frame's `filename`/`abs_path` routinely carries a path. Over-redaction
-/// is the accepted trade, as in [`crate::telemetry`].
+/// is the accepted trade, as in [`crate::diagnostics::telemetry`].
 fn scrub_event(event: &mut Event) {
     if let Some(message) = event.message.take() {
         event.message = Some(telemetry::scrub(&message));

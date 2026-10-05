@@ -3,18 +3,18 @@
 //! Two subcommands, both built without the GPUI app (`--no-default-features`):
 //!
 //! * `filex-sign keygen`
-//!     Prints a fresh Ed25519 keypair. **Run once, locally.** Embed the
-//!     public key in the shipping binaries (the `UPDATE_PUBLIC_KEY` /
-//!     manifest-URL constants) and store the private key as the CI secret
-//!     `FILEX_SIGNING_KEY`. The private key must never enter the repo.
+//!   Prints a fresh Ed25519 keypair. **Run once, locally.** Embed the
+//!   public key in the shipping binaries (the `UPDATE_PUBLIC_KEY` /
+//!   manifest-URL constants) and store the private key as the CI secret
+//!   `FILEX_SIGNING_KEY`. The private key must never enter the repo.
 //!
 //! * `filex-sign sign --version <v> --url <artifact-url> --in <file> \
 //!                    --out <manifest.json> [--key <hex>]`
-//!     Computes the artifact's SHA-256 and Ed25519 signature (using the
-//!     same `filex::update` code the client verifies with) and writes the
-//!     update manifest JSON. The private key is read from `--key` or, if
-//!     omitted, the `FILEX_SIGNING_KEY` env var — so CI never puts it on
-//!     the command line.
+//!   Computes the artifact's SHA-256 and Ed25519 signature (using the
+//!   same `filex::update` code the client verifies with) and writes the
+//!   update manifest JSON. The private key is read from `--key` or, if
+//!   omitted, the `FILEX_SIGNING_KEY` env var — so CI never puts it on
+//!   the command line.
 //!
 //! This binary has no network or platform dependencies, so it runs on
 //! every release runner (Windows / macOS / Linux) identically.
