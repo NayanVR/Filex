@@ -6,6 +6,8 @@ use anyhow::{Context as _, Result};
 
 use crate::settings::{SortBy, SortSettings};
 
+mod platform;
+
 /// A single directory entry, sorted for display. GUI-free so it can be unit
 /// tested and later swapped to be fed from the volume index.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,25 +33,7 @@ fn is_hidden_entry(name: &str, metadata: Option<&std::fs::Metadata>) -> bool {
     if name.starts_with('.') {
         return true;
     }
-    #[cfg(target_os = "windows")]
-    if let Some(meta) = metadata {
-        use std::os::windows::fs::MetadataExt as _;
-        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        if meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 {
-            return true;
-        }
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(meta) = metadata {
-        use std::os::macos::fs::MetadataExt as _;
-        const UF_HIDDEN: u32 = 0x8000;
-        if meta.st_flags() & UF_HIDDEN != 0 {
-            return true;
-        }
-    }
-    #[cfg(target_os = "linux")]
-    let _ = metadata;
-    false
+    metadata.is_some_and(platform::has_hidden_flag)
 }
 
 /// Read a directory and return entries ordered by `sort`. Entries whose

@@ -1,4 +1,5 @@
 //! Immutable catalog with block-packed columns and compact ranked name search.
+pub use super::path_codec::{os_name, raw_name};
 use super::{
     columns::{Column, ColumnImage},
     pool::{BytePool, PoolImage},
@@ -12,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
-    ffi::OsString,
     path::{Path, PathBuf},
 };
 
@@ -767,55 +767,6 @@ impl Segment {
             "unsorted native lookup"
         );
         Ok(())
-    }
-}
-pub fn os_name(raw: &[u8]) -> OsString {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        OsString::from_vec(raw.to_vec())
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStringExt;
-        if raw.starts_with(&[255, 254]) {
-            OsString::from_wide(
-                &raw[2..]
-                    .chunks_exact(2)
-                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            OsString::from(String::from_utf8_lossy(raw).into_owned())
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        OsString::from(String::from_utf8_lossy(raw).into_owned())
-    }
-}
-pub fn raw_name(name: &std::ffi::OsStr) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        name.as_bytes().to_vec()
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        if let Some(text) = name.to_str() {
-            text.as_bytes().to_vec()
-        } else {
-            let mut bytes = vec![255, 254];
-            for unit in name.encode_wide() {
-                bytes.extend_from_slice(&unit.to_le_bytes());
-            }
-            bytes
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        name.to_string_lossy().as_bytes().to_vec()
     }
 }
 fn meta_keys(
