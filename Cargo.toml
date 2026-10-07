@@ -140,6 +140,10 @@ name = "segment_bench"
 harness = false
 
 [[bench]]
+name = "listing_bench"
+harness = false
+
+[[bench]]
 name = "magic_bench"
 harness = false
 

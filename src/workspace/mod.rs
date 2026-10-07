@@ -247,7 +247,11 @@ fn migrate_tags(tags: &PlatformTags, applied: &mut ops::AppliedOp) {
 
 struct Workspace {
     focus_handle: FocusHandle,
+    /// Where the tab is (or is navigating to); set as a load starts.
     cwd: PathBuf,
+    /// The directory `entries` were read from. Lags `cwd` while a load
+    /// is in flight, so the previous listing stays on screen.
+    listed_dir: PathBuf,
     entries: Vec<Entry>,
     load_error: Option<SharedString>,
     roots: Vec<IndexedRoot>,
@@ -510,6 +514,7 @@ impl Workspace {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
+            listed_dir: PathBuf::new(),
             entries: Vec::new(),
             load_error: None,
             roots: Vec::new(),

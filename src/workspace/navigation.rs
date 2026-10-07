@@ -5,17 +5,80 @@ use super::*;
 
 impl Workspace {
     pub(super) fn load_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.load_dir_selecting(path, None, cx);
+    }
+
+    /// Read `path` on the background executor, then install it and
+    /// select the entry named `select` (if any). `cwd` moves now; the
+    /// previous rows stay on screen until the listing lands. A newer
+    /// load, tab switch, or typed path bumps `path_request` and the
+    /// stale result is dropped.
+    pub(super) fn load_dir_selecting(
+        &mut self,
+        path: &Path,
+        select: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.path_request = self.path_request.wrapping_add(1);
+        let request = self.path_request;
         self.path_loading = false;
-        let settings = self.settings.read(cx).settings();
-        let sort = settings.sort;
-        match read_dir_sorted(path, &sort) {
-            Ok(entries) => {
-                self.apply_directory(path, entries, cx);
-            }
-            Err(err) => {
-                self.load_error = Some(format!("{err:#}").into());
-            }
+        self.cwd = path.to_path_buf();
+        self.sync_path(cx);
+        let sort = self.settings.read(cx).settings().sort;
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { read_dir_sorted(&path, &sort) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.path_request != request {
+                    return;
+                }
+                match result {
+                    Ok(entries) => {
+                        this.apply_directory(&path, entries, cx);
+                        if let Some(name) = select {
+                            this.select_named(&name);
+                        }
+                        this.refresh_preview(cx);
+                    }
+                    Err(err) => this.show_load_error(&path, format!("{err:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A failed load: drop the previous rows so nothing on screen (or in
+    /// the selection) points into a folder the user has left.
+    fn show_load_error(&mut self, path: &Path, err: String) {
+        self.listed_dir = path.to_path_buf();
+        self.entries.clear();
+        self.selection.clear();
+        self.load_error = Some(err.into());
+    }
+
+    /// Select and scroll to the browse row named `name`, if present.
+    fn select_named(&mut self, name: &str) {
+        if let Some(ix) = self.entries.iter().position(|entry| entry.name == name) {
+            self.selection.select_one(ix);
+            self.browse_scroll
+                .scroll_to_item(ix, ScrollStrategy::Center);
+        }
+    }
+
+    /// After a tab switch: re-issue the load that was in flight when the
+    /// tab was left (its result was dropped by the switch).
+    pub(super) fn resume_tab_load(&mut self, cx: &mut Context<Self>) {
+        if self.listed_dir != self.cwd {
+            let cwd = self.cwd.clone();
+            self.load_dir(&cwd, cx);
         }
     }
 
@@ -31,8 +94,11 @@ impl Workspace {
         if !show_hidden {
             entries.retain(|entry| !entry.is_hidden);
         }
-        let changed = self.cwd != path;
+        // Compare against what was on screen, not `cwd`: a load sets
+        // `cwd` up front, so it already equals `path` here.
+        let changed = self.listed_dir != path;
         self.cwd = path.to_path_buf();
+        self.listed_dir = path.to_path_buf();
         self.entries = entries;
         self.load_error = None;
         self.selection.clear();
@@ -203,16 +269,8 @@ impl Workspace {
             return;
         };
         self.clear_search(cx);
-        self.navigate(parent, cx);
-        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
-            && let Some(ix) = self.entries.iter().position(|entry| entry.name == name)
-        {
-            self.selection.select_one(ix);
-            self.browse_scroll
-                .scroll_to_item(ix, ScrollStrategy::Center);
-        }
-        self.refresh_preview(cx);
-        cx.notify();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        self.navigate_selecting(parent, name, cx);
     }
 
     pub(super) fn activate_selected(&mut self, cx: &mut Context<Self>) {
@@ -259,7 +317,23 @@ impl Workspace {
     }
 
     pub(super) fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.navigate_selecting(path, None, cx);
+    }
+
+    /// Navigate to `path`, selecting the entry named `select` once the
+    /// listing lands.
+    fn navigate_selecting(
+        &mut self,
+        path: PathBuf,
+        select: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if path == self.cwd {
+            // Already here (or loading here): re-list so the selection
+            // lands on fresh rows rather than racing the load.
+            if select.is_some() {
+                self.load_dir_selecting(&path, select, cx);
+            }
             self.sync_path(cx);
             cx.notify();
             return;
@@ -268,7 +342,7 @@ impl Workspace {
         // both stacks).
         self.history_back.push(self.cwd.clone());
         self.history_forward.clear();
-        self.load_dir(&path, cx);
+        self.load_dir_selecting(&path, select, cx);
         self.record_recent(path, cx);
         cx.notify();
     }

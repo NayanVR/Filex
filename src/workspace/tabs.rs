@@ -7,6 +7,7 @@ impl Workspace {
     pub(super) fn snapshot_active(&mut self) -> TabSnapshot {
         TabSnapshot {
             cwd: std::mem::take(&mut self.cwd),
+            listed_dir: std::mem::take(&mut self.listed_dir),
             entries: std::mem::take(&mut self.entries),
             load_error: self.load_error.take(),
             selection: std::mem::take(&mut self.selection),
@@ -20,6 +21,7 @@ impl Workspace {
     /// (rename, armed delete) does not survive the switch.
     pub(super) fn restore_tab(&mut self, snap: TabSnapshot) {
         self.cwd = snap.cwd;
+        self.listed_dir = snap.listed_dir;
         self.entries = snap.entries;
         self.load_error = snap.load_error;
         self.selection = snap.selection;
@@ -44,6 +46,7 @@ impl Workspace {
         self.path_request = self.path_request.wrapping_add(1);
         self.path_loading = false;
         self.sync_path(cx);
+        self.resume_tab_load(cx);
         self.active_tab = i;
         self.refresh_preview(cx);
         cx.notify();
@@ -115,6 +118,7 @@ impl Workspace {
             self.path_request = self.path_request.wrapping_add(1);
             self.path_loading = false;
             self.sync_path(cx);
+            self.resume_tab_load(cx);
             self.active_tab = new_active;
             self.refresh_preview(cx);
         } else {
