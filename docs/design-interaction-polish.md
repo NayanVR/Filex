@@ -511,6 +511,20 @@ remains in a processor closure.
 
 ## Block 10 (next, larger): the navigation path must stop blocking
 
+**Status (FIL-14):** `load_dir` now reads on the background executor
+behind the `path_request` generation guard. `cwd` moves at once (path bar,
+history), `listed_dir` tracks whose rows are on screen, so the previous
+listing stays up until the new one lands; a tab left mid-load re-issues
+it on return; `reveal` selects its target after the load. `name_order`
+compares ASCII names bytewise (no allocation): `benches/listing_bench.rs`
+measured the sort at 100k entries 8.3 ms → 3.5 ms (a lazy
+`char::to_lowercase` iterator was *slower*, 15 ms). The full listing is
+stat-bound, ~370 ms at 100k warm, now off-thread. The settings
+subscription was already scoped to `sort`/`show_hidden_files`. Still
+open: the two-phase listing (names first, metadata backfilled).
+
+The analysis below is the original pre-fix record.
+
 Recorded here so the ordering is explicit, not to be built in this block.
 
 `load_dir` (`navigation.rs:19`) calls `read_dir_sorted` **synchronously

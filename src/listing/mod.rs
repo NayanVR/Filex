@@ -96,8 +96,17 @@ fn compare_entries(a: &Entry, b: &Entry, sort: &SortSettings) -> Ordering {
     primary.then_with(|| name_order(a, b))
 }
 
+/// Case-insensitive name order. ASCII names (nearly all) compare byte by
+/// byte without allocating; anything else falls back to full Unicode
+/// lowercasing.
 fn name_order(a: &Entry, b: &Entry) -> Ordering {
-    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    let (a, b) = (a.name.as_str(), b.name.as_str());
+    if a.is_ascii() && b.is_ascii() {
+        let a = a.bytes().map(|c| c.to_ascii_lowercase());
+        a.cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+    } else {
+        a.to_lowercase().cmp(&b.to_lowercase())
+    }
 }
 
 /// Kind sorting groups by [`FileKind`] (in declaration order), then by
@@ -296,6 +305,36 @@ mod tests {
         ];
         sort_entries(&mut entries, &SortSettings::default());
         assert_eq!(names(&entries), ["zzz", "aaa.txt", "bbb.txt"]);
+    }
+
+    #[test]
+    fn name_order_matches_lowercased_string_order() {
+        let names = [
+            "Beta",
+            "alpha",
+            "ÉCOLE",
+            "ecole",
+            "Zebra",
+            "äpfel",
+            "Straße",
+            "STRASSE",
+            "İstanbul",
+            "a",
+            "A",
+            "ab",
+            "",
+            "10",
+            "9",
+        ];
+        for a in names {
+            for b in names {
+                assert_eq!(
+                    name_order(&entry(a, false), &entry(b, false)),
+                    a.to_lowercase().cmp(&b.to_lowercase()),
+                    "{a:?} vs {b:?}"
+                );
+            }
+        }
     }
 
     #[test]

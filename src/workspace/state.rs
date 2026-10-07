@@ -277,6 +277,7 @@ pub(super) struct TagEditor {
 /// in-progress rename, an armed delete) is dropped on switch.
 pub(super) struct TabSnapshot {
     pub(super) cwd: PathBuf,
+    pub(super) listed_dir: PathBuf,
     pub(super) entries: Vec<Entry>,
     pub(super) load_error: Option<SharedString>,
     pub(super) selection: Selection,
@@ -291,6 +292,7 @@ impl TabSnapshot {
     pub(super) fn placeholder() -> Self {
         Self {
             cwd: PathBuf::new(),
+            listed_dir: PathBuf::new(),
             entries: Vec::new(),
             load_error: None,
             selection: Selection::default(),

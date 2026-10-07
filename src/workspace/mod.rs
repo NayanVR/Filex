@@ -247,7 +247,11 @@ fn migrate_tags(tags: &PlatformTags, applied: &mut ops::AppliedOp) {
 
 struct Workspace {
     focus_handle: FocusHandle,
+    /// Where the tab is (or is navigating to); set as a load starts.
     cwd: PathBuf,
+    /// The directory `entries` were read from. Lags `cwd` while a load
+    /// is in flight, so the previous listing stays on screen.
+    listed_dir: PathBuf,
     entries: Vec<Entry>,
     load_error: Option<SharedString>,
     roots: Vec<IndexedRoot>,
@@ -340,6 +344,9 @@ struct Workspace {
     /// Open context menu, if any.
     context_menu: Option<ContextMenu>,
     browse_scroll: UniformListScrollHandle,
+    /// Entries per `browse_scroll` row as of the last render: 1 in list
+    /// view, the column count in grid view (whose rows are card strips).
+    browse_cols: usize,
     results_scroll: UniformListScrollHandle,
     /// Scroll handle for the virtualized Magic plan list.
     magic_scroll: UniformListScrollHandle,
@@ -510,6 +517,7 @@ impl Workspace {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
+            listed_dir: PathBuf::new(),
             entries: Vec::new(),
             load_error: None,
             roots: Vec::new(),
@@ -565,6 +573,7 @@ impl Workspace {
             next_job_id: 0,
             context_menu: None,
             browse_scroll: UniformListScrollHandle::new(),
+            browse_cols: 1,
             results_scroll: UniformListScrollHandle::new(),
             magic_scroll: UniformListScrollHandle::new(),
             browse_scrollbar: ui::scrollbar::ScrollbarState::new(),

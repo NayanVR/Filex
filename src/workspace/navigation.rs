@@ -5,17 +5,86 @@ use super::*;
 
 impl Workspace {
     pub(super) fn load_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.load_dir_selecting(path, None, cx);
+    }
+
+    /// Read `path` on the background executor, then install it and
+    /// select the entry named `select` (if any). `cwd` moves now; the
+    /// previous rows stay on screen until the listing lands. A newer
+    /// load, tab switch, or typed path bumps `path_request` and the
+    /// stale result is dropped.
+    pub(super) fn load_dir_selecting(
+        &mut self,
+        path: &Path,
+        select: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.path_request = self.path_request.wrapping_add(1);
+        let request = self.path_request;
         self.path_loading = false;
-        let settings = self.settings.read(cx).settings();
-        let sort = settings.sort;
-        match read_dir_sorted(path, &sort) {
-            Ok(entries) => {
-                self.apply_directory(path, entries, cx);
-            }
-            Err(err) => {
-                self.load_error = Some(format!("{err:#}").into());
-            }
+        self.cwd = path.to_path_buf();
+        self.sync_path(cx);
+        let sort = self.settings.read(cx).settings().sort;
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { read_dir_sorted(&path, &sort) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.path_request != request {
+                    return;
+                }
+                match result {
+                    Ok(entries) => {
+                        this.apply_directory(&path, entries, cx);
+                        if let Some(name) = select {
+                            this.select_named(&name);
+                        }
+                        this.refresh_preview(cx);
+                    }
+                    Err(err) => this.show_load_error(&path, format!("{err:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A failed load: drop the previous rows so nothing on screen (or in
+    /// the selection) points into a folder the user has left.
+    fn show_load_error(&mut self, path: &Path, err: String) {
+        self.listed_dir = path.to_path_buf();
+        self.entries.clear();
+        self.selection.clear();
+        self.load_error = Some(err.into());
+    }
+
+    /// Select and scroll to the browse row named `name`, if present.
+    fn select_named(&mut self, name: &str) {
+        if let Some(ix) = self.entries.iter().position(|entry| entry.name == name) {
+            self.selection.select_one(ix);
+            self.scroll_browse_to(ix);
+        }
+    }
+
+    /// Center browse entry `ix`. The grid's list rows are card strips,
+    /// so an entry index must become its row index first.
+    fn scroll_browse_to(&self, ix: usize) {
+        self.browse_scroll
+            .scroll_to_item(browse_row(ix, self.browse_cols), ScrollStrategy::Center);
+    }
+
+    /// After a tab switch: re-issue the load that was in flight when the
+    /// tab was left (its result was dropped by the switch).
+    pub(super) fn resume_tab_load(&mut self, cx: &mut Context<Self>) {
+        if self.listed_dir != self.cwd {
+            let cwd = self.cwd.clone();
+            self.load_dir(&cwd, cx);
         }
     }
 
@@ -31,8 +100,11 @@ impl Workspace {
         if !show_hidden {
             entries.retain(|entry| !entry.is_hidden);
         }
-        let changed = self.cwd != path;
+        // Compare against what was on screen, not `cwd`: a load sets
+        // `cwd` up front, so it already equals `path` here.
+        let changed = self.listed_dir != path;
         self.cwd = path.to_path_buf();
+        self.listed_dir = path.to_path_buf();
         self.entries = entries;
         self.load_error = None;
         self.selection.clear();
@@ -128,12 +200,12 @@ impl Workspace {
             self.active_selection_mut().move_lead(delta, len)
         };
         if let Some(next) = next {
-            let handle = if self.query.is_empty() {
-                &self.browse_scroll
+            if self.query.is_empty() {
+                self.scroll_browse_to(next);
             } else {
-                &self.results_scroll
-            };
-            handle.scroll_to_item(next, ScrollStrategy::Center);
+                self.results_scroll
+                    .scroll_to_item(next, ScrollStrategy::Center);
+            }
         }
         self.refresh_preview(cx);
         cx.notify();
@@ -203,16 +275,8 @@ impl Workspace {
             return;
         };
         self.clear_search(cx);
-        self.navigate(parent, cx);
-        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
-            && let Some(ix) = self.entries.iter().position(|entry| entry.name == name)
-        {
-            self.selection.select_one(ix);
-            self.browse_scroll
-                .scroll_to_item(ix, ScrollStrategy::Center);
-        }
-        self.refresh_preview(cx);
-        cx.notify();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        self.navigate_selecting(parent, name, cx);
     }
 
     pub(super) fn activate_selected(&mut self, cx: &mut Context<Self>) {
@@ -259,7 +323,23 @@ impl Workspace {
     }
 
     pub(super) fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.navigate_selecting(path, None, cx);
+    }
+
+    /// Navigate to `path`, selecting the entry named `select` once the
+    /// listing lands.
+    fn navigate_selecting(
+        &mut self,
+        path: PathBuf,
+        select: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if path == self.cwd {
+            // Already here (or loading here): re-list so the selection
+            // lands on fresh rows rather than racing the load.
+            if select.is_some() {
+                self.load_dir_selecting(&path, select, cx);
+            }
             self.sync_path(cx);
             cx.notify();
             return;
@@ -268,7 +348,7 @@ impl Workspace {
         // both stacks).
         self.history_back.push(self.cwd.clone());
         self.history_forward.clear();
-        self.load_dir(&path, cx);
+        self.load_dir_selecting(&path, select, cx);
         self.record_recent(path, cx);
         cx.notify();
     }
@@ -380,5 +460,28 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+}
+
+/// The `uniform_list` row holding browse entry `ix` when each row holds
+/// `cols` entries.
+fn browse_row(ix: usize, cols: usize) -> usize {
+    ix / cols.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::browse_row;
+
+    /// Regression: reveal/arrow keys in grid view scrolled to row `ix`
+    /// (an entry index), landing far below the selected card.
+    #[test]
+    fn grid_entries_map_to_their_card_row() {
+        assert_eq!(browse_row(0, 6), 0);
+        assert_eq!(browse_row(5, 6), 0);
+        assert_eq!(browse_row(6, 6), 1);
+        assert_eq!(browse_row(47, 6), 7);
+        assert_eq!(browse_row(47, 1), 47);
+        assert_eq!(browse_row(3, 0), 3);
     }
 }

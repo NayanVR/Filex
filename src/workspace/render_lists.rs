@@ -334,7 +334,11 @@ impl Workspace {
     /// N derived from the pane width so it reflows on resize. Each row
     /// builds only its own cards, so the grid is as virtualized as the
     /// list.
-    pub(super) fn render_grid(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_grid(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let settings = self.settings.read(cx).settings();
         let size = ui::grid::card_size(settings.grid_zoom);
         let cell = ui::grid::cell_width(size);
@@ -355,6 +359,7 @@ impl Workspace {
             - ui::grid::CARD_GAP * 2.)
             .max(cell);
         let cols = ui::grid::columns_for(content_w, cell);
+        self.browse_cols = cols;
         let column_width = ui::grid::column_width(content_w, cols);
         let rows = self.entries.len().div_ceil(cols);
         uniform_list(
