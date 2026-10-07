@@ -344,6 +344,9 @@ struct Workspace {
     /// Open context menu, if any.
     context_menu: Option<ContextMenu>,
     browse_scroll: UniformListScrollHandle,
+    /// Entries per `browse_scroll` row as of the last render: 1 in list
+    /// view, the column count in grid view (whose rows are card strips).
+    browse_cols: usize,
     results_scroll: UniformListScrollHandle,
     /// Scroll handle for the virtualized Magic plan list.
     magic_scroll: UniformListScrollHandle,
@@ -570,6 +573,7 @@ impl Workspace {
             next_job_id: 0,
             context_menu: None,
             browse_scroll: UniformListScrollHandle::new(),
+            browse_cols: 1,
             results_scroll: UniformListScrollHandle::new(),
             magic_scroll: UniformListScrollHandle::new(),
             browse_scrollbar: ui::scrollbar::ScrollbarState::new(),

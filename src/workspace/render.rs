@@ -358,15 +358,18 @@ impl Workspace {
                 // A small horizontal inset so the header and the rounded row
                 // selection float off the pane edges, Finder-style (the header
                 // and list share it, so their columns stay aligned).
-                ViewMode::List => div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .px_3()
-                    .child(self.render_column_headers(cx))
-                    .child(self.render_file_list(cx))
-                    .into_any_element(),
+                ViewMode::List => {
+                    self.browse_cols = 1;
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .px_3()
+                        .child(self.render_column_headers(cx))
+                        .child(self.render_file_list(cx))
+                        .into_any_element()
+                }
                 ViewMode::Grid => self.render_grid(window, cx),
             }
         };

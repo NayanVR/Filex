@@ -68,9 +68,15 @@ impl Workspace {
     fn select_named(&mut self, name: &str) {
         if let Some(ix) = self.entries.iter().position(|entry| entry.name == name) {
             self.selection.select_one(ix);
-            self.browse_scroll
-                .scroll_to_item(ix, ScrollStrategy::Center);
+            self.scroll_browse_to(ix);
         }
+    }
+
+    /// Center browse entry `ix`. The grid's list rows are card strips,
+    /// so an entry index must become its row index first.
+    fn scroll_browse_to(&self, ix: usize) {
+        self.browse_scroll
+            .scroll_to_item(browse_row(ix, self.browse_cols), ScrollStrategy::Center);
     }
 
     /// After a tab switch: re-issue the load that was in flight when the
@@ -194,12 +200,12 @@ impl Workspace {
             self.active_selection_mut().move_lead(delta, len)
         };
         if let Some(next) = next {
-            let handle = if self.query.is_empty() {
-                &self.browse_scroll
+            if self.query.is_empty() {
+                self.scroll_browse_to(next);
             } else {
-                &self.results_scroll
-            };
-            handle.scroll_to_item(next, ScrollStrategy::Center);
+                self.results_scroll
+                    .scroll_to_item(next, ScrollStrategy::Center);
+            }
         }
         self.refresh_preview(cx);
         cx.notify();
@@ -454,5 +460,28 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+}
+
+/// The `uniform_list` row holding browse entry `ix` when each row holds
+/// `cols` entries.
+fn browse_row(ix: usize, cols: usize) -> usize {
+    ix / cols.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::browse_row;
+
+    /// Regression: reveal/arrow keys in grid view scrolled to row `ix`
+    /// (an entry index), landing far below the selected card.
+    #[test]
+    fn grid_entries_map_to_their_card_row() {
+        assert_eq!(browse_row(0, 6), 0);
+        assert_eq!(browse_row(5, 6), 0);
+        assert_eq!(browse_row(6, 6), 1);
+        assert_eq!(browse_row(47, 6), 7);
+        assert_eq!(browse_row(47, 1), 47);
+        assert_eq!(browse_row(3, 0), 3);
     }
 }
