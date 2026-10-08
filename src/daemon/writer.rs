@@ -2,7 +2,7 @@
 //! feed one build coordinator while notifications populate a fresh overlay.
 use super::{
     builder::{self, BuildRequest, Built},
-    changes::{apply, normalize_batch},
+    changes::{apply, new_trees, normalize_batch},
     ipc::{RootStatus, Status},
     recovery,
     view::{Overlay, View},
@@ -31,10 +31,19 @@ const COMMAND_CAPACITY: usize = 256;
 const EVENT_BATCH_LIMIT: usize = 4096;
 const OVERLAY_RECORD_LIMIT: usize = 25_000;
 const OVERLAY_BYTE_LIMIT: usize = 16 * 1024 * 1024;
-const COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
+/// Entries listed under newly seen directories per batch before falling back
+/// to a full reconcile.
+const NEW_TREE_LIMIT: usize = 10_000;
+/// Below the overlay limits, compact only once the overlay is this old and the
+/// filesystem has been quiet for `QUIET_BEFORE_COMPACTION` (FIL-27).
+const IDLE_COMPACTION_AGE: Duration = Duration::from_secs(30 * 60);
+const QUIET_BEFORE_COMPACTION: Duration = Duration::from_secs(2 * 60);
+/// Ceiling for a never-quiet machine; bounds WAL growth and replay time.
+const MAX_COMPACTION_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 const BUILD_RETRY_DELAY: Duration = Duration::from_secs(30);
 const BUILD_RETRY_LIMIT: Duration = Duration::from_secs(15 * 60);
 const WRITER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const BUILDER_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 pub enum Command {
     Paths { paths: Vec<PathBuf>, remove: bool },
@@ -125,6 +134,8 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
             let mut awaiting_watch = true;
             let mut deferred = VecDeque::new();
             let mut last_build = std::time::Instant::now();
+            let mut last_change = last_build;
+            let mut build_started = last_build;
             let mut retry_after = last_build;
             let mut retry_delay = BUILD_RETRY_DELAY;
             let mut retired = VecDeque::<(PathBuf, std::sync::Weak<Segment>, u64)>::new();
@@ -139,10 +150,12 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                 if !building
                     && std::time::Instant::now() >= retry_after
                     && (reconcile
-                        || active.records.len() >= OVERLAY_RECORD_LIMIT
-                        || active.bytes() >= OVERLAY_BYTE_LIMIT
-                        || (!active.records.is_empty()
-                            && last_build.elapsed() >= COMPACTION_INTERVAL))
+                        || compaction_due(
+                            active.records.len(),
+                            active.bytes(),
+                            last_build.elapsed(),
+                            last_change.elapsed(),
+                        ))
                 {
                     if !active.records.is_empty() {
                         frozen.push(Arc::new(std::mem::take(&mut active)));
@@ -160,6 +173,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                         .is_ok()
                     {
                         building = true;
+                        build_started = std::time::Instant::now();
                         reconcile = false;
                     }
                 }
@@ -251,10 +265,9 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                             continue;
                         }
                         let view = owner.view.read().unwrap().clone();
-                        if paths.iter().any(|p| {
-                            p.is_dir() && view.resolve(&ingest::canonical_event_path(p)).is_none()
-                        }) {
-                            reconcile = true;
+                        match new_trees(&view, &paths, &directory, NEW_TREE_LIMIT) {
+                            Some(found) => batch.extend(found.into_iter().map(|p| (p, false))),
+                            None => reconcile = true,
                         }
                         let (changes, degraded) = normalize_batch(&view, batch, &next);
                         deltas.extend(changes);
@@ -301,6 +314,14 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                 match publication {
                                     Ok(()) => {
                                         retry_delay = BUILD_RETRY_DELAY;
+                                        tracing::info!(
+                                            reconcile = reconciling,
+                                            secs = build_started.elapsed().as_secs_f32(),
+                                            records = built.segment.len(),
+                                            bytes = std::fs::metadata(&final_path)
+                                                .map_or(0, |m| m.len()),
+                                            "index generation published"
+                                        );
                                         let old = owner.view.read().unwrap().base.clone();
                                         if let Some((path, epoch)) =
                                             current_segment.replace((final_path, manifest_epoch))
@@ -422,6 +443,9 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                     }
                 }
                 if !deltas.is_empty() {
+                    if deltas.iter().any(|d| !matches!(d, Delta::Roots(_))) {
+                        last_change = std::time::Instant::now();
+                    }
                     let tx = Transaction {
                         sequence: seq + 1,
                         deltas,
@@ -454,7 +478,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
             owner.stop.store(true, Ordering::Relaxed);
             drop(build_tx);
             drop(rx);
-            let _ = builder.join();
+            join_within(builder, BUILDER_SHUTDOWN_GRACE);
         })?;
     Ok(Handle {
         shared,
@@ -462,12 +486,50 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
         thread: Some(thread),
     })
 }
+/// Whether the live overlay should be frozen into a new base (FIL-27).
+///
+/// The overlay is already searchable, so compaction only bounds overlay size,
+/// per-query overlay work and WAL replay. A full build costs a worker process
+/// and a whole new segment file, so a trickle of changes waits for an old
+/// overlay *and* a quiet filesystem, with a hard ceiling for machines that
+/// never go quiet. The previous rule ("any change, 30 s since the last build")
+/// rebuilt back to back on every real machine.
+fn compaction_due(
+    records: usize,
+    bytes: usize,
+    since_build: Duration,
+    since_change: Duration,
+) -> bool {
+    records >= OVERLAY_RECORD_LIMIT
+        || bytes >= OVERLAY_BYTE_LIMIT
+        || (records > 0
+            && (since_build >= MAX_COMPACTION_AGE
+                || (since_build >= IDLE_COMPACTION_AGE && since_change >= QUIET_BEFORE_COMPACTION)))
+}
+
 /// Successive segment-build failures double the wait, capped at
 /// `BUILD_RETRY_LIMIT`. A persistent failure (a worker whose segment this
 /// build cannot open, a full disk) otherwise re-walks every root on a fixed
 /// 30s cycle forever, which costs a saturated core and publishes nothing.
 fn next_retry_delay(previous: Duration) -> Duration {
     previous.saturating_mul(2).min(BUILD_RETRY_LIMIT)
+}
+
+/// A cancelled build returns within one filesystem call, but that call can
+/// stall (an unresponsive mount). Shutdown abandons the builder after a grace
+/// period instead of hanging until SIGKILL. That is safe: only the writer
+/// publishes, the worker exits when its stdin closes with this process, and
+/// startup removes leftover scratch files.
+fn join_within(thread: std::thread::JoinHandle<()>, grace: Duration) {
+    let deadline = std::time::Instant::now() + grace;
+    while !thread.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if thread.is_finished() {
+        let _ = thread.join();
+    } else {
+        tracing::warn!("abandoning a segment build that did not stop in time");
+    }
 }
 
 fn publish(owner: &Shared, frozen: &[Arc<Overlay>], active: &Overlay, roots: &[Root], epoch: u64) {
@@ -515,6 +577,57 @@ impl Drop for Handle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Simulate `hours` of one changed record every `every`, compacting
+    /// whenever the policy says so; return how many builds ran.
+    fn builds_for_trickle(hours: u64, every: Duration) -> usize {
+        let step = Duration::from_secs(1);
+        let (mut records, mut since_build, mut since_change) = (0, Duration::ZERO, Duration::MAX);
+        let mut builds = 0;
+        for second in 0..hours * 3600 {
+            if second % every.as_secs() == 0 {
+                records += 1;
+                since_change = Duration::ZERO;
+            }
+            if compaction_due(records, records * 200, since_build, since_change) {
+                builds += 1;
+                records = 0;
+                since_build = Duration::ZERO;
+            }
+            since_build += step;
+            since_change = since_change.saturating_add(step);
+        }
+        builds
+    }
+
+    /// FIL-27 regression: the old "any change + 30 s" rule ran ~120 full
+    /// builds an hour under a trickle. A never-quiet machine now builds once
+    /// per `MAX_COMPACTION_AGE` (6 h, 12 h and 18 h in a day).
+    #[test]
+    fn a_steady_trickle_does_not_rebuild_back_to_back() {
+        assert_eq!(builds_for_trickle(1, Duration::from_secs(5)), 0);
+        assert_eq!(builds_for_trickle(1, Duration::from_secs(60)), 0);
+        assert_eq!(builds_for_trickle(24, Duration::from_secs(5)), 3);
+    }
+
+    #[test]
+    fn a_quiet_old_overlay_compacts_once() {
+        // Changes every 10 minutes leave quiet gaps: one build roughly every
+        // half hour (32 minutes, waiting for quiet), not one per change.
+        assert_eq!(builds_for_trickle(2, Duration::from_secs(600)), 3);
+        let quiet = QUIET_BEFORE_COMPACTION;
+        assert!(compaction_due(1, 200, IDLE_COMPACTION_AGE, quiet));
+        assert!(!compaction_due(1, 200, IDLE_COMPACTION_AGE, quiet / 2));
+        assert!(!compaction_due(0, 0, MAX_COMPACTION_AGE, quiet));
+    }
+
+    #[test]
+    fn a_large_overlay_compacts_immediately() {
+        let now = Duration::ZERO;
+        assert!(compaction_due(OVERLAY_RECORD_LIMIT, 0, now, now));
+        assert!(compaction_due(1, OVERLAY_BYTE_LIMIT, now, now));
+        assert!(!compaction_due(OVERLAY_RECORD_LIMIT - 1, 0, now, now));
+    }
 
     #[test]
     fn retry_delay_doubles_then_holds_at_the_cap() {

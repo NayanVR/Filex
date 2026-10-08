@@ -166,6 +166,9 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
         while !wake_stop.load(Ordering::Relaxed) && !writer_stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
         }
+        // Cancel an in-flight build now. Teardown reaches the writer only after
+        // joining query workers and the watcher (FIL-27: SIGTERM mid-build).
+        writer_stop.store(true, Ordering::Relaxed);
         let _ = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port));
     });
     let mut operations = VecDeque::<u64>::new();

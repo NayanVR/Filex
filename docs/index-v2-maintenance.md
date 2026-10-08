@@ -34,10 +34,41 @@ Queries hold an immutable `View`, so a new publication does not change a running
 query's records. An updated name is considered separately from its old base
 posting. Interactive work limits produce an explicit partial result.
 
-The writer freezes changes at 25,000 records or an estimated 16 MiB, or after
-30 seconds when there are pending changes. One coordinator prepares a build at a
-time. Enumeration preserves existing native identities where possible; a move
-does not require rewriting every descendant's path.
+The writer freezes changes at 25,000 records or an estimated 16 MiB. Below
+that, a non-empty overlay is compacted only once it is 30 minutes old **and**
+no change has arrived for 2 minutes, or unconditionally after 6 hours, which
+bounds WAL growth on a machine that is never quiet (`compaction_due` in
+`writer.rs`). One coordinator prepares a build at a time. Enumeration preserves
+existing native identities where possible; a move does not require rewriting
+every descendant's path.
+
+**Decision (FIL-27, 2026-10):** the earlier rule, "any pending change and 30
+seconds since the last build", rebuilt back to back on a real machine: a full
+build took about 90 s and something always changed within 30 s. The daemon never
+idled, and each cycle wrote a new ~50 MB segment. Compaction is not needed for
+freshness, because queries already search the overlay layers, so it now only
+bounds overlay size and WAL replay. The costs of the change:
+
+- Every query scans the overlay. `search_overlay_820k` in `benches/segment_bench.rs`
+  measures about 0.9 ms per query with a 5,000-record overlay and 4.8 ms at the
+  25,000-record limit. That limit was already reachable before this change.
+- Per-root file counts in status come from the base segment, so they can now lag
+  by up to the compaction age.
+
+A directory that the catalog has never seen, such as a `mkdir` or a tree moved
+in from outside a root, is listed in place, up to 10,000 entries per batch
+(`changes::new_trees`). It used to trigger a reconcile, which re-walks every
+root. Reconcile is still used for watcher overflow, larger new trees,
+unreadable directories and added or removed roots. During a reconcile, each walked entry
+is looked up under the parent ID the walk already holds. The old code resolved
+every path from the root, decoding name pages at each level, and that took most
+of a rebuild's CPU.
+
+A stopping daemon cancels an in-flight build immediately. The walk checks the
+stop flag before every entry. The writer waits at most 2 s for the builder
+before abandoning it, which is safe because only the writer publishes and
+startup removes scratch files. Each published generation logs its duration,
+record count, byte size and whether it was a reconcile, at `info` level.
 
 Construction runs in a short-lived `filex-indexd` worker process. The coordinator
 spools a versioned JSON header and binary records into its private database directory.

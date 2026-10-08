@@ -115,6 +115,11 @@ impl View {
         }
         self.base.child(parent, name).and_then(|slot| {
             let id = self.base.id(slot);
+            // The lookup already matched the base record's parent and name;
+            // only a newer layer can have changed them.
+            if !self.layers.iter().any(|l| l.records.contains_key(&id)) {
+                return Some(id);
+            }
             self.record(id)
                 .filter(|r| r.parent == parent && r.name == name)
                 .map(|_| id)

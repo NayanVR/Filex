@@ -1114,3 +1114,58 @@ fn daemon_shuts_down_cleanly_on_sigterm_and_sigint_even_if_inherited_ignored() {
         assert!(!data.join("endpoint.json").exists());
     }
 }
+
+/// FIL-27 regression: SIGTERM during a full build (here the startup
+/// reconcile) must stop the daemon promptly — it previously needed SIGKILL —
+/// without publishing a partial generation or leaving scratch files.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn daemon_stops_promptly_on_sigterm_mid_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("files");
+    let data = dir.path().join("index");
+    std::fs::create_dir(&root).unwrap();
+    for i in 0..20_000 {
+        std::fs::write(root.join(format!("{i}.txt")), b"").unwrap();
+    }
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_filex-indexd"))
+        .arg("--data-dir")
+        .arg(&data)
+        .arg(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let scratch = || {
+        std::fs::read_dir(&data)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("build-") && name.ends_with(".tmp")
+            })
+    };
+    wait_until(scratch);
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    assert!(!scratch(), "cancelled build left scratch files");
+    let published = std::fs::read_dir(&data)
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("segment-"));
+    assert!(!published, "a cancelled build was published");
+}

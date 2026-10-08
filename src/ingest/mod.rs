@@ -37,10 +37,15 @@ pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
 /// Iterative walk: bounded directory stack, no full descendant path arena and no
 /// symlink traversal. Permission loss is reported rather than silently claiming
 /// a complete generation.
+///
+/// `allocate` receives each entry's path, the ID already allocated to its
+/// parent directory (0 for the root) and its native identity. `cancel` is
+/// checked before every entry, so a stop lands within one `stat`, not one
+/// directory (FIL-27).
 pub fn walk(
     root: &Root,
     excluded: &Path,
-    mut allocate: impl FnMut(&Path, &Identity) -> u64,
+    mut allocate: impl FnMut(&Path, u64, &Identity) -> u64,
     mut emit: impl FnMut(Record) -> Result<()>,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<usize> {
@@ -48,13 +53,12 @@ pub fn walk(
     let include_system = include_system_files();
     let meta = std::fs::symlink_metadata(&root.path)?;
     let root_identity = identity(&root.path, &meta);
-    let root_id = allocate(&root.path, &root_identity);
+    let root_id = allocate(&root.path, 0, &root_identity);
     emit(inspect(&root.path, root_id, 0, root.id)?)?;
     let mut stack = vec![(root.path.clone(), root_id)];
+    let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
     while let Some((path, parent)) = stack.pop() {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            anyhow::bail!("enumeration cancelled");
-        }
+        anyhow::ensure!(!cancelled(), "enumeration cancelled");
         let entries = match std::fs::read_dir(path) {
             Ok(e) => e,
             Err(_) => {
@@ -63,6 +67,7 @@ pub fn walk(
             }
         };
         for entry in entries {
+            anyhow::ensure!(!cancelled(), "enumeration cancelled");
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => {
@@ -83,7 +88,7 @@ pub fn walk(
                 }
             };
             let key = identity(&path, &meta);
-            let id = allocate(&path, &key);
+            let id = allocate(&path, parent, &key);
             let record = match inspect(&path, id, parent, root.id) {
                 Ok(r) => r,
                 Err(_) => {
@@ -152,6 +157,47 @@ pub fn excluded_system(root: &Path, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// FIL-27 regression: a stop raised mid-directory ends the walk at the
+    /// next entry. It used to be checked once per directory, so a stopping
+    /// daemon still inspected the rest of a large directory first.
+    #[test]
+    fn walk_stops_within_a_directory_once_cancelled() {
+        use super::{Root, walk};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tree = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            std::fs::write(tree.path().join(format!("{i}.txt")), b"x").unwrap();
+        }
+        let root = Root {
+            id: 1,
+            path: tree.path().to_path_buf(),
+            device: 0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut emitted = 0;
+        let mut parents = Vec::new();
+        let result = walk(
+            &root,
+            &tree.path().join("not-the-database"),
+            |_, parent, _| {
+                parents.push(parent);
+                parents.len() as u64
+            },
+            |_| {
+                emitted += 1;
+                if emitted == 2 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                Ok(())
+            },
+            &cancel,
+        );
+        assert!(result.is_err(), "a cancelled walk is never complete");
+        assert_eq!(emitted, 2, "no entry is inspected after the stop");
+        assert_eq!(parents, [0, 1], "entries receive their parent's ID");
+    }
+
     /// A walk whose directory permissions were revoked must degrade rather than
     /// fail: skip and count that directory, keep every readable sibling, and
     /// pick the contents up once the grant returns. Only the `chmod` setup is
@@ -187,7 +233,7 @@ mod tests {
             let skipped = walk(
                 &root,
                 &excluded,
-                |_, _| {
+                |_, _, _| {
                     next += 1;
                     next
                 },

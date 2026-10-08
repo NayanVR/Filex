@@ -5,7 +5,7 @@
 //! Only the catalog writer can publish the completed file in a manifest.
 use super::view::View;
 use crate::{
-    catalog::segment::{Record, Root, Segment},
+    catalog::segment::{Identity, Record, Root, Segment, raw_name},
     ingest,
 };
 use anyhow::{Context, Result, ensure};
@@ -123,19 +123,12 @@ fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) 
         skipped += ingest::walk(
             root,
             &request.directory,
-            |path, identity| {
-                let existing = request
-                    .view
-                    .resolve(path)
-                    .and_then(|id| request.view.record(id))
-                    .filter(|record| record.identity == *identity)
-                    .map(|record| record.id)
-                    .or_else(|| {
-                        request.view.find_native(root.id, *identity).filter(|&id| {
-                            identity.birth != 0
-                                && request.view.path(id).is_none_or(|old| !old.exists())
-                        })
-                    });
+            |path, parent, identity| {
+                let existing = unchanged_id(&request.view, path, parent, identity).or_else(|| {
+                    request.view.find_native(root.id, *identity).filter(|&id| {
+                        identity.birth != 0 && request.view.path(id).is_none_or(|old| !old.exists())
+                    })
+                });
                 let id = existing
                     .filter(|id| allocated.insert(*id))
                     .unwrap_or_else(|| request.next.fetch_add(1, Ordering::Relaxed));
@@ -147,6 +140,27 @@ fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) 
         )?;
     }
     Ok(skipped)
+}
+
+/// The ID of the record at `path` whose native identity still matches.
+///
+/// The walk already holds the parent's ID, so look one level down instead of
+/// resolving the path from the root for every entry: that per-entry
+/// root-to-leaf walk, a name-page decode per binary-search probe, was ~94% of
+/// a rebuild's CPU (FIL-27). A miss still tries the full path, which covers a
+/// parent that was replaced under its children; it costs only for changed
+/// entries.
+fn unchanged_id(view: &View, path: &Path, parent: u64, identity: &Identity) -> Option<u64> {
+    let unchanged = |id| {
+        view.record(id)
+            .filter(|record| record.identity == *identity)
+            .map(|record| record.id)
+    };
+    path.file_name()
+        .filter(|_| parent != 0)
+        .and_then(|name| view.child(parent, &raw_name(name)))
+        .and_then(unchanged)
+        .or_else(|| view.resolve(path).and_then(unchanged))
 }
 
 fn write_line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
@@ -522,6 +536,39 @@ mod tests {
                 .contains("duplicate file ID")
         );
         assert!(!output.exists());
+    }
+
+    /// FIL-27 regression: a stopping daemon cancels a reconcile build without
+    /// leaving scratch files or anything a writer could publish.
+    #[test]
+    fn stopped_build_fails_and_leaves_nothing_behind() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = directory.path().join("files");
+        let data = directory.path().join("index");
+        std::fs::create_dir_all(files.join("nested")).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        for i in 0..200 {
+            std::fs::write(files.join(format!("nested/{i}.txt")), b"x").unwrap();
+        }
+        let roots = vec![Root {
+            id: 1,
+            path: files,
+            device: 0,
+        }];
+        let request = BuildRequest {
+            view: Arc::new(View {
+                base: Arc::new(Segment::build([], roots.clone(), 0).unwrap()),
+                layers: vec![],
+                roots,
+                epoch: 0,
+            }),
+            reconcile: true,
+            directory: data.clone(),
+            next: Arc::new(AtomicU64::new(1)),
+        };
+        let error = build(request, &AtomicBool::new(true)).err().unwrap();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
     }
 
     #[test]

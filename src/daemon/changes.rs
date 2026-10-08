@@ -121,10 +121,132 @@ pub(super) fn normalize_batch(
     (deltas, degraded)
 }
 
+/// Descendants of the directories in `paths` that the catalog has never seen.
+///
+/// A directory moved in from outside the roots produces one notification, not
+/// one per descendant, so its contents are listed here. This used to request a
+/// reconcile, which re-walks every root: any `mkdir` under a home-directory
+/// root cost a full rebuild (FIL-27). Returns `None` once more than `limit`
+/// entries are found or a directory cannot be read; the caller reconciles.
+/// Symlinks are not followed, matching `ingest::walk`; a directory that has
+/// already disappeared again contributes nothing.
+pub(super) fn new_trees(
+    view: &View,
+    paths: &[PathBuf],
+    excluded: &Path,
+    limit: usize,
+) -> Option<Vec<PathBuf>> {
+    let is_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let mut pending: Vec<PathBuf> = paths
+        .iter()
+        .filter(|p| is_dir(p) && view.resolve(&ingest::canonical_event_path(p)).is_none())
+        .cloned()
+        .collect();
+    let mut found = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        for entry in entries {
+            let path = entry.ok()?.path();
+            if path.starts_with(excluded) {
+                continue;
+            }
+            if is_dir(&path) {
+                pending.push(path.clone());
+            }
+            found.push(path);
+            if found.len() > limit {
+                return None;
+            }
+        }
+    }
+    Some(found)
+}
+
 pub(super) fn apply(overlay: &mut Overlay, roots: &mut Vec<Root>, delta: Delta) {
     match delta {
         Delta::Upsert(r) => overlay.put(r.id, Some(r)),
         Delta::Delete(id) => overlay.put(id, None),
         Delta::Roots(r) => *roots = r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::segment::{Record, Segment};
+
+    fn view_of(root: &Path) -> View {
+        let roots = vec![Root {
+            id: 1,
+            path: root.to_path_buf(),
+            device: 0,
+        }];
+        let mut known = ingest::inspect(root, 1, 0, 1).unwrap();
+        known.flags = Record::DIRECTORY;
+        View {
+            base: Arc::new(Segment::build([known], roots.clone(), 0).unwrap()),
+            layers: vec![],
+            roots,
+            epoch: 0,
+        }
+    }
+
+    /// FIL-27 regression: a directory the catalog has not seen is listed in
+    /// place instead of forcing a full reconcile of every root.
+    #[test]
+    fn new_directories_are_listed_without_a_reconcile() {
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        let view = view_of(&root);
+        std::fs::create_dir_all(root.join("moved/inner")).unwrap();
+        std::fs::write(root.join("moved/inner/deep.txt"), b"x").unwrap();
+        std::fs::write(root.join("moved/top.txt"), b"x").unwrap();
+        let excluded = root.join("moved/index");
+        std::fs::create_dir(&excluded).unwrap();
+        let paths = [
+            root.join("moved"),
+            root.join("gone"),
+            root.join("moved/top.txt"),
+        ];
+        let mut found = new_trees(&view, &paths, &excluded, 100).unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                root.join("moved/inner"),
+                root.join("moved/inner/deep.txt"),
+                root.join("moved/top.txt"),
+            ]
+        );
+        assert!(
+            new_trees(&view, std::slice::from_ref(&root), &excluded, 100)
+                .unwrap()
+                .is_empty(),
+            "a known directory is not listed"
+        );
+        assert!(
+            new_trees(&view, &paths, &excluded, 2).is_none(),
+            "too large: reconcile"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_tree_listing_does_not_follow_symlinks() {
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("elsewhere.txt"), b"x").unwrap();
+        std::fs::create_dir(root.join("new")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("new/link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+        let view = view_of(&root);
+        let paths = [root.join("new"), root.join("link")];
+        let found = new_trees(&view, &paths, &root.join("index"), 100).unwrap();
+        assert_eq!(found, [root.join("new/link")]);
     }
 }
