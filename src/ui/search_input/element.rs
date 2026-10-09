@@ -66,7 +66,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), theme.text_dim.into())
+            (input.placeholder.clone(), gpui::rgb_to_hsla(theme.text_dim))
         } else {
             (content, style.color)
         };
@@ -78,6 +78,7 @@ impl Element for TextElement {
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
             vec![
@@ -192,7 +193,15 @@ impl Element for TextElement {
                 window.paint_quad(selection)
             }
             let origin = point(bounds.left() - scroll, bounds.top());
-            line.paint(origin, window.line_height(), window, cx).ok();
+            line.paint(
+                origin,
+                window.line_height(),
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .ok();
 
             if focus_handle.is_focused(window)
                 && let Some(cursor) = prepaint.cursor.take()

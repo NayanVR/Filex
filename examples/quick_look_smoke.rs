@@ -18,8 +18,8 @@ fn main() {
 mod harness {
     use super::native;
     use gpui::{
-        App, Application, Bounds, Context, FocusHandle, KeyBinding, Window, WindowBounds,
-        WindowOptions, actions, div, prelude::*, px, size,
+        App, Bounds, Context, FocusHandle, KeyBinding, Window, WindowBounds, WindowOptions,
+        actions, div, prelude::*, px, size,
     };
     use objc2::MainThreadMarker;
     use objc2_app_kit::{
@@ -131,7 +131,7 @@ mod harness {
             .map(PathBuf::from)
             .unwrap_or(first);
         let fixtures = vec![first.canonicalize().unwrap(), second];
-        Application::new().run(move |cx: &mut App| {
+        gpui_platform::application().run(move |cx: &mut App| {
             let bounds = Bounds::centered(None, size(px(650.), px(400.)), cx);
             cx.bind_keys([KeyBinding::new(
                 "space",
@@ -159,7 +159,9 @@ mod harness {
             // app while Quick Look may pump a nested native event loop.
             cx.spawn(async move |cx| {
                 loop {
-                    gpui::Timer::after(Duration::from_millis(1)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
                     if w.update(cx, |h, _, _| h.updates += 1).is_err() {
                         break;
                     }
@@ -167,17 +169,17 @@ mod harness {
             })
             .detach();
             cx.spawn(async move |cx| {
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 let host = w
-                    .update(cx, |h, window, _| {
-                        window.focus(&h.focus);
+                    .update(cx, |h, window, cx| {
+                        window.focus(&h.focus, cx);
                         native_window(window)
                     })
                     .unwrap();
                 // Post a real AppKit event. Calling sendEvent from this async
                 // task would run on the dispatch queue and mask reentrancy.
                 post_space(&host);
-                gpui::Timer::after(Duration::from_secs(2)).await;
+                cx.background_executor().timer(Duration::from_secs(2)).await;
                 w.update(cx, |h, _, _| {
                     assert!(h.viewer.as_ref().unwrap().is_visible());
                     assert_eq!(unsafe { panel().currentPreviewItemIndex() }, 0);
@@ -185,11 +187,11 @@ mod harness {
                     h.viewer.as_ref().unwrap().update(fixtures.clone(), 1);
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 assert_eq!(unsafe { panel().currentPreviewItemIndex() }, 1);
                 println!("UPDATE_OK");
                 send_key(49, " ");
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 w.update(cx, |h, _, _| {
                     assert!(
                         !h.viewer.as_ref().unwrap().is_visible(),
@@ -202,9 +204,9 @@ mod harness {
                     h.viewer.as_ref().unwrap().show(fixtures.clone(), 0);
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 send_key(53, "\u{1b}");
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 w.update(cx, |h, _, _| {
                     assert!(
                         !h.viewer.as_ref().unwrap().is_visible(),
@@ -217,7 +219,7 @@ mod harness {
                     assert!(h.viewer.as_ref().unwrap().is_visible());
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 w.update(cx, |h, _, _| {
                     assert!(
                         h.viewer.as_ref().unwrap().is_visible() && panel().isVisible(),
@@ -233,7 +235,7 @@ mod harness {
                     }
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 w.update(cx, |h, _, _| {
                     assert!(panel().isVisible());
                     assert_eq!(unsafe { panel().currentPreviewItemIndex() }, 1);
@@ -241,7 +243,7 @@ mod harness {
                     h.viewer.as_ref().unwrap().update(Vec::new(), 0);
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 w.update(cx, |h, _, _| {
                     assert!(!panel().isVisible(), "Empty selection must close the panel");
                     println!("EMPTY_SELECTION_OK");
@@ -251,7 +253,7 @@ mod harness {
                     println!("DROP_PENDING_OK");
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 assert!(!panel().isVisible());
                 // Also drop a live owner, rather than only cancel a queued open.
                 w.update(cx, |h, window, cx| {
@@ -264,13 +266,13 @@ mod harness {
                     h.viewer = Some(viewer);
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 assert!(panel().isVisible());
                 w.update(cx, |h, _, _| {
                     h.viewer.take();
                 })
                 .unwrap();
-                gpui::Timer::after(Duration::from_secs(1)).await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 assert!(unsafe { panel().dataSource() }.is_none());
                 assert!(unsafe { panel().delegate() }.is_none());
                 assert!(unsafe { panel().currentController() }.is_none());
@@ -282,7 +284,7 @@ mod harness {
                     unsafe { panel().currentController() }.is_some()
                 );
                 assert!(!panel().isVisible(), "Panel stays closed after owner drops");
-                cx.update(|cx| cx.quit()).unwrap();
+                cx.update(|cx| cx.quit());
             })
             .detach();
         });

@@ -663,7 +663,7 @@ impl Render for Workspace {
                     } else if this.settings_open {
                         this.toggle_settings(window, cx);
                     } else {
-                        window.focus(&this.focus_handle);
+                        window.focus(&this.focus_handle, cx);
                     }
                 }),
             )

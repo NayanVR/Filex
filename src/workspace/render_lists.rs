@@ -168,7 +168,7 @@ impl Workspace {
                                     .tooltip(ui::tooltip::text_tooltip(tooltip, theme))
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, window, cx| {
-                                            window.focus(&this.focus_handle);
+                                            window.focus(&this.focus_handle, cx);
                                             this.toggle_magic_op(ix, cx);
                                         },
                                     )),
@@ -177,7 +177,7 @@ impl Workspace {
                             .collect()
                     }),
                 )
-                .track_scroll(self.magic_scroll.clone())
+                .track_scroll(&self.magic_scroll)
                 .with_decoration(ui::scrollbar::scrollbar(
                     self.magic_scroll.clone(),
                     self.magic_scrollbar.clone(),
@@ -204,7 +204,7 @@ impl Workspace {
                         ui::magic_card::secondary_button(&theme, "magic-select-all", "Select all")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.set_all_magic_ops(true, cx);
-                                window.focus(&this.focus_handle);
+                                window.focus(&this.focus_handle, cx);
                             })),
                     )
                     .child(
@@ -215,7 +215,7 @@ impl Workspace {
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.set_all_magic_ops(false, cx);
-                            window.focus(&this.focus_handle);
+                            window.focus(&this.focus_handle, cx);
                         })),
                     )
                     .child(
@@ -381,7 +381,7 @@ impl Workspace {
                     .collect()
             }),
         )
-        .track_scroll(self.browse_scroll.clone())
+        .track_scroll(&self.browse_scroll)
         .with_decoration(ui::scrollbar::scrollbar(
             self.browse_scroll.clone(),
             self.browse_scrollbar.clone(),
@@ -549,7 +549,7 @@ impl Workspace {
                     .collect()
             }),
         )
-        .track_scroll(self.browse_scroll.clone())
+        .track_scroll(&self.browse_scroll)
         .with_decoration(ui::scrollbar::scrollbar(
             self.browse_scroll.clone(),
             self.browse_scrollbar.clone(),
@@ -598,7 +598,7 @@ impl Workspace {
                     .collect()
             }),
         )
-        .track_scroll(self.results_scroll.clone())
+        .track_scroll(&self.results_scroll)
         .with_decoration(ui::scrollbar::scrollbar(
             self.results_scroll.clone(),
             self.results_scrollbar.clone(),

@@ -131,11 +131,12 @@ impl Workspace {
         self.settings_open = !self.settings_open;
         self.recording_shortcut = None;
         self.shortcut_error = None;
-        window.focus(if self.settings_open {
+        let handle = if self.settings_open {
             &self.settings_focus
         } else {
             &self.focus_handle
-        });
+        };
+        window.focus(handle, cx);
         cx.notify();
     }
 
@@ -144,7 +145,7 @@ impl Workspace {
         self.settings_section = SettingsSection::Keyboard;
         self.recording_shortcut = None;
         self.shortcut_error = None;
-        window.focus(&self.settings_focus);
+        window.focus(&self.settings_focus, cx);
         cx.notify();
     }
 
@@ -245,7 +246,7 @@ impl Workspace {
                     this.settings_section = item;
                     this.recording_shortcut = None;
                     this.shortcut_error = None;
-                    window.focus(&this.settings_focus);
+                    window.focus(&this.settings_focus, cx);
                     cx.notify();
                 }))
             }),
@@ -387,7 +388,7 @@ impl Workspace {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.recording_shortcut = Some(id);
                                 this.shortcut_error = None;
-                                window.focus(&this.settings_focus);
+                                window.focus(&this.settings_focus, cx);
                                 cx.notify();
                             })),
                     )

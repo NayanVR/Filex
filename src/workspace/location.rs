@@ -52,7 +52,7 @@ impl Workspace {
     }
 
     pub(super) fn focus_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.path_input.focus_handle(cx));
+        window.focus(&self.path_input.focus_handle(cx), cx);
         self.path_input
             .update(cx, |input, cx| input.select_all_text(cx));
         cx.notify();
@@ -62,7 +62,7 @@ impl Workspace {
         self.path_request = self.path_request.wrapping_add(1);
         self.path_loading = false;
         self.sync_path(cx);
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -84,7 +84,7 @@ impl Workspace {
         let sort = self.settings.read(cx).settings().sort;
         self.path_error = None;
         self.path_loading = true;
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx

@@ -11,9 +11,7 @@ use super::theme::Theme;
 /// Enable tabular (fixed-width) figures on a text element, so a column of
 /// sizes and dates aligns digit-for-digit instead of jittering.
 pub fn tabular(mut el: Div) -> Div {
-    el.text_style()
-        .get_or_insert_with(Default::default)
-        .font_features = Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    el.text_style().font_features = Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
     el
 }
 

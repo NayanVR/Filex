@@ -181,7 +181,7 @@ impl Render for Grid {
                     .collect::<Vec<_>>()
             }),
         )
-        .track_scroll(self.scroll.clone())
+        .track_scroll(&self.scroll)
         .size_full();
         div()
             .size_full()
@@ -215,7 +215,7 @@ pub fn run(backend: String, dir: PathBuf, output: PathBuf) -> Result<()> {
     } else {
         None
     };
-    Application::new()
+    gpui_platform::application()
         .with_assets(ui::assets::Assets)
         .run(move |cx| {
             ui::fonts::register(cx);

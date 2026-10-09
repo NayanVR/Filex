@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! uniform_list("id", len, render_fn)
-//!     .track_scroll(handle.clone())
+//!     .track_scroll(&handle)
 //!     .with_decoration(scrollbar(handle, state, &theme))
 //! ```
 //!
@@ -80,9 +80,15 @@ pub fn scrollbar(
     state: ScrollbarState,
     theme: &Theme,
 ) -> ScrollbarDecoration {
-    let base: Hsla = theme.text_dim.into();
-    let idle = Hsla { a: 0.30, ..base };
-    let hover = Hsla { a: 0.55, ..base };
+    let base = gpui::rgb_to_hsla(theme.text_dim);
+    let idle = Hsla {
+        alpha: 0.30,
+        ..base
+    };
+    let hover = Hsla {
+        alpha: 0.55,
+        ..base
+    };
     ScrollbarDecoration {
         handle,
         state,

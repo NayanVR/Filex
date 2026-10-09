@@ -7,10 +7,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
-    KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy,
-    SharedString, UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, size, uniform_list,
+    App, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _, KeyBinding,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString,
+    UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, size, uniform_list,
 };
 
 use filex::drives::Drive;

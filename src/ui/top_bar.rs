@@ -135,7 +135,10 @@ pub fn magic_toggle(theme: &Theme, active: bool) -> Stateful<Div> {
     let (bg, tint) = if active {
         (theme.selected, theme.accent)
     } else {
-        (gpui::transparent_black().into(), theme.text_dim)
+        (
+            gpui::hsla_to_rgba(gpui::transparent_black()),
+            theme.text_dim,
+        )
     };
     div()
         .id("magic-toggle")

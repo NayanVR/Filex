@@ -148,7 +148,7 @@ pub fn swatch(
     let ring = if selected {
         theme.text
     } else {
-        transparent_black().into()
+        gpui::hsla_to_rgba(transparent_black())
     };
     div()
         .id(id)

@@ -9,7 +9,7 @@ impl Workspace {
     /// replaces a stale query rather than appending to it.
     pub(super) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.search_input.focus_handle(cx);
-        window.focus(&handle);
+        window.focus(&handle, cx);
         self.search_input
             .update(cx, |input, cx| input.select_all_text(cx));
     }
@@ -17,7 +17,7 @@ impl Workspace {
     /// Run a `tag:NAME` search (clicking a sidebar tag), focusing the
     /// search field so it can be refined.
     pub(super) fn search_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.search_input.focus_handle(cx));
+        window.focus(&self.search_input.focus_handle(cx), cx);
         self.search_input.update(cx, |input, cx| {
             input.set_text(format!("tag:{name}"), cx);
         });
@@ -184,7 +184,7 @@ impl Workspace {
         } else {
             MagicMode::On
         };
-        window.focus(&self.search_input.focus_handle(cx));
+        window.focus(&self.search_input.focus_handle(cx), cx);
         self.update_search(cx);
         cx.notify();
     }

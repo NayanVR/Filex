@@ -141,7 +141,7 @@ impl Workspace {
                 this.cancel_rename(window, cx);
             }
         });
-        window.focus(&input.focus_handle(cx));
+        window.focus(&input.focus_handle(cx), cx);
         self.renaming = Some(RenameState {
             ix,
             input,
@@ -152,7 +152,7 @@ impl Workspace {
 
     pub(super) fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.renaming.take().is_some() {
-            window.focus(&self.search_input.focus_handle(cx));
+            window.focus(&self.search_input.focus_handle(cx), cx);
             cx.notify();
         }
     }
@@ -161,7 +161,7 @@ impl Workspace {
         let Some(RenameState { ix, input, .. }) = self.renaming.take() else {
             return;
         };
-        window.focus(&self.search_input.focus_handle(cx));
+        window.focus(&self.search_input.focus_handle(cx), cx);
         cx.notify();
         let Some(entry) = self.entries.get(ix) else {
             return;

@@ -55,21 +55,21 @@ pub fn parse_hex(text: &str) -> Option<u32> {
 }
 
 fn luminance(c: Rgba) -> f32 {
-    0.299 * c.r + 0.587 * c.g + 0.114 * c.b
+    0.299 * c.red + 0.587 * c.green + 0.114 * c.blue
 }
 
 fn with_alpha(c: Rgba, a: f32) -> Rgba {
-    Rgba { a, ..c }
+    Rgba { alpha: a, ..c }
 }
 
 /// Composite `over` onto `base` at fraction `t` (opaque result).
 fn blend(base: Rgba, over: Rgba, t: f32) -> Rgba {
-    Rgba {
-        r: base.r + (over.r - base.r) * t,
-        g: base.g + (over.g - base.g) * t,
-        b: base.b + (over.b - base.b) * t,
-        a: 1.0,
-    }
+    Rgba::new(
+        base.red + (over.red - base.red) * t,
+        base.green + (over.green - base.green) * t,
+        base.blue + (over.blue - base.blue) * t,
+        1.0,
+    )
 }
 
 /// A complete set of semantic colors. Cheap to copy (a handful of
@@ -339,6 +339,20 @@ mod tests {
             accent_rgb(AccentColor::Custom(0x123456)),
             Some(rgb(0x123456))
         );
+    }
+
+    /// Pins the colour arithmetic across GPUI colour-type changes
+    /// (gpui-ce moved `Rgba`/`Hsla` onto `palette`).
+    #[test]
+    fn color_math_is_channelwise() {
+        let grey = blend(rgb(0x000000), rgb(0xffffff), 0.5);
+        assert_eq!(
+            (grey.red, grey.green, grey.blue, grey.alpha),
+            (0.5, 0.5, 0.5, 1.0)
+        );
+        assert_eq!(with_alpha(rgb(0xffffff), 0.25).alpha, 0.25);
+        assert!((luminance(rgb(0xffffff)) - 1.0).abs() < 1e-6);
+        assert_eq!(luminance(rgb(0x000000)), 0.0);
     }
 
     #[test]

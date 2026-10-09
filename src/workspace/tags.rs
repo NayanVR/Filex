@@ -95,7 +95,7 @@ impl Workspace {
                 this.cancel_tag_editor(window, cx);
             }
         });
-        window.focus(&input.focus_handle(cx));
+        window.focus(&input.focus_handle(cx), cx);
         self.tag_editor = Some(TagEditor {
             path,
             input,
@@ -108,7 +108,7 @@ impl Workspace {
 
     pub(super) fn cancel_tag_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tag_editor.take().is_some() {
-            window.focus(&self.search_input.focus_handle(cx));
+            window.focus(&self.search_input.focus_handle(cx), cx);
             cx.notify();
         }
     }
@@ -128,7 +128,7 @@ impl Workspace {
         let Some(editor) = self.tag_editor.take() else {
             return;
         };
-        window.focus(&self.search_input.focus_handle(cx));
+        window.focus(&self.search_input.focus_handle(cx), cx);
         let name = editor.input.read(cx).text().trim().to_string();
         if name.is_empty() {
             cx.notify();
@@ -148,7 +148,7 @@ impl Workspace {
         let Some(editor) = self.tag_editor.take() else {
             return;
         };
-        window.focus(&self.search_input.focus_handle(cx));
+        window.focus(&self.search_input.focus_handle(cx), cx);
         if let Some(original) = editor.existing {
             let mut tags = self.preview_tags.clone();
             tags.retain(|t| t.name != original);

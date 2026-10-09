@@ -29,7 +29,7 @@ pub fn run() {
         "filex starting — slow operations (>{SLOW_OP_MS}ms) log at warn; \
          set RUST_LOG=filex=debug for per-scan timing"
     );
-    Application::new()
+    gpui_platform::application()
         .with_assets(ui::assets::Assets)
         .run(|cx: &mut App| {
             // Register the bundled UI font before anything renders.
@@ -39,7 +39,7 @@ pub fn run() {
             // soon as a window exists (see the open-window closure below).
             cx.set_global(Theme::dark());
             cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_window_closed(|cx| {
+            cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
                 }
@@ -63,7 +63,7 @@ pub fn run() {
                         // Focus the workspace, not the search box, so the
                         // app starts on the file list and single-key
                         // shortcuts work at once. `/` moves focus in.
-                        window.focus(&workspace.focus_handle);
+                        window.focus(&workspace.focus_handle, cx);
                         workspace
                     });
                     // A window now exists, so its OS appearance is known:

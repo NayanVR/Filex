@@ -12,7 +12,7 @@ index-v2-lab = []
 # logic can be cross-checked/tested for other platforms without pulling in
 # UI toolchains (cargo check --no-default-features --target ...).
 app = [
-  "dep:gpui", "dep:futures", "dep:image", "dep:resvg", "dep:ureq",
+  "dep:gpui", "dep:gpui_platform", "dep:futures", "dep:image", "dep:resvg", "dep:ureq",
   "dep:objc2", "dep:objc2-app-kit", "dep:objc2-quick-look-ui",
   "dep:raw-window-handle", "dep:windows-core", "updater",
   "windows/Win32_Graphics_Gdi", "windows/Win32_System_Com",
@@ -75,7 +75,10 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = { version = "0.3.32", optional = true }
-gpui = { version = "0.2", optional = true }
+# Community fork of Zed's GPUI (upstream stopped publishing to crates.io).
+# Exact pins: crates.io also carries stale 0.3.x gpui-ce releases.
+gpui = { package = "gpui-ce", version = "=0.2.2", optional = true }
+gpui_platform = { package = "gpui_ce_platform", version = "=0.1.0", optional = true, features = ["font-kit"] }
 image = { version = "0.25", optional = true }
 resvg = { version = "0.45.1", default-features = false, optional = true }
 # Crash-report upload (UI process only; the daemon has no external network transport).

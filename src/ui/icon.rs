@@ -227,7 +227,7 @@ fn render_icon_svg(svg: &str) -> anyhow::Result<Arc<RenderImage>> {
 
 fn color_hex(color: Rgba) -> u32 {
     let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
-    (byte(color.r) << 16) | (byte(color.g) << 8) | byte(color.b)
+    (byte(color.red) << 16) | (byte(color.green) << 8) | byte(color.blue)
 }
 
 fn vivid_hex(color: u32, saturation_boost: f32, peak: u8) -> String {
