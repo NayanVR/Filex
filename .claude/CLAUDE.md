@@ -9,11 +9,11 @@ Do not introduce vector embeddings, ML inference, or content-based search (OCR, 
 
 ## Tech stack & hard constraints
 - **Language:** Rust (latest stable)
-- **UI framework:** GPUI (pre-1.0, breaking changes are expected between versions — always check the version pinned in Cargo.toml before assuming an API shape)
+- **UI framework:** GPUI via **gpui-ce** (github.com/gpui-ce/gpui-ce), the community fork of Zed's GPUI, package-renamed to `gpui` in Cargo.toml so code still says `use gpui::…`. Pre-1.0, and it diverges from Zed's upstream (e.g. `palette`-backed colours, `window.focus(&h, cx)`, `gpui_platform::application()`), so always check the version pinned in Cargo.toml before assuming an API shape. Keep the exact `=` pins: crates.io also carries stale gpui-ce 0.3.x releases.
 - **Target platforms:** Windows, macOS, Linux — every feature must be designed with all three in mind, even if implemented one at a time. Never write Windows-only (or Mac-only) code without a clear `#[cfg(target_os = ...)]` boundary and a plan for the other platforms.
 - **No webview, no Electron-style architecture, no JS.** Everything renders through GPUI's native GPU pipeline.
-- Reference implementation for patterns/components: GPUI Component (github.com/longbridge/gpui-component) — check it before hand-rolling a widget GPUI doesn't ship with, especially virtualized lists/tables.
-- When GPUI docs are insufficient (they usually are), the fallback is reading Zed's own source (github.com/zed-industries/zed, `crates/gpui`) — check for this before guessing at an API.
+- Reference implementation for patterns/components: GPUI Component (github.com/longbridge/gpui-component) — check it before hand-rolling a widget GPUI doesn't ship with, especially virtualized lists/tables. It targets Zed's GPUI, so borrow patterns from it, not exact API calls.
+- When GPUI docs are insufficient (they usually are), the fallback is reading gpui-ce's source (github.com/gpui-ce/gpui-ce, `crates/gpui`, or the pinned copy under `~/.cargo/registry`) — check it before guessing at an API. Zed's own source is only useful for history and patterns now.
 
 ## Per-OS indexing approach (don't conflate these)
 - **Windows:** Master File Table (MFT) parsing for instant filename index, USN Journal for live incremental updates. Requires elevated/raw disk access — surface this requirement to the user clearly in any code touching it.
@@ -51,7 +51,7 @@ Do not introduce vector embeddings, ML inference, or content-based search (OCR, 
   lands, close the issue; when a doc records a new open item, file one.
 - This is a solo/small-team project built incrementally across sessions — don't assume prior context beyond what's in this file and the current conversation. If something about scope or architecture seems ambiguous, ask rather than guessing and building the wrong thing.
 - Push back if a request seems to skip ahead of the current phase (see "Current phase" above) or underestimates complexity — the goal is a realistic, shippable project, not scope creep.
-- When in doubt about GPUI API shape, don't hallucinate a plausible-looking API — check GPUI Component or Zed's source first, or flag that it needs verification.
+- When in doubt about GPUI API shape, don't hallucinate a plausible-looking API — check gpui-ce's source (or GPUI Component for patterns) first, or flag that it needs verification.
 
 ## Out of scope reminders (do not build these yet)
 - Vector embeddings / semantic search
