@@ -102,7 +102,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
-            libx11-xcb-dev libwayland-dev libvulkan-dev
+            libx11-xcb-dev libwayland-dev libvulkan-dev libfontconfig-dev
       - name: Build release
         env:
           FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}

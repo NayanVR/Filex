@@ -51,7 +51,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
-            libx11-xcb-dev libwayland-dev libvulkan-dev
+            libx11-xcb-dev libwayland-dev libvulkan-dev libfontconfig-dev
       - name: Build the GPUI application
         run: cargo build --locked
       - name: Run application regression tests
