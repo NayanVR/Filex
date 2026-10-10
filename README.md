@@ -51,24 +51,6 @@ Filex sends optional crash reports and diagnostics to Sentry, with file names
 and paths removed, and checks GitHub for updates. Nothing else leaves your
 computer. Read the full [privacy policy](PRIVACY.md).
 
-## Code signing policy
-
-Windows releases are code-signed. Free code signing provided by
-[SignPath.io](https://about.signpath.io/), certificate by
-[SignPath Foundation](https://signpath.org/).
-
-Only binaries built by this repository's
-[release workflow](.github/workflows/release.yml) from tagged source are signed.
-Every signing request is approved manually.
-
-**Team roles**
-
-- Committers and reviewers: [NayanVR](https://github.com/NayanVR)
-- Approvers: [NayanVR](https://github.com/NayanVR)
-
-**Privacy:** see the [privacy policy](PRIVACY.md). This program does not
-transfer information to other networked systems except as described there.
-
 ## Building from source
 
 ```sh
