@@ -503,12 +503,21 @@ impl Workspace {
                 )
                 .child(ui::tabs::tab_label(self.tab_title(i)));
             if closable {
-                chip = chip.child(ui::tabs::tab_close(&theme, ("tab-close", i)).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(i, cx);
-                    }),
-                ));
+                chip = chip.child(
+                    ui::button::icon_button(
+                        &theme,
+                        ("tab-close", i),
+                        "icons/x.svg",
+                        theme.text_dim,
+                        ui::button::IconSize::Small,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, cx);
+                        },
+                    )),
+                );
             }
             tabs = tabs.child(
                 chip.on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -524,11 +533,16 @@ impl Workspace {
         }
         let cwd = self.cwd.clone();
         tabs = tabs.child(
-            ui::tabs::new_tab_button(&theme, "new-tab").on_click(cx.listener(
-                move |this, _: &ClickEvent, _window, cx| {
-                    this.open_tab(cwd.clone(), cx);
-                },
-            )),
+            ui::button::icon_button(
+                &theme,
+                "new-tab",
+                "icons/plus.svg",
+                theme.text_dim,
+                ui::button::IconSize::Medium,
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                this.open_tab(cwd.clone(), cx);
+            })),
         );
 
         let icons = div().flex().flex_none().items_center().gap_1().child(

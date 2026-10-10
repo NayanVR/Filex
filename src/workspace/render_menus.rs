@@ -13,19 +13,29 @@ impl Workspace {
             .child(ui::update_banner::message(&theme, content.message));
         if let Some(label) = content.action_label {
             bar = bar.child(
-                ui::update_banner::action_button(&theme, "update-action", label).on_click(
-                    cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.apply_update_action(cx);
-                    }),
-                ),
+                ui::button::button(
+                    &theme,
+                    "update-action",
+                    label,
+                    ui::button::Variant::Primary,
+                    ui::button::Size::Small,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.apply_update_action(cx);
+                })),
             );
         }
         bar = bar.child(
-            ui::update_banner::dismiss_button(&theme, "update-dismiss").on_click(cx.listener(
-                |this, _: &ClickEvent, _window, cx| {
-                    this.dismiss_update(cx);
-                },
-            )),
+            ui::button::icon_button(
+                &theme,
+                "update-dismiss",
+                "icons/x.svg",
+                theme.text_dim,
+                ui::button::IconSize::Small,
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.dismiss_update(cx);
+            })),
         );
         Some(bar.into_any_element())
     }
@@ -124,11 +134,18 @@ impl Workspace {
                     job.progress.fraction(),
                 )
                 .child(
-                    ui::job::cancel_button(&theme, ("job-cancel", id as usize)).on_click(
-                        cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    ui::button::icon_button(
+                        &theme,
+                        ("job-cancel", id as usize),
+                        "icons/x.svg",
+                        theme.text_dim,
+                        ui::button::IconSize::Small,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _window, cx| {
                             this.cancel_job(id, cx);
-                        }),
-                    ),
+                        },
+                    )),
                 ),
             );
         }
@@ -630,11 +647,12 @@ impl Workspace {
         }
 
         let mut footer = div().flex().items_center().gap_2().child(
-            ui::details::tag_button(
+            ui::button::button(
                 theme,
                 "tag-save",
                 if is_existing { "Save" } else { "Add" },
-                false,
+                ui::button::Variant::Primary,
+                ui::button::Size::Small,
             )
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.commit_tag_editor(window, cx);
@@ -642,15 +660,27 @@ impl Workspace {
         );
         if is_existing {
             footer = footer.child(
-                ui::details::tag_button(theme, "tag-remove", "Remove", true).on_click(cx.listener(
-                    |this, _: &ClickEvent, window, cx| {
-                        this.remove_editing_tag(window, cx);
-                    },
-                )),
+                ui::button::button(
+                    theme,
+                    "tag-remove",
+                    "Remove",
+                    ui::button::Variant::Danger,
+                    ui::button::Size::Small,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.remove_editing_tag(window, cx);
+                })),
             );
         }
         footer = footer.child(
-            ui::details::tag_button(theme, "tag-cancel", "Cancel", false).on_click(
+            ui::button::button(
+                theme,
+                "tag-cancel",
+                "Cancel",
+                ui::button::Variant::Secondary,
+                ui::button::Size::Small,
+            )
+            .on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.cancel_tag_editor(window, cx)),
             ),
         );

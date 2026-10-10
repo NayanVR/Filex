@@ -12,7 +12,7 @@
 //! explicit toggle or an auto-switch on a clear command — never seizing
 //! focus, always dismissable by clearing the query or toggling back.
 
-use gpui::{AnyElement, Div, ElementId, SharedString, Stateful, div, prelude::*, px};
+use gpui::{AnyElement, Div, SharedString, Stateful, div, prelude::*, px};
 
 use super::theme::Theme;
 
@@ -178,62 +178,6 @@ fn checkbox(theme: &Theme, checked: bool) -> Div {
     } else {
         base.border_color(theme.border)
     }
-}
-
-/// The confirm button. `enabled` is false when nothing is checked —
-/// clicking it then would be a no-op, so it reads as unavailable rather
-/// than silently doing nothing.
-pub fn confirm_button(
-    theme: &Theme,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    enabled: bool,
-    destructive: bool,
-) -> Stateful<Div> {
-    let fill = if destructive {
-        theme.warn
-    } else {
-        theme.accent
-    };
-    let base = div()
-        .id(id)
-        .px_3()
-        .py_2()
-        .rounded_lg()
-        .text_sm()
-        .child(label.into());
-    if enabled {
-        base.cursor_pointer()
-            .bg(fill)
-            .text_color(theme.on_accent)
-            .hover(|s| s.opacity(0.9))
-    } else {
-        base.border_1()
-            .border_color(theme.border)
-            .text_color(theme.text_dim)
-            .opacity(0.6)
-    }
-}
-
-/// Secondary (outlined) action, e.g. Cancel.
-pub fn secondary_button(
-    theme: &Theme,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-) -> Stateful<Div> {
-    let hover = theme.hover;
-    div()
-        .id(id)
-        .px_3()
-        .py_2()
-        .rounded_lg()
-        .cursor_pointer()
-        .text_sm()
-        .border_1()
-        .border_color(theme.border)
-        .text_color(theme.text)
-        .hover(move |s| s.bg(hover))
-        .child(label.into())
 }
 
 // ---------------------------------------------------------------------

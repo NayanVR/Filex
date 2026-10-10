@@ -9,14 +9,13 @@
 
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
-use super::icon;
 use super::theme::Theme;
 
 /// Height of the tab strip.
 pub const TAB_BAR_HEIGHT: f32 = 46.;
 
 /// The bar container. Children are the left tab group (tabs +
-/// [`new_tab_button`]) and the right icon group, separated by a
+/// the new-tab button) and the right icon group, separated by a
 /// flex spacer.
 ///
 /// This is now the topmost bar, so on macOS it — not the nav bar below —
@@ -85,37 +84,4 @@ pub fn tab_label(name: impl Into<SharedString>) -> Div {
         .truncate()
         .overflow_hidden()
         .child(name.into())
-}
-
-/// The little ✕ on a tab; callers chain `.on_click` (and should stop
-/// propagation so closing doesn't also select the tab).
-pub fn tab_close(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    let hover = theme.hover;
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_none()
-        .size(px(18.))
-        .rounded_sm()
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover))
-        .child(icon::ui_icon("icons/x.svg", theme.text_dim).size(px(12.)))
-}
-
-/// The "+" button that opens a new tab.
-pub fn new_tab_button(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    let hover = theme.hover;
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_none()
-        .size(px(24.))
-        .rounded_md()
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover))
-        .child(icon::ui_icon("icons/plus.svg", theme.text_dim).size(px(16.)))
 }

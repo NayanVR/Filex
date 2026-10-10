@@ -4,9 +4,10 @@
 //! covers the window, paints above everything, and soaks up clicks so
 //! nothing behind it is interactive while the dialog is open.
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, rgba};
+use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
-use super::theme::Theme;
+use super::button::{Size, Variant};
+use super::theme::{Theme, fixed};
 
 /// Full-window dimmed backdrop, centering its child (the panel).
 /// Callers chain `.on_click` for click-outside-to-cancel.
@@ -18,7 +19,7 @@ pub fn backdrop(id: impl Into<ElementId>) -> Stateful<Div> {
         .occlude()
         .absolute()
         .inset_0()
-        .bg(rgba(0x00000099))
+        .bg(fixed::scrim())
         .flex()
         .items_center()
         .justify_center()
@@ -51,34 +52,18 @@ pub fn buttons() -> Div {
 }
 
 /// A dialog button; `primary` gets the accent fill (the enter-key
-/// choice), others stay outlined.
+/// choice), others stay outlined. A min width keeps short labels
+/// ("OK") from shrinking into a pill.
 pub fn button(
     theme: &Theme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     primary: bool,
 ) -> Stateful<Div> {
-    let base = div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .min_w(px(84.))
-        .h(px(34.))
-        .px_3()
-        .rounded_lg()
-        .cursor_pointer()
-        .text_sm()
-        .child(label.into());
-    if primary {
-        base.bg(theme.accent)
-            .text_color(theme.on_accent)
-            .hover(|s| s.opacity(0.9))
+    let variant = if primary {
+        Variant::Primary
     } else {
-        let hover = theme.hover;
-        base.border_1()
-            .border_color(theme.border)
-            .text_color(theme.text)
-            .hover(move |s| s.bg(hover))
-    }
+        Variant::Secondary
+    };
+    super::button::button(theme, id, label, variant, Size::Regular).min_w(px(84.))
 }

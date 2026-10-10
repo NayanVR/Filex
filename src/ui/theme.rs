@@ -238,6 +238,61 @@ impl Theme {
     }
 }
 
+/// Fixed palettes: identity colours that mean the same thing on every
+/// theme, so they live outside [`Theme`]. Kept here so this file stays
+/// the only place in the UI that spells a hex value.
+pub mod fixed {
+    use gpui::{Rgba, rgb, rgba};
+
+    use filex::listing::FileKind;
+    use filex::tags::TagColor;
+
+    /// The full-window dim behind a modal dialog.
+    pub fn scrim() -> Rgba {
+        rgba(0x00000099)
+    }
+
+    /// The blank-paper document silhouette behind a file's kind mark.
+    pub fn paper() -> Rgba {
+        rgb(0xcfe6fb)
+    }
+
+    /// Ink for the extension label printed on the paper.
+    pub fn paper_ink() -> Rgba {
+        rgb(0x6b8299)
+    }
+
+    /// Tint for a file kind's mark, or `None` for directories (they take
+    /// the theme accent). Hues chosen to stay legible on both a white and
+    /// a dark row.
+    pub fn kind(kind: FileKind) -> Option<Rgba> {
+        let hex = match kind {
+            FileKind::Directory => return None,
+            FileKind::Image => 0x30a46c,
+            FileKind::Video => 0x8b5cf6,
+            FileKind::Audio => 0xe0559a,
+            FileKind::Archive => 0xd08b1e,
+            FileKind::Code => 0x4c8bf0,
+            FileKind::Document | FileKind::Other => 0x6b8299,
+        };
+        Some(rgb(hex))
+    }
+
+    /// Solid dot colour for each Finder tag colour. Vivid and
+    /// theme-independent, like Finder's.
+    pub fn tag(color: TagColor) -> Rgba {
+        rgb(match color {
+            TagColor::Grey => 0x8e8e93,
+            TagColor::Green => 0x5bd15b,
+            TagColor::Purple => 0xcb6ce6,
+            TagColor::Blue => 0x2f95ff,
+            TagColor::Yellow => 0xf5c518,
+            TagColor::Red => 0xfb5850,
+            TagColor::Orange => 0xf7a53b,
+        })
+    }
+}
+
 /// Ergonomic access to the active [`Theme`] from anything that derefs to
 /// [`App`] — every `Context<_>`, `&App`, and `&mut App`. Panics only if
 /// the global was never installed, which the workspace does before the

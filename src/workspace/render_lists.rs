@@ -77,20 +77,22 @@ impl Workspace {
                 .child(
                     ui::magic_card::pane_actions(&theme)
                         .child(
-                            ui::magic_card::secondary_button(
+                            ui::button::button(
                                 &theme,
                                 "magic-error-cancel",
                                 "Cancel",
+                                ui::button::Variant::Secondary,
+                                ui::button::Size::Regular,
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
                         )
                         .child(
-                            ui::magic_card::confirm_button(
+                            ui::button::button(
                                 &theme,
                                 "magic-retry",
                                 "Try again",
-                                true,
-                                false,
+                                ui::button::Variant::Primary,
+                                ui::button::Size::Regular,
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.update_search(cx))),
                         ),
@@ -201,17 +203,25 @@ impl Workspace {
                     .px_3()
                     .py_2()
                     .child(
-                        ui::magic_card::secondary_button(&theme, "magic-select-all", "Select all")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.set_all_magic_ops(true, cx);
-                                window.focus(&this.focus_handle, cx);
-                            })),
+                        ui::button::button(
+                            &theme,
+                            "magic-select-all",
+                            "Select all",
+                            ui::button::Variant::Secondary,
+                            ui::button::Size::Regular,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_all_magic_ops(true, cx);
+                            window.focus(&this.focus_handle, cx);
+                        })),
                     )
                     .child(
-                        ui::magic_card::secondary_button(
+                        ui::button::button(
                             &theme,
                             "magic-deselect-all",
                             "Deselect all",
+                            ui::button::Variant::Secondary,
+                            ui::button::Size::Regular,
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.set_all_magic_ops(false, cx);
@@ -219,8 +229,14 @@ impl Workspace {
                         })),
                     )
                     .child(
-                        ui::magic_card::secondary_button(&theme, "magic-refresh", "Refresh")
-                            .on_click(cx.listener(|this, _, _, cx| this.update_search(cx))),
+                        ui::button::button(
+                            &theme,
+                            "magic-refresh",
+                            "Refresh",
+                            ui::button::Variant::Secondary,
+                            ui::button::Size::Regular,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.update_search(cx))),
                     )
                     .child(div().flex_1())
                     .child(ui::magic_card::subtitle(&theme, state.status()));
@@ -249,10 +265,12 @@ impl Workspace {
                                 .items_center()
                                 .gap_2()
                                 .child(
-                                    ui::magic_card::secondary_button(
+                                    ui::button::button(
                                         &theme,
                                         "magic-cancel",
                                         "Cancel",
+                                        ui::button::Variant::Secondary,
+                                        ui::button::Size::Regular,
                                     )
                                     .on_click(cx.listener(
                                         |this, _: &ClickEvent, _window, cx| {
@@ -261,18 +279,36 @@ impl Workspace {
                                     )),
                                 )
                                 .child(
-                                    ui::magic_card::confirm_button(
-                                        &theme,
-                                        "magic-confirm",
-                                        format!(
+                                    {
+                                        let label = format!(
                                             "{} {} {}",
                                             verb.label(),
                                             count,
                                             plural_items(count)
-                                        ),
-                                        count > 0 && !state.loading,
-                                        destructive,
-                                    )
+                                        );
+                                        let size = ui::button::Size::Regular;
+                                        if count > 0 && !state.loading {
+                                            let variant = if destructive {
+                                                ui::button::Variant::Danger
+                                            } else {
+                                                ui::button::Variant::Primary
+                                            };
+                                            ui::button::button(
+                                                &theme,
+                                                "magic-confirm",
+                                                label,
+                                                variant,
+                                                size,
+                                            )
+                                        } else {
+                                            ui::button::disabled_button(
+                                                &theme,
+                                                "magic-confirm",
+                                                label,
+                                                size,
+                                            )
+                                        }
+                                    }
                                     .on_click(cx.listener(
                                         |this, _: &ClickEvent, _window, cx| {
                                             this.confirm_magic(cx);
@@ -318,8 +354,14 @@ impl Workspace {
         if action_bar.is_none() {
             action_bar = Some(
                 ui::magic_card::pane_actions(&theme).child(
-                    ui::magic_card::secondary_button(&theme, "magic-stop", "Cancel")
-                        .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
+                    ui::button::button(
+                        &theme,
+                        "magic-stop",
+                        "Cancel",
+                        ui::button::Variant::Secondary,
+                        ui::button::Size::Regular,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
                 ),
             );
         }

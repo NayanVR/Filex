@@ -7,6 +7,7 @@
 
 use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
 
+use super::button::IconSize;
 use super::icon;
 use super::theme::Theme;
 
@@ -38,18 +39,7 @@ pub fn toolbar_button(
     icon: &'static str,
     color: Rgba,
 ) -> Stateful<Div> {
-    let hover = theme.hover;
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(30.))
-        .flex_none()
-        .rounded_lg()
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover))
-        .child(icon::ui_icon(icon, color).size(px(18.)))
+    super::button::icon_button(theme, id, icon, color, IconSize::Large)
 }
 
 /// The removable-search-chip strip, shown under the nav bar while a query

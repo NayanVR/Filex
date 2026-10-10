@@ -5,11 +5,11 @@
 //! metadata rows. The workspace supplies the values (and fetches the
 //! lazy ones — created time, image dimensions — off-thread).
 
-use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px, rgb, rgba};
+use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
 
 use filex::tags::TagColor;
 
-use super::theme::Theme;
+use super::theme::{Theme, fixed};
 
 /// Narrowest the panel may be persisted/resized to.
 pub const MIN_WIDTH: f32 = 220.;
@@ -119,24 +119,9 @@ pub fn section_label(theme: &Theme, text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// Solid RGB dot color for each Finder tag color. Kept vivid and
-/// theme-independent (Finder's dots read the same on either background);
-/// the uncolored case uses the theme's dim text instead.
-fn tag_hex(color: TagColor) -> u32 {
-    match color {
-        TagColor::Grey => 0x8e8e93,
-        TagColor::Green => 0x5bd15b,
-        TagColor::Purple => 0xcb6ce6,
-        TagColor::Blue => 0x2f95ff,
-        TagColor::Yellow => 0xf5c518,
-        TagColor::Red => 0xfb5850,
-        TagColor::Orange => 0xf7a53b,
-    }
-}
-
 /// The solid dot color for a tag (dim grey when it has no color).
 pub fn tag_dot_color(theme: &Theme, color: Option<TagColor>) -> Rgba {
-    color.map(|c| rgb(tag_hex(c))).unwrap_or(theme.text_dim)
+    color.map(fixed::tag).unwrap_or(theme.text_dim)
 }
 
 /// A small filled circle — the color dot inside chips and swatches.
@@ -160,7 +145,19 @@ pub fn tag_chip(
     // A faint wash of the tag color behind the pill (theme hover when
     // uncolored), lifting a touch on hover.
     let (bg, hover_bg) = match color {
-        Some(c) => (rgba(tag_hex(c) << 8 | 0x1f), rgba(tag_hex(c) << 8 | 0x33)),
+        Some(c) => {
+            let solid = fixed::tag(c);
+            (
+                Rgba {
+                    alpha: 0x1f as f32 / 255.,
+                    ..solid
+                },
+                Rgba {
+                    alpha: 0x33 as f32 / 255.,
+                    ..solid
+                },
+            )
+        }
         None => (theme.hover, theme.selected),
     };
     div()
@@ -219,30 +216,10 @@ pub fn tag_swatch(
         .border_color(ring)
         .cursor_pointer();
     match color {
-        Some(c) => base.child(dot(rgb(tag_hex(c)), 12.)),
+        Some(c) => base.child(dot(fixed::tag(c), 12.)),
         // "No color": an empty ring, dim-filled so it reads as a target.
         None => base.bg(theme.hover),
     }
-}
-
-/// A small text button for the editor footer (Save / Remove / Cancel).
-/// `danger` paints it in the warn color; otherwise it uses the accent.
-pub fn tag_button(
-    theme: &Theme,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    danger: bool,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .text_xs()
-        .text_color(if danger { theme.warn } else { theme.accent })
-        .hover(|s| s.bg(theme.hover))
-        .child(label.into())
 }
 
 /// The inline tag editor container (input + swatches + buttons), a

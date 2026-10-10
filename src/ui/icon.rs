@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, ElementId, RenderImage, Rgba, Svg, Transformation,
-    div, img, linear, percentage, prelude::*, px, rgb, svg,
+    div, img, linear, percentage, prelude::*, px, svg,
 };
 
 use filex::listing::FileKind;
 use filex::settings::FolderIcon;
 
-use super::theme::Theme;
+use super::theme::{Theme, fixed};
 
 /// A themed UI glyph (chevrons, gear, search, markers…) from an asset
 /// path like `"icons/settings.svg"`. Caller sizes it (`.size(px(..))`)
@@ -63,7 +63,7 @@ pub fn file_icon(theme: &Theme, kind: FileKind, name: &str, edge: f32) -> AnyEle
     let base = if let Some(image) = file_image() {
         img(image).absolute().size_full().into_any_element()
     } else {
-        ui_icon("icons/file.svg", rgb(0xcfe6fb))
+        ui_icon("icons/file.svg", fixed::paper())
             .absolute()
             .left(px(edge / 7.))
             .w(px(edge * 5. / 7.))
@@ -106,7 +106,7 @@ pub fn file_icon(theme: &Theme, kind: FileKind, name: &str, edge: f32) -> AnyEle
                 .text_size(px(font_size))
                 .line_height(px(edge * 0.20))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(rgb(0x6b8299))
+                .text_color(fixed::paper_ink())
                 .child(label),
         );
     }
@@ -329,20 +329,10 @@ fn kind_asset(kind: FileKind) -> &'static str {
     }
 }
 
-/// The tint for a file kind. Folders take the theme accent so they read
-/// as the primary item and adapt to light/dark; the rest use a curated
-/// set of hues chosen to stay legible on both a white and a dark row.
+/// The tint for a file kind: folders take the theme accent so they read
+/// as the primary item; the rest use the fixed kind palette.
 fn kind_color(theme: &Theme, kind: FileKind) -> Rgba {
-    match kind {
-        FileKind::Directory => theme.accent,
-        FileKind::Image => rgb(0x30a46c),
-        FileKind::Video => rgb(0x8b5cf6),
-        FileKind::Audio => rgb(0xe0559a),
-        FileKind::Archive => rgb(0xd08b1e),
-        FileKind::Code => rgb(0x4c8bf0),
-        FileKind::Document => rgb(0x6b8299),
-        FileKind::Other => rgb(0x6b8299),
-    }
+    fixed::kind(kind).unwrap_or(theme.accent)
 }
 
 #[cfg(test)]
