@@ -18,11 +18,13 @@ pub(super) struct Recovered {
     pub wal: Wal,
     pub roots: Vec<Root>,
     pub base: Arc<Segment>,
+    pub deltas: Vec<Arc<Segment>>,
     pub sequence: u64,
     pub next_id: u64,
     pub manifest_epoch: u64,
     pub active: Overlay,
-    pub current_segment: Option<(PathBuf, u64)>,
+    /// The selected generation's segment files, base first.
+    pub files: Vec<PathBuf>,
 }
 
 pub(super) fn recover(directory: &Path, configured: Vec<PathBuf>) -> Result<Recovered> {
@@ -41,16 +43,9 @@ pub(super) fn recover(directory: &Path, configured: Vec<PathBuf>) -> Result<Reco
     }
     let mut selected = None;
     for (path, m) in manifest::candidates(directory)? {
-        match (|| -> Result<Segment> {
-            let segment = unsafe { Segment::open(&directory.join(&m.segment))? };
-            ensure!(
-                m.sequence == segment.sequence && m.roots == segment.roots,
-                "manifest/segment mismatch"
-            );
-            Ok(segment)
-        })() {
-            Ok(segment) => {
-                selected = Some((m, segment));
+        match open_generation(directory, &m) {
+            Ok(segments) => {
+                selected = Some((m, segments));
                 break;
             }
             Err(e) => {
@@ -59,20 +54,22 @@ pub(super) fn recover(directory: &Path, configured: Vec<PathBuf>) -> Result<Reco
             }
         }
     }
-    let selected_path = selected
-        .as_ref()
-        .map(|(m, _)| (directory.join(&m.segment), m.epoch));
-    let (mut roots, base, sequence, next_id, manifest_epoch) = if let Some((m, s)) = selected {
-        (m.roots, Arc::new(s), m.sequence, m.next_id, m.epoch)
-    } else {
-        (
-            Vec::new(),
-            Arc::new(Segment::build([], Vec::new(), 0)?),
-            0,
-            1,
-            0,
-        )
-    };
+    let files = selected.as_ref().map_or_else(Vec::new, |(m, _)| {
+        m.files().map(|f| directory.join(f)).collect()
+    });
+    let (mut roots, base, deltas, sequence, next_id, manifest_epoch) =
+        if let Some((m, (base, deltas))) = selected {
+            (m.roots, base, deltas, m.sequence, m.next_id, m.epoch)
+        } else {
+            (
+                Vec::new(),
+                Arc::new(Segment::build([], Vec::new(), 0)?),
+                Vec::new(),
+                0,
+                1,
+                0,
+            )
+        };
     let (mut wal, mut transactions) = match Wal::open(&directory.join("updates.wal")) {
         Ok(w) => w,
         Err(error) => {
@@ -135,10 +132,154 @@ pub(super) fn recover(directory: &Path, configured: Vec<PathBuf>) -> Result<Reco
         wal,
         roots,
         base,
+        deltas,
         sequence: seq,
         next_id,
         manifest_epoch,
         active,
-        current_segment: selected_path,
+        files,
     })
+}
+
+/// Open a manifest's base and deltas, checking they form one generation:
+/// same roots, a base without tombstones, deltas with them, and sequences
+/// that increase up to the manifest's.
+fn open_generation(
+    directory: &Path,
+    m: &manifest::Manifest,
+) -> Result<(Arc<Segment>, Vec<Arc<Segment>>)> {
+    // SAFETY: published generation files are immutable until retired.
+    let base = unsafe { Segment::open(&directory.join(&m.segment))? };
+    ensure!(
+        base.tombstones.is_none() && m.roots == base.roots,
+        "manifest/segment mismatch"
+    );
+    let mut sequence = base.sequence;
+    let mut deltas = Vec::new();
+    for name in &m.deltas {
+        let delta = unsafe { Segment::open(&directory.join(name))? };
+        ensure!(
+            delta.tombstones.is_some() && delta.roots == m.roots && delta.sequence >= sequence,
+            "manifest/delta mismatch"
+        );
+        sequence = delta.sequence;
+        deltas.push(Arc::new(delta));
+    }
+    ensure!(sequence == m.sequence, "manifest/segment mismatch");
+    Ok((Arc::new(base), deltas))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{manifest::Manifest, segment::Record};
+
+    fn entry(id: u64, parent: u64, name: &str, directory: bool) -> Record {
+        Record {
+            id,
+            parent,
+            root: 1,
+            name: name.as_bytes().to_vec(),
+            flags: if directory { Record::DIRECTORY } else { 0 },
+            identity: Default::default(),
+            size: None,
+            mtime: None,
+        }
+    }
+
+    fn write(
+        directory: &Path,
+        name: &str,
+        records: Vec<Record>,
+        sequence: u64,
+        tombstones: Option<Vec<u64>>,
+    ) {
+        let mut segment = Segment::build(records, roots(), sequence).unwrap();
+        segment.tombstones = tombstones;
+        segment.save(&directory.join(name)).unwrap();
+    }
+
+    fn roots() -> Vec<Root> {
+        vec![Root {
+            id: 1,
+            path: "/fixture".into(),
+            device: 1,
+        }]
+    }
+
+    fn manifest(epoch: u64, sequence: u64, segment: &str, deltas: &[&str]) -> Manifest {
+        Manifest {
+            version: manifest::VERSION,
+            epoch,
+            sequence,
+            next_id: 10,
+            segment: segment.into(),
+            roots: roots(),
+            deltas: deltas.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    /// FIL-30: a generation is a base plus its deltas; recovery maps all of
+    /// them and replays the WAL from the newest delta's sequence.
+    #[test]
+    fn recovers_a_base_with_its_deltas() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = directory.path();
+        let base = vec![entry(1, 0, "fixture", true), entry(2, 1, "old.txt", false)];
+        write(directory, "segment-1.fx2", base, 3, None);
+        // The delta's record has its parent in the base.
+        let delta = vec![entry(3, 1, "new.txt", false)];
+        write(directory, "segment-2.fx2", delta, 5, Some(vec![2]));
+        manifest::publish(
+            directory,
+            &manifest(2, 5, "segment-1.fx2", &["segment-2.fx2"]),
+        )
+        .unwrap();
+
+        let recovered = recover(directory, vec![]).unwrap();
+        assert_eq!(recovered.sequence, 5);
+        assert_eq!(recovered.deltas.len(), 1);
+        assert_eq!(
+            recovered.files,
+            [
+                directory.join("segment-1.fx2"),
+                directory.join("segment-2.fx2")
+            ]
+        );
+        let view = super::super::view::View {
+            base: recovered.base,
+            deltas: recovered.deltas,
+            layers: vec![],
+            roots: recovered.roots,
+            epoch: recovered.sequence,
+        };
+        assert_eq!(view.resolve(Path::new("/fixture/new.txt")), Some(3));
+        assert_eq!(view.resolve(Path::new("/fixture/old.txt")), None);
+    }
+
+    #[test]
+    fn an_inconsistent_delta_falls_back_to_the_previous_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = directory.path();
+        let base = vec![entry(1, 0, "fixture", true), entry(2, 1, "old.txt", false)];
+        write(directory, "segment-1.fx2", base, 3, None);
+        write(directory, "segment-2.fx2", vec![], 4, Some(vec![]));
+        let mut previous = manifest(1, 3, "segment-1.fx2", &[]);
+        previous.version = 2;
+        manifest::publish(directory, &previous).unwrap();
+        // Claims a newer sequence than its delta holds.
+        manifest::publish(
+            directory,
+            &manifest(2, 5, "segment-1.fx2", &["segment-2.fx2"]),
+        )
+        .unwrap();
+        // A base written as a delta, or a delta as a base, is rejected too.
+        manifest::publish(directory, &manifest(3, 4, "segment-2.fx2", &[])).unwrap();
+
+        let recovered = recover(directory, vec![]).unwrap();
+        assert_eq!(recovered.manifest_epoch, 1);
+        assert_eq!(recovered.sequence, 3);
+        assert!(recovered.deltas.is_empty());
+        assert_eq!(recovered.files, [directory.join("segment-1.fx2")]);
+    }
 }

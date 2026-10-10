@@ -1,4 +1,7 @@
-//! Query epochs share immutable base mappings and small overlay layers.
+//! Query epochs share immutable base mappings, a few small immutable delta
+//! segments flushed from earlier overlays, and small in-memory overlay layers.
+//! An ID is served from the newest level that holds it: overlays, then deltas
+//! newest first, then the base.
 use crate::catalog::segment::{Identity, Record, Root, Segment, os_name, raw_name};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -47,6 +50,7 @@ mod record_tests {
         let mut view = View {
             roots,
             base,
+            deltas: vec![],
             layers: vec![Arc::new(changes.clone())],
             epoch: 1,
         };
@@ -85,11 +89,38 @@ impl Overlay {
 #[derive(Clone)]
 pub struct View {
     pub base: Arc<Segment>,
+    /// Oldest first. Each holds the changes flushed after the previous level.
+    pub deltas: Vec<Arc<Segment>>,
     pub layers: Vec<Arc<Overlay>>,
     pub roots: Vec<Root>,
     pub epoch: u64,
 }
 impl View {
+    /// The base, then deltas oldest to newest.
+    pub fn segments(&self) -> impl DoubleEndedIterator<Item = &Segment> {
+        std::iter::once(&*self.base).chain(self.deltas.iter().map(|d| &**d))
+    }
+    /// The newest delta holding `id`: its slot, or `None` for a tombstone.
+    fn delta_entry(&self, id: u64) -> Option<(&Segment, Option<usize>)> {
+        self.deltas
+            .iter()
+            .rev()
+            .find_map(|delta| match delta.slot(id) {
+                Some(slot) => Some((&**delta, Some(slot))),
+                None => holds_tombstone(delta, id).then_some((&**delta, None)),
+            })
+    }
+    /// Whether a level newer than `segment` holds `id`, so `segment`'s copy
+    /// is stale. `segment` must be one of `self.segments()`.
+    pub fn shadowed(&self, id: u64, segment: &Segment) -> bool {
+        self.layers.iter().any(|l| l.records.contains_key(&id))
+            || self
+                .deltas
+                .iter()
+                .rev()
+                .take_while(|delta| !std::ptr::eq(&***delta, segment))
+                .any(|delta| delta.slot(id).is_some() || holds_tombstone(delta, id))
+    }
     pub fn record(&self, id: u64) -> Option<Record> {
         self.record_projected(id, true, true)
     }
@@ -98,6 +129,9 @@ impl View {
             if let Some(r) = layer.records.get(&id) {
                 return r.clone();
             }
+        }
+        if let Some((delta, slot)) = self.delta_entry(id) {
+            return slot.map(|slot| delta.record_projected(slot, size, mtime));
         }
         self.base
             .slot(id)
@@ -113,17 +147,22 @@ impl View {
                 return Some(id);
             }
         }
-        self.base.child(parent, name).and_then(|slot| {
-            let id = self.base.id(slot);
-            // The lookup already matched the base record's parent and name;
-            // only a newer layer can have changed them.
-            if !self.layers.iter().any(|l| l.records.contains_key(&id)) {
+        for segment in self.segments().rev() {
+            let Some(slot) = segment.child(parent, name) else {
+                continue;
+            };
+            let id = segment.id(slot);
+            // The lookup already matched this level's parent and name; only
+            // a newer level can have changed them.
+            if !self.shadowed(id, segment)
+                || self
+                    .record(id)
+                    .is_some_and(|r| r.parent == parent && r.name == name)
+            {
                 return Some(id);
             }
-            self.record(id)
-                .filter(|r| r.parent == parent && r.name == name)
-                .map(|_| id)
-        })
+        }
+        None
     }
     pub fn root_record(&self, root: u32) -> Option<u64> {
         for layer in self.layers.iter().rev() {
@@ -133,7 +172,7 @@ impl View {
                 }
             }
         }
-        self.base.root_file(root)
+        self.segments().rev().find_map(|s| s.root_file(root))
     }
     pub fn resolve(&self, path: &Path) -> Option<u64> {
         let root = self
@@ -163,6 +202,8 @@ impl View {
                     r.root,
                     std::borrow::Cow::Borrowed(r.name.as_slice()),
                 )
+            } else if let Some((delta, slot)) = self.delta_entry(id) {
+                delta.path_part(slot?)
             } else {
                 self.base.path_part(self.base.slot(id)?)
             };
@@ -189,7 +230,9 @@ impl View {
                 }
             }
         }
-        self.base.find_native(root, identity)
+        self.segments()
+            .rev()
+            .find_map(|s| s.find_native(root, identity))
     }
     /// Enumerate a small scope by child ranges, bounded before fallback to text.
     pub fn scoped_ids(
@@ -218,9 +261,8 @@ impl View {
                 break;
             }
             let ids = self
-                .base
-                .child_ids(parent)
-                .filter(|id| !changes.contains_key(id))
+                .segments()
+                .flat_map(|s| s.child_ids(parent).filter(|id| !self.shadowed(*id, s)))
                 .chain(children.get(&parent).into_iter().flatten().copied());
             for id in ids {
                 result.push(id);
@@ -244,6 +286,10 @@ impl View {
         let mut changed = std::collections::BTreeSet::new();
         for layer in &self.layers {
             changed.extend(layer.records.keys().copied());
+        }
+        for delta in &self.deltas {
+            changed.extend((0..delta.len()).map(|slot| delta.id(slot)));
+            changed.extend(delta.tombstones.iter().flatten().copied());
         }
         // Validated base records retain valid paths when overlays only append
         // new IDs and roots are unchanged. Avoid millions of redundant parent
@@ -287,4 +333,11 @@ impl View {
             }
         })
     }
+}
+
+fn holds_tombstone(delta: &Segment, id: u64) -> bool {
+    delta
+        .tombstones
+        .as_ref()
+        .is_some_and(|t| t.binary_search(&id).is_ok())
 }

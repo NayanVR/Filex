@@ -134,6 +134,7 @@ fn bench_magic_stream(c: &mut Criterion) {
     }
     let view = View {
         base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        deltas: vec![],
         layers: vec![],
         roots,
         epoch: 1,

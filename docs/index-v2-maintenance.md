@@ -13,7 +13,7 @@ edit before sending a request.
 | Selecting a generation and replaying its WAL | `src/daemon/recovery.rs` |
 | Turning filesystem paths into identity-preserving changes | `src/daemon/changes.rs` |
 | Enumeration, record spooling and the isolated segment worker | `src/daemon/builder.rs` |
-| Immutable base plus changed records visible to a query | `src/daemon/view.rs` |
+| Immutable base, delta segments and overlays visible to a query | `src/daemon/view.rs` |
 | Ranked pages, filtering and exhaustive streams | `src/daemon/query.rs` |
 | Temporary exhaustive candidate intersections | `src/search/candidates.rs`, `src/catalog/segment/mod.rs` |
 | Catalog validation and mapped files | `src/catalog/segment/persist.rs`, `storage.rs` |
@@ -34,26 +34,64 @@ Queries hold an immutable `View`, so a new publication does not change a running
 query's records. An updated name is considered separately from its old base
 posting. Interactive work limits produce an explicit partial result.
 
-The writer freezes changes at 25,000 records or an estimated 16 MiB. Below
-that, a non-empty overlay is compacted only once it is 30 minutes old **and**
-no change has arrived for 2 minutes, or unconditionally after 6 hours, which
-bounds WAL growth on a machine that is never quiet (`compaction_due` in
-`writer.rs`). One coordinator prepares a build at a time. Enumeration preserves
-existing native identities where possible; a move does not require rewriting
-every descendant's path.
+A generation is a base segment plus up to four **delta segments**. A delta
+is an ordinary `Segment` holding only records changed since the level below it,
+plus sorted tombstones for deleted IDs (`Segment::tombstones`, which is `Some`
+only for a delta). A query reads an ID from the newest level that holds it:
+overlays first, then deltas from newest to oldest, then the base
+(`View::shadowed`). Every level is searched through its own index. A delta's
+records may have parents in older levels, and validation allows for that.
+
+`next_build` in `writer.rs` picks the next build:
+
+- **Flush:** write the overlays as a new delta. This happens at 4,096 records
+  or about 4 MiB. Below that, it waits until the overlay is 5 minutes old
+  **and** no change has arrived for 30 s, or until it is 30 minutes old.
+- **Delta merge:** if a flush would make a fifth delta, every delta is merged
+  with the overlays into one delta instead. The cost depends on the deltas'
+  size, not the base's.
+- **Merge:** rebuild the base from every level once the deltas hold more than
+  1/8 as many entries as the base, and at least 4,096.
+- **Reconcile:** walk every root into a new base, as before.
+
+One coordinator prepares a build at a time. Enumeration preserves existing
+native identities where possible; a move does not require rewriting every
+descendant's path.
 
 **Decision (FIL-27, 2026-10):** the earlier rule, "any pending change and 30
 seconds since the last build", rebuilt back to back on a real machine: a full
 build took about 90 s and something always changed within 30 s. The daemon never
-idled, and each cycle wrote a new ~50 MB segment. Compaction is not needed for
-freshness, because queries already search the overlay layers, so it now only
-bounds overlay size and WAL replay. The costs of the change:
+idled, and each cycle wrote a new ~50 MB segment.
 
-- Every query scans the overlay. `search_overlay_820k` in `benches/segment_bench.rs`
-  measures about 0.9 ms per query with a 5,000-record overlay and 4.8 ms at the
-  25,000-record limit. That limit was already reachable before this change.
-- Per-root file counts in status come from the base segment, so they can now lag
-  by up to the compaction age.
+**Decision (FIL-30, 2026-10):** FIL-27 fixed that loop by letting the overlay
+grow for 30 minutes to 6 hours. Every query scans the overlay entry by entry,
+so that cost grew with it: up to 7 ms per query at the 25,000-record limit.
+Flushing into indexed deltas keeps the overlay small without rewriting the
+base. `search_overlay_820k` in `benches/segment_bench.rs`, on an 820k-entry
+base:
+
+| Pending changes | Overlay | 1 delta | 4 deltas |
+|---|---|---|---|
+| 5,000, rare name | 1.1 ms | 7 µs | 16 µs |
+| 5,000, common name | 1.7 ms | 0.5 ms | 0.9 ms |
+| 25,000, rare name | 6.0 ms | 7 µs | 16 µs |
+| 25,000, common name | 7.2 ms | 0.4 ms | 1.2 ms |
+
+With no pending changes, a common-name query takes 0.37 ms. Most of the extra
+cost of four deltas is path materialization, which checks each delta for every
+ancestor. Each level's ranked pass skips a candidate that can't beat the page
+it already has, before materializing its path.
+
+The costs:
+
+- A flush adds a file. A delta merge rewrites every delta, so under a steady
+  trickle every fourth build rewrites the merged delta. That is bounded by
+  1/8 of the base, against a whole-base rewrite before.
+- Per-root file counts in status still come from the base, so they lag until
+  the next base merge (FIL-8).
+- The watcher queue holds 16,384 commands. At 256, any burst of file events
+  (a checkout, an unzip) overflowed it, and an overflow forces a reconcile of
+  every root. The queue is allocated up front, at about 40 bytes per slot.
 
 A directory that the catalog has never seen, such as a `mkdir` or a tree moved
 in from outside a root, is listed in place, up to 10,000 entries per batch
@@ -67,8 +105,8 @@ of a rebuild's CPU.
 A stopping daemon cancels an in-flight build immediately. The walk checks the
 stop flag before every entry. The writer waits at most 2 s for the builder
 before abandoning it, which is safe because only the writer publishes and
-startup removes scratch files. Each published generation logs its duration,
-record count, byte size and whether it was a reconcile, at `info` level.
+startup removes scratch files. Each published generation logs its build mode,
+duration, record count and byte size at `info` level.
 
 Construction runs in a short-lived `filex-indexd` worker process. The coordinator
 spools a versioned JSON header and binary records into its private database directory.
@@ -84,8 +122,11 @@ error excerpt returned to the writer.
 
 After a successful build, the owner validates the segment's checksum, columns,
 lookup ordering, tree and root references. Only then can the writer durably
-publish a manifest and expose a new query epoch. Two valid generations are kept
-for recovery; older mappings stay alive while query views reference them.
+publish a manifest and expose a new query epoch. Manifest version 3 lists a
+generation's deltas; older binaries skip version 3 manifests and fall back to a
+reconcile. Two valid manifests are kept for recovery. A segment file is deleted
+only when neither manifest references it and no live query view maps it
+(`retire`), because consecutive generations share their base.
 
 Keep these boundaries when changing the implementation:
 

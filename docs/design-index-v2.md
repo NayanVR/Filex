@@ -378,7 +378,9 @@ frecency set, then subtract tombstones and stale generations.
 The initial writer maintains one unified base and bounded overlays. It compacts
 a frozen view into a new base, one build at a time. Large enumeration runs spool
 records to disk. Publication replaces the view only after durable manifest and
-WAL writes. Size-tiered partial compaction is deferred.
+WAL writes. Frozen overlays are flushed into small delta segments, which are
+merged among themselves and only occasionally into a new base; see
+`docs/index-v2-maintenance.md` (FIL-30).
 
 Priority order is explicit:
 

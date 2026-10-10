@@ -135,6 +135,8 @@ pub fn search(
         .collect();
     let mut hits = HashMap::<u64, Hit>::new();
     let mut examined = 0;
+    let mut ranked_work = 0;
+    let mut ranked_best = BinaryHeap::new();
     let mut capped = false;
     let mut partial = false;
     let consider = |id: u64,
@@ -163,10 +165,108 @@ pub fn search(
     let text_estimate = if needle.is_empty() {
         usize::MAX
     } else {
-        view.base
-            .search
-            .estimate(needle.as_bytes())
+        view.segments()
+            .map(|s| s.search.estimate(needle.as_bytes()))
+            .sum::<usize>()
             .saturating_mul(3)
+    };
+    type RankKey = (Tier, std::cmp::Reverse<u64>, usize, String, u64);
+    let key = |tier, name: &str, id| {
+        let folded = nfc_fold(name);
+        (
+            tier,
+            std::cmp::Reverse(hot.get(&id).copied().unwrap_or(0)),
+            folded.len(),
+            folded,
+            id,
+        )
+    };
+    // Ranked retrieval over one segment's names. Each segment gets its own
+    // work budget, so a broad query on the base can't starve recent changes
+    // in a delta: total work is bounded by WORK_BUDGET per segment. `best`
+    // holds the page's best keys across segments, so a later segment only
+    // materializes paths for candidates that can still make the page.
+    let ranked = |segment: &crate::catalog::segment::Segment,
+                  hits: &mut HashMap<u64, Hit>,
+                  best: &mut BinaryHeap<RankKey>,
+                  total: &mut usize,
+                  capped: &mut bool,
+                  partial: &mut bool| {
+        let mut examined = 0;
+        let mut count = (limit * 2).clamp(100, WORK_BUDGET);
+        let mut seen = HashSet::new();
+        let mut tiers = Vec::new();
+        loop {
+            let names = if needle.is_empty() {
+                (0..segment.search.name_count().min(count) as u32)
+                    .map(|n| (Tier::Substring, n))
+                    .collect::<Vec<_>>()
+            } else {
+                segment.search.search(&needle, count)
+            };
+            let complete = names.len() < count;
+            let mut satisfied = false;
+            'names: for (tier, name) in names {
+                for slot in segment.search.files(name) {
+                    if !seen.insert(slot) {
+                        continue;
+                    }
+                    let id = segment.id(slot as usize);
+                    // An updated name has a different static rank. Its newer
+                    // copy is ranked in its own level's pass.
+                    if view.shadowed(id, segment) {
+                        examined += 1;
+                        if examined >= WORK_BUDGET {
+                            break 'names;
+                        }
+                        continue;
+                    }
+                    if cancel.load(Ordering::Relaxed) || examined >= WORK_BUDGET {
+                        *capped = true;
+                        break 'names;
+                    }
+                    examined += 1;
+                    let Some(record) = view.record_projected(id, need_size, need_mtime) else {
+                        continue;
+                    };
+                    let Some(actual) = literal_tier(&record.name, &needle) else {
+                        continue;
+                    };
+                    let name = crate::catalog::segment::os_name(&record.name)
+                        .to_string_lossy()
+                        .into_owned();
+                    let rank = key(actual, &name, id);
+                    if best.len() >= limit && best.peek().is_some_and(|worst| &rank >= worst) {
+                        // Worse than a full page: it counts as seen below,
+                        // like a hit, but never pays for its path.
+                        tiers.push(actual);
+                    } else if let Some(hit) = hit(view, record, actual, query, &allowed) {
+                        tiers.push(actual);
+                        hits.insert(id, hit);
+                        best.push(rank);
+                        if best.len() > limit {
+                            best.pop();
+                        }
+                    }
+                    // Names and postings arrive in static rank order within a
+                    // segment. Case-variant boundary unions can downgrade a
+                    // hit; count only this segment's candidates at or above
+                    // this tier before proving its unseen suffix is worse.
+                    if tiers.len() >= limit && tiers.iter().filter(|t| **t <= tier).count() >= limit
+                    {
+                        satisfied = true;
+                        break 'names;
+                    }
+                }
+            }
+            if complete || count == WORK_BUDGET || examined >= WORK_BUDGET || satisfied {
+                *partial |= (!satisfied && !complete) || examined >= WORK_BUDGET;
+                *capped |= satisfied || !complete;
+                break;
+            }
+            count = (count * 2).min(WORK_BUDGET);
+        }
+        *total += examined;
     };
     if let Some(paths) = query
         .allowed
@@ -214,75 +314,32 @@ pub fn search(
                     break;
                 }
             }
+            // Deltas are small; their own ranked pass finds their new matches.
+            for delta in &view.deltas {
+                ranked(
+                    delta,
+                    &mut hits,
+                    &mut ranked_best,
+                    &mut ranked_work,
+                    &mut capped,
+                    &mut partial,
+                );
+            }
         } else {
-            let mut count = (limit * 2).clamp(100, WORK_BUDGET);
-            let mut seen = HashSet::new();
-            loop {
-                let names = if needle.is_empty() {
-                    (0..view.base.search.name_count().min(count) as u32)
-                        .map(|n| (Tier::Substring, n))
-                        .collect::<Vec<_>>()
-                } else {
-                    view.base.search.search(&needle, count)
-                };
-                let complete = names.len() < count;
-                let mut satisfied = false;
-                'names: for (tier, name) in names {
-                    for slot in view.base.search.files(name) {
-                        if !seen.insert(slot) {
-                            continue;
-                        }
-                        // An updated name has a different static rank. Its
-                        // overlay entry is ranked separately below.
-                        if changed_ids.contains(&view.base.id(slot as usize)) {
-                            examined += 1;
-                            if examined >= WORK_BUDGET {
-                                break 'names;
-                            }
-                            continue;
-                        }
-                        if !consider(
-                            view.base.id(slot as usize),
-                            tier,
-                            &mut hits,
-                            &mut examined,
-                            &mut capped,
-                        ) {
-                            break 'names;
-                        }
-                        // Names and postings arrive in static rank order. Case-variant
-                        // boundary unions can downgrade a hit; count only hits at or
-                        // above this tier before proving the unseen suffix is worse.
-                        if hits.len() >= limit
-                            && hits.values().filter(|h| h.tier <= tier).count() >= limit
-                        {
-                            satisfied = true;
-                            break 'names;
-                        }
-                    }
-                }
-                if complete || count == WORK_BUDGET || examined >= WORK_BUDGET || satisfied {
-                    partial |= !satisfied && !complete;
-                    capped |= satisfied || !complete;
-                    break;
-                }
-                count = (count * 2).min(WORK_BUDGET);
+            for segment in view.segments() {
+                ranked(
+                    segment,
+                    &mut hits,
+                    &mut ranked_best,
+                    &mut ranked_work,
+                    &mut capped,
+                    &mut partial,
+                );
             }
         }
     }
     // Keep only the best page prefix while scanning the bounded overlay.
     // Expensive path materialization happens only for a candidate that can win.
-    type RankKey = (Tier, std::cmp::Reverse<u64>, usize, String, u64);
-    let key = |tier, name: &str, id| {
-        let folded = nfc_fold(name);
-        (
-            tier,
-            std::cmp::Reverse(hot.get(&id).copied().unwrap_or(0)),
-            folded.len(),
-            folded,
-            id,
-        )
-    };
     let mut best: BinaryHeap<RankKey> = hits.values().map(|h| key(h.tier, &h.name, h.id)).collect();
     while best.len() > limit {
         let old = best.pop().unwrap();
@@ -320,20 +377,22 @@ pub fn search(
         }
     }
     if query.fuzzy && hits.len() < 10 && !needle.is_empty() {
-        for name in view.base.search.fuzzy_names(&needle) {
-            for slot in view.base.search.files(name).take(32) {
-                if hits.len() >= 100 {
-                    break;
-                }
-                let id = view.base.id(slot as usize);
-                if let Some(record) = view.record_projected(id, need_size, need_mtime) {
-                    if nfc_fold(&String::from_utf8_lossy(&record.name))
-                        != view.base.search.name(name)
-                    {
-                        continue;
+        for segment in view.segments() {
+            for name in segment.search.fuzzy_names(&needle) {
+                for slot in segment.search.files(name).take(32) {
+                    if hits.len() >= 100 {
+                        break;
                     }
-                    if let Some(hit) = hit(view, record, Tier::Fuzzy, query, &allowed) {
-                        hits.entry(id).or_insert(hit);
+                    let id = segment.id(slot as usize);
+                    if let Some(record) = view.record_projected(id, need_size, need_mtime) {
+                        if nfc_fold(&String::from_utf8_lossy(&record.name))
+                            != segment.search.name(name)
+                        {
+                            continue;
+                        }
+                        if let Some(hit) = hit(view, record, Tier::Fuzzy, query, &allowed) {
+                            hits.entry(id).or_insert(hit);
+                        }
                     }
                 }
             }
@@ -361,7 +420,7 @@ pub fn search(
             .take(query.limit)
             .collect(),
         more,
-        examined,
+        examined: examined + ranked_work,
     })
 }
 pub fn stream(
@@ -410,7 +469,74 @@ pub fn stream(
         );
     }
     let needle = nfc_fold(&query.text);
-    let mut candidates = view.base.exhaustive_candidates(&query.filters, cancel)?;
+    // Each segment's postings describe its own records only; a shadowed copy
+    // is skipped and the newest level evaluates the ID instead.
+    let mut candidates = Vec::new();
+    for segment in view.segments() {
+        candidates.push(segment_candidates(segment, query, &needle, cancel)?);
+    }
+    ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+    let mut changes = std::collections::BTreeMap::new();
+    for layer in &view.layers {
+        for (&id, record) in &layer.records {
+            ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
+            changes.insert(id, record.as_ref());
+        }
+    }
+    type Source<'a> = Box<dyn Iterator<Item = (u64, Record)> + 'a>;
+    let mut sources: Vec<_> = view
+        .segments()
+        .zip(&candidates)
+        .map(|(segment, set)| {
+            let slots: Box<dyn Iterator<Item = usize> + '_> = match set {
+                Some(set) => Box::new(set.iter()),
+                None => Box::new(0..segment.len()),
+            };
+            // Reject numeric bucket edges before touching compressed native
+            // names. Paths are resolved only for matching records.
+            let source: Source<'_> = Box::new(
+                slots
+                    .take_while(|_| !cancel.load(Ordering::Relaxed))
+                    .filter(|&slot| segment.matches_numeric(slot, &query.filters))
+                    .map(|slot| (segment.id(slot), slot))
+                    .filter(|&(id, _)| !view.shadowed(id, segment))
+                    .map(move |(id, slot)| {
+                        (id, segment.record_projected(slot, need_size, need_mtime))
+                    }),
+            );
+            source
+        })
+        .collect();
+    sources.push(Box::new(
+        changes
+            .into_iter()
+            .filter_map(|(id, record)| record.map(|r| (id, r.clone()))),
+    ));
+    let mut sources: Vec<_> = sources.into_iter().map(Iterator::peekable).collect();
+    // Every source is ordered by stable FileId; merge them in that order.
+    let records = std::iter::from_fn(|| {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (_, next) = sources
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, source)| source.peek().map(|(id, _)| (*id, i)))
+            .min()?;
+        sources[next].next().map(|(_, record)| record)
+    });
+    stream_records(view, query, cancel, records, emit)
+}
+
+/// One segment's complete metadata and literal candidates, or `None` to scan
+/// every slot.
+fn segment_candidates(
+    segment: &crate::catalog::segment::Segment,
+    query: &Query,
+    needle: &str,
+    cancel: &AtomicBool,
+) -> Result<Option<crate::search::candidates::Candidates>> {
+    let mut candidates = segment.exhaustive_candidates(&query.filters, cancel)?;
     // Tiny metadata sets are cheaper to verify directly. Signature estimates
     // can be very loose: don't let them send hundreds of thousands of metadata
     // candidates through native-name decoding instead of dictionary lookup.
@@ -419,61 +545,19 @@ pub fn stream(
     let direct = candidates.as_ref().is_some_and(|set| set.count() <= 4096)
         || (candidates.is_none()
             && needle.len() == 1
-            && view.base.search.estimate(needle.as_bytes())
-                >= view.base.search.name_count().div_ceil(2));
+            && segment.search.estimate(needle.as_bytes())
+                >= segment.search.name_count().div_ceil(2));
     if !needle.is_empty() && !direct {
-        let text = view
-            .base
+        let text = segment
             .search
-            .exhaustive_candidates(&needle, view.base.len(), cancel)?;
+            .exhaustive_candidates(needle, segment.len(), cancel)?;
         if let Some(set) = &mut candidates {
             set.intersect(&text);
         } else {
             candidates = Some(text);
         }
     }
-    ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
-    // Base postings describe the immutable snapshot only. Every changed ID is
-    // evaluated from its newest overlay, including records that newly match.
-    let mut changes = std::collections::BTreeMap::new();
-    for layer in &view.layers {
-        for (&id, record) in &layer.records {
-            ensure!(!cancel.load(Ordering::Relaxed), "stream cancelled");
-            changes.insert(id, record.as_ref());
-        }
-    }
-    let slots: Box<dyn Iterator<Item = usize> + '_> = match &candidates {
-        Some(set) => Box::new(set.iter()),
-        None => Box::new(0..view.base.len()),
-    };
-    // Merge by stable FileId, and reject numeric bucket edges before touching
-    // compressed native names. Paths are resolved only for matching records.
-    let mut base = slots
-        .take_while(|_| !cancel.load(Ordering::Relaxed))
-        .filter_map(|slot| {
-            let id = view.base.id(slot);
-            (!changes.contains_key(&id) && view.base.matches_numeric(slot, &query.filters))
-                .then_some((id, slot))
-        })
-        .peekable();
-    let mut overlays = changes
-        .iter()
-        .filter_map(|(&id, record)| record.map(|r| (id, r)))
-        .peekable();
-    let records = std::iter::from_fn(|| {
-        if cancel.load(Ordering::Relaxed) {
-            return None;
-        }
-        if overlays
-            .peek()
-            .is_some_and(|(id, _)| base.peek().is_none_or(|(next, _)| id < next))
-        {
-            return overlays.next().map(|(_, record)| record.clone());
-        }
-        base.next()
-            .map(|(_, slot)| view.base.record_projected(slot, need_size, need_mtime))
-    });
-    stream_records(view, query, cancel, records, emit)
+    Ok(candidates)
 }
 
 fn stream_records(
@@ -583,12 +667,19 @@ pub fn stream_before_indexed_magic(
                 }
             }
         }
-        for layer in &view.layers {
-            for id in layer.records.keys() {
-                ids.push(*id);
-                if ids.len() >= SCOPE_BOUND {
-                    return None;
-                }
+        let delta_ids = view
+            .deltas
+            .iter()
+            .flat_map(|d| (0..d.len()).map(|slot| d.id(slot)));
+        for id in view
+            .layers
+            .iter()
+            .flat_map(|l| l.records.keys().copied())
+            .chain(delta_ids)
+        {
+            ids.push(id);
+            if ids.len() >= SCOPE_BOUND {
+                return None;
             }
         }
         ids.sort_unstable();

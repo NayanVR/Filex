@@ -64,6 +64,9 @@ pub struct Segment {
     pub search: LiteralIndex,
     pub roots: Vec<Root>,
     pub sequence: u64,
+    /// `Some` marks a delta segment: records changed since the base, whose
+    /// parents may live in older levels, plus these sorted deleted IDs.
+    pub tombstones: Option<Vec<u64>>,
     ids: Column<u64>,
     parents: Column<u64>,
     root_ids: Column<u32>,
@@ -236,6 +239,7 @@ impl Segment {
             search,
             roots,
             sequence,
+            tombstones: None,
             ids,
             parents,
             root_ids,

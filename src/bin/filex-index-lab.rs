@@ -106,6 +106,7 @@ fn main() -> Result<()> {
             roots: base.roots.clone(),
             epoch: base.sequence,
             base: std::sync::Arc::new(base),
+            deltas: vec![],
             layers: vec![],
         };
         let start = Instant::now();
@@ -136,6 +137,7 @@ fn main() -> Result<()> {
             roots: index.roots.clone(),
             epoch: index.sequence,
             base: Arc::new(index),
+            deltas: vec![],
             layers: vec![],
         };
         let shapes = vec![
@@ -283,6 +285,7 @@ fn main() -> Result<()> {
             roots: index.roots.clone(),
             epoch: index.sequence,
             base: std::sync::Arc::new(index),
+            deltas: vec![],
             layers: vec![],
         };
         let cancel = std::sync::atomic::AtomicBool::new(false);

@@ -189,6 +189,7 @@ mod tests {
         known.flags = Record::DIRECTORY;
         View {
             base: Arc::new(Segment::build([known], roots.clone(), 0).unwrap()),
+            deltas: vec![],
             layers: vec![],
             roots,
             epoch: 0,

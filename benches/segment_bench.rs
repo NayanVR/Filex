@@ -92,6 +92,7 @@ fn enumerate_lookup(c: &mut Criterion) {
     let base = Arc::new(Segment::build(records.clone(), root(), 0).unwrap());
     let view = View {
         base,
+        deltas: vec![],
         layers: vec![],
         roots: root(),
         epoch: 0,
@@ -133,6 +134,10 @@ fn search_with_overlay(c: &mut Criterion) {
         text: "report".into(),
         ..Default::default()
     };
+    let common = Query {
+        text: "index".into(),
+        ..Default::default()
+    };
     let (cancel, hot) = (AtomicBool::new(false), HashMap::new());
     let mut group = c.benchmark_group("search_overlay_820k");
     for size in [0u64, 5_000, 25_000] {
@@ -156,15 +161,43 @@ fn search_with_overlay(c: &mut Criterion) {
             record.size = Some(i);
             overlay.put(record.id, Some(record));
         }
-        let view = View {
-            base: base.clone(),
-            layers: vec![Arc::new(overlay)],
-            roots: root(),
-            epoch: 0,
+        // FIL-30: the same changes flushed into one delta, and into four.
+        let changes: Vec<Record> = overlay.records.values().flatten().cloned().collect();
+        let delta = |records: &[Record]| {
+            let mut delta = Segment::build(records.to_vec(), root(), 0).unwrap();
+            delta.tombstones = Some(vec![]);
+            Arc::new(delta)
         };
-        group.bench_function(format!("overlay_{size}"), |b| {
-            b.iter(|| query::search(&view, &query, &cancel, &hot).unwrap())
-        });
+        let quarters: Vec<_> = (0..4)
+            .map(|q| {
+                let quarter: Vec<_> = changes.iter().skip(q).step_by(4).cloned().collect();
+                delta(&quarter)
+            })
+            .collect();
+        let views = [
+            ("overlay", vec![], vec![Arc::new(overlay)]),
+            ("delta", vec![delta(&changes)], vec![]),
+            ("deltas_4x", quarters, vec![]),
+        ];
+        for (name, deltas, layers) in views {
+            if size == 0 && name != "overlay" {
+                continue;
+            }
+            let view = View {
+                base: base.clone(),
+                deltas,
+                layers,
+                roots: root(),
+                epoch: 0,
+            };
+            group.bench_function(format!("{name}_{size}"), |b| {
+                b.iter(|| query::search(&view, &query, &cancel, &hot).unwrap())
+            });
+            // A common name: every base hit pays the shadowing check.
+            group.bench_function(format!("{name}_{size}_common"), |b| {
+                b.iter(|| query::search(&view, &common, &cancel, &hot).unwrap())
+            });
+        }
     }
     group.finish();
 }

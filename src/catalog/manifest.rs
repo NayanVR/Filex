@@ -13,10 +13,23 @@ use std::{
 pub struct Manifest {
     pub version: u32,
     pub epoch: u64,
+    /// The WAL sequence the newest level covers; replay starts after it.
     pub sequence: u64,
     pub next_id: u64,
+    /// The base segment.
     pub segment: String,
     pub roots: Vec<Root>,
+    /// Delta segments over the base, oldest first. Version 3 and later:
+    /// older binaries skip these manifests and fall back to a reconcile.
+    #[serde(default)]
+    pub deltas: Vec<String>,
+}
+pub const VERSION: u32 = 3;
+impl Manifest {
+    /// Every segment file this generation needs.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.segment.as_str()).chain(self.deltas.iter().map(String::as_str))
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Envelope {
@@ -53,7 +66,8 @@ pub fn candidates(dir: &Path) -> Result<Vec<(PathBuf, Manifest)>> {
             );
             let m: Manifest = serde_json::from_slice(&env.payload)?;
             ensure!(
-                m.version == 2 && !m.segment.contains('/') && !m.segment.contains('\\'),
+                matches!(m.version, 2 | VERSION)
+                    && m.files().all(|f| !f.contains('/') && !f.contains('\\')),
                 "invalid manifest"
             );
             Ok(m)

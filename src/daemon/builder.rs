@@ -23,15 +23,31 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const REQUEST_VERSION: u32 = 2;
+/// Version 3 adds delta tombstones; an older worker must reject it rather
+/// than silently build a delta without them.
+const REQUEST_VERSION: u32 = 3;
 const RECORD_HEADER_BYTES: usize = 66;
 const MAX_RECORD_BYTES: u64 = 1024 * 1024;
+/// The header carries a delta's tombstones: ~21 bytes each in JSON.
+const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ERROR_BYTES: u64 = 16 * 1024;
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Mode {
+    /// Walk every root into a new base.
+    Reconcile,
+    /// Merge every level of the view into a new base.
+    Merge,
+    /// Write the overlays as one new delta on top of the existing ones.
+    Flush,
+    /// Merge every delta and overlay into one delta.
+    MergeDeltas,
+}
+
 pub(super) struct BuildRequest {
     pub view: Arc<View>,
-    pub reconcile: bool,
+    pub mode: Mode,
     pub directory: PathBuf,
     pub next: Arc<AtomicU64>,
 }
@@ -48,6 +64,8 @@ struct Header {
     version: u32,
     sequence: u64,
     roots: Vec<Root>,
+    #[serde(default)]
+    tombstones: Option<Vec<u64>>,
 }
 
 /// Scratch files belong to a build until the writer accepts its output.
@@ -77,23 +95,34 @@ pub(super) fn build(request: BuildRequest, stop: &AtomicBool) -> Result<Built> {
     let mut scratch = ScratchFiles(vec![input.clone(), output.clone(), errors.clone()]);
     let file = File::options().write(true).create_new(true).open(&input)?;
     let mut spool = BufWriter::new(file);
+    let delta = matches!(request.mode, Mode::Flush | Mode::MergeDeltas)
+        .then(|| delta_changes(&request.view, request.mode == Mode::MergeDeltas));
     write_line(
         &mut spool,
         &Header {
             version: REQUEST_VERSION,
             sequence: request.view.epoch,
             roots: request.view.roots.clone(),
+            tombstones: delta.as_ref().map(|(_, deleted)| deleted.clone()),
         },
     )?;
 
-    let skipped = if request.reconcile {
-        enumerate(&request, &mut spool, stop)?
-    } else {
-        for record in request.view.records() {
-            ensure!(!stop.load(Ordering::Relaxed), "segment build cancelled");
-            write_record(&mut spool, &record)?;
+    let skipped = match (request.mode, delta) {
+        (Mode::Reconcile, _) => enumerate(&request, &mut spool, stop)?,
+        (_, Some((records, _))) => {
+            for record in &records {
+                ensure!(!stop.load(Ordering::Relaxed), "segment build cancelled");
+                write_record(&mut spool, record)?;
+            }
+            0
         }
-        0
+        _ => {
+            for record in request.view.records() {
+                ensure!(!stop.load(Ordering::Relaxed), "segment build cancelled");
+                write_record(&mut spool, &record)?;
+            }
+            0
+        }
     };
     spool.flush()?;
     drop(spool);
@@ -114,6 +143,43 @@ pub(super) fn build(request: BuildRequest, stop: &AtomicBool) -> Result<Built> {
         sequence: request.view.epoch,
         skipped,
     })
+}
+
+/// The records and sorted tombstones of a new delta, newest version winning.
+///
+/// A flush takes only the overlays; `merge_deltas` also folds in every
+/// existing delta, which the result then replaces. A tombstone is kept only
+/// while an older surviving level still holds the ID.
+// ponytail: materializes the merged changes in memory; bounded by the delta
+// budget (1/8 of the base), stream a k-way merge if that budget grows.
+pub(super) fn delta_changes(view: &View, merge_deltas: bool) -> (Vec<Record>, Vec<u64>) {
+    let mut changes = std::collections::BTreeMap::<u64, Option<Record>>::new();
+    if merge_deltas {
+        for delta in &view.deltas {
+            for slot in 0..delta.len() {
+                changes.insert(delta.id(slot), Some(delta.record(slot)));
+            }
+            for &id in delta.tombstones.iter().flatten() {
+                changes.insert(id, None);
+            }
+        }
+    }
+    for layer in &view.layers {
+        changes.extend(layer.records.iter().map(|(&id, r)| (id, r.clone())));
+    }
+    let older: &[Arc<Segment>] = if merge_deltas { &[] } else { &view.deltas };
+    let mut records = Vec::new();
+    let mut tombstones = Vec::new();
+    for (id, record) in changes {
+        match record {
+            Some(record) => records.push(record),
+            None if view.base.slot(id).is_some() || older.iter().any(|d| d.slot(id).is_some()) => {
+                tombstones.push(id)
+            }
+            None => {}
+        }
+    }
+    (records, tombstones)
 }
 
 fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) -> Result<usize> {
@@ -199,7 +265,7 @@ fn read_record(
     line: &mut String,
 ) -> Result<Option<Record>> {
     if version == 1 {
-        return if read_line(reader, line)? == 0 {
+        return if read_line(reader, line, MAX_RECORD_BYTES)? == 0 {
             Ok(None)
         } else {
             Ok(Some(
@@ -291,11 +357,11 @@ pub fn run_worker(input: &Path, output: &Path) -> Result<()> {
     compile(input, output)
 }
 
-fn read_line(reader: &mut impl BufRead, line: &mut String) -> Result<usize> {
+fn read_line(reader: &mut impl BufRead, line: &mut String, limit: u64) -> Result<usize> {
     line.clear();
-    let bytes = reader.take(MAX_RECORD_BYTES + 1).read_line(line)?;
+    let bytes = reader.take(limit + 1).read_line(line)?;
     ensure!(
-        bytes as u64 <= MAX_RECORD_BYTES,
+        bytes as u64 <= limit,
         "segment build record exceeds size limit"
     );
     Ok(bytes)
@@ -304,11 +370,11 @@ fn read_line(reader: &mut impl BufRead, line: &mut String) -> Result<usize> {
 fn compile(input: &Path, output: &Path) -> Result<()> {
     let mut reader = BufReader::new(File::open(input)?);
     let mut line = String::new();
-    let header_bytes = read_line(&mut reader, &mut line)?;
+    let header_bytes = read_line(&mut reader, &mut line, MAX_HEADER_BYTES)?;
     ensure!(header_bytes != 0, "missing segment build header");
     let header: Header = serde_json::from_str(&line).context("invalid segment build header")?;
     ensure!(
-        matches!(header.version, 1 | REQUEST_VERSION),
+        matches!(header.version, 1 | 2 | REQUEST_VERSION),
         "unsupported segment build request"
     );
 
@@ -358,11 +424,14 @@ fn compile(input: &Path, output: &Path) -> Result<()> {
             }
         }
     });
+    let tombstones = header.tombstones.clone();
     let segment = Segment::build(records, header.roots, header.sequence);
     if let Some(error) = failure {
         return Err(error);
     }
-    segment?.save(output)
+    let mut segment = segment?;
+    segment.tombstones = tombstones;
+    segment.save(output)
 }
 
 /// Laboratory helper that uses the same isolated compaction path as the writer.
@@ -374,6 +443,7 @@ pub fn compact_to(input: &Path, output: &Path) -> Result<()> {
         roots: base.roots.clone(),
         epoch: base.sequence,
         base,
+        deltas: vec![],
         layers: vec![],
     });
     compact_view_to(view, output)?;
@@ -387,7 +457,7 @@ pub fn compact_view_to(view: Arc<View>, output: &Path) -> Result<Segment> {
     let built = build(
         BuildRequest {
             view,
-            reconcile: false,
+            mode: Mode::Merge,
             directory: output
                 .parent()
                 .context("output has no parent directory")?
@@ -464,6 +534,7 @@ mod tests {
             &Header {
                 version: REQUEST_VERSION,
                 sequence: 9,
+                tombstones: None,
                 roots: vec![Root {
                     id: 1,
                     path: "/fixture".into(),
@@ -514,6 +585,7 @@ mod tests {
                 version: REQUEST_VERSION,
                 sequence: 1,
                 roots: vec![],
+                tombstones: None,
             },
         )
         .unwrap();
@@ -558,11 +630,12 @@ mod tests {
         let request = BuildRequest {
             view: Arc::new(View {
                 base: Arc::new(Segment::build([], roots.clone(), 0).unwrap()),
+                deltas: vec![],
                 layers: vec![],
                 roots,
                 epoch: 0,
             }),
-            reconcile: true,
+            mode: Mode::Reconcile,
             directory: data.clone(),
             next: Arc::new(AtomicU64::new(1)),
         };
@@ -583,5 +656,155 @@ mod tests {
         .unwrap();
         assert!(compile(&input, &output).is_err());
         assert!(!output.exists());
+    }
+
+    fn entry(id: u64, parent: u64, name: &str, directory: bool) -> Record {
+        Record {
+            id,
+            parent,
+            root: 1,
+            name: name.as_bytes().to_vec(),
+            flags: if directory { Record::DIRECTORY } else { 0 },
+            identity: Identity {
+                device: 1,
+                key: id,
+                birth: 1,
+            },
+            size: Some(id * 10),
+            mtime: Some(id as i64),
+        }
+    }
+
+    fn overlay(changes: &[(u64, Option<Record>)]) -> Arc<super::super::view::Overlay> {
+        let mut overlay = super::super::view::Overlay::default();
+        for (id, record) in changes {
+            overlay.put(*id, record.clone());
+        }
+        Arc::new(overlay)
+    }
+
+    /// Build `view`'s pending changes into a delta the way the worker does,
+    /// through a save and a mapped reopen.
+    fn flush(view: &View, merge_deltas: bool, directory: &Path, name: &str) -> Arc<Segment> {
+        let (records, tombstones) = delta_changes(view, merge_deltas);
+        let mut segment = Segment::build(records, view.roots.clone(), view.epoch).unwrap();
+        segment.tombstones = Some(tombstones);
+        let path = directory.join(name);
+        segment.save(&path).unwrap();
+        Arc::new(unsafe { Segment::open(&path) }.unwrap())
+    }
+
+    /// Everything a client can observe from a view, for comparing levels.
+    fn observe(view: &View) -> Vec<String> {
+        use super::super::{ipc::Query, query};
+        let cancel = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        for record in view.records() {
+            let path = view.path(record.id).unwrap();
+            assert_eq!(view.resolve(&path), Some(record.id), "{path:?}");
+            seen.push(format!("record {record:?} at {path:?}"));
+        }
+        let mut scoped = view.scoped_ids(Path::new("/fixture"), 10_000, &cancel);
+        scoped.sort_unstable();
+        seen.push(format!("scope {scoped:?}"));
+        for text in ["", "report", "txt", "summary", "deep", "fresh", "zz"] {
+            for (offset, filters) in [
+                (0, vec![]),
+                (40, vec![]),
+                (0, vec![crate::search::filter::Filter::Ext("md".into())]),
+            ] {
+                let query = Query {
+                    text: text.into(),
+                    filters,
+                    limit: 40,
+                    offset,
+                    fuzzy: false,
+                    ..Default::default()
+                };
+                let page = query::search(view, &query, &cancel, &Default::default()).unwrap();
+                let hits: Vec<_> = page.hits.iter().map(|h| (h.id, h.tier, &h.path)).collect();
+                seen.push(format!(
+                    "search {text:?} {offset}: {hits:?} more={}",
+                    page.more
+                ));
+                let mut streamed = Vec::new();
+                query::stream(view, &query, &cancel, |batch| {
+                    streamed.extend(batch.hits.into_iter().map(|h| (h.id, h.tier, h.path)));
+                    Ok(())
+                })
+                .unwrap();
+                seen.push(format!("stream {text:?}: {streamed:?}"));
+            }
+        }
+        seen
+    }
+
+    /// FIL-30: changes answer every query identically whether they sit in
+    /// overlays, in flushed deltas, or in merged deltas.
+    #[test]
+    fn deltas_answer_exactly_like_the_overlays_they_replace() {
+        let directory = tempfile::tempdir().unwrap();
+        let roots = vec![Root {
+            id: 1,
+            path: "/fixture".into(),
+            device: 1,
+        }];
+        let mut base = vec![
+            entry(1, 0, "fixture", true),
+            entry(2, 1, "a", true),
+            entry(3, 1, "b", true),
+            entry(4, 2, "report.txt", false),
+            entry(5, 2, "notes.md", false),
+            entry(6, 3, "report-final.txt", false),
+            entry(7, 3, "c", true),
+            entry(8, 7, "deep.txt", false),
+        ];
+        base.extend((100..200).map(|id| entry(id, 2, &format!("report-{id}.txt"), false)));
+        let base = Arc::new(Segment::build(base, roots.clone(), 1).unwrap());
+        let first = overlay(&[
+            (4, Some(entry(4, 2, "summary.txt", false))),
+            (5, None),
+            // Deleting a directory hides its base descendants.
+            (3, None),
+            (9, Some(entry(9, 2, "report-new.txt", false))),
+            (10, Some(entry(10, 2, "fresh", true))),
+            (11, Some(entry(11, 10, "report-deep.md", false))),
+            (150, None),
+            (151, Some(entry(151, 10, "report-moved.txt", false))),
+        ]);
+        let second = overlay(&[
+            // Rename a delta record, delete another, recreate a deleted name.
+            (9, Some(entry(9, 2, "renamed.md", false))),
+            (11, None),
+            (12, Some(entry(12, 2, "notes.md", false))),
+            (160, None),
+            (13, Some(entry(13, 10, "zz-only-new.txt", false))),
+        ]);
+        let view = |deltas: Vec<Arc<Segment>>, layers, epoch| View {
+            base: base.clone(),
+            deltas,
+            layers,
+            roots: roots.clone(),
+            epoch,
+        };
+
+        let overlays_only = view(vec![], vec![first.clone()], 2);
+        let expected = observe(&overlays_only);
+        let one = flush(&overlays_only, false, directory.path(), "one");
+        assert_eq!(one.tombstones.as_deref(), Some(&[3, 5, 150][..]));
+        assert_eq!(observe(&view(vec![one.clone()], vec![], 2)), expected);
+
+        let overlays_only = view(vec![], vec![first, second.clone()], 3);
+        let expected = observe(&overlays_only);
+        let pending = view(vec![one.clone()], vec![second], 3);
+        assert_eq!(observe(&pending), expected);
+        // 11 existed only in the first delta: the flush keeps its tombstone
+        // to hide that copy, but a merge of both deltas drops it.
+        let two = flush(&pending, false, directory.path(), "two");
+        assert_eq!(two.tombstones.as_deref(), Some(&[11, 160][..]));
+        assert_eq!(observe(&view(vec![one.clone(), two], vec![], 3)), expected);
+        let merged = flush(&pending, true, directory.path(), "merged");
+        assert_eq!(merged.tombstones.as_deref(), Some(&[3, 5, 150, 160][..]));
+        assert_eq!(observe(&view(vec![merged], vec![], 3)), expected);
     }
 }

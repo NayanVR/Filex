@@ -26,6 +26,8 @@ struct Image {
     children: ColumnImage,
     meta_keys: Vec<String>,
     meta_postings: PostingsImage,
+    #[serde(default)]
+    tombstones: Option<Vec<u64>>,
 }
 
 impl Segment {
@@ -53,6 +55,7 @@ impl Segment {
             children: self.children.save(&mut w)?,
             meta_keys: self.meta_keys.clone(),
             meta_postings: self.meta_postings.save(&mut w)?,
+            tombstones: self.tombstones.clone(),
         };
         w.finish(&image)
     }
@@ -87,6 +90,7 @@ impl Segment {
             children: Column::load(&reader, image.children)?,
             meta_keys: image.meta_keys,
             meta_postings: Postings::load(&reader, image.meta_postings)?,
+            tombstones: image.tombstones,
         };
         for (root, parent) in segment.root_ids.iter().zip(segment.parents.iter()) {
             if parent != 0 {
@@ -145,6 +149,12 @@ impl Segment {
                     .all(|i| (i as usize) < n),
             "invalid catalog references"
         );
+        ensure!(
+            self.tombstones
+                .as_ref()
+                .is_none_or(|t| t.first() != Some(&0) && t.windows(2).all(|w| w[0] < w[1])),
+            "invalid tombstones"
+        );
         let mut root_ids = std::collections::HashSet::new();
         ensure!(
             self.roots
@@ -164,6 +174,7 @@ impl Segment {
             );
             ensure!(
                 parent == 0
+                    || self.tombstones.is_some()
                     || self
                         .slot(parent)
                         .is_some_and(|p| self.flags[p] & Record::DIRECTORY != 0),
@@ -214,9 +225,11 @@ impl Segment {
                 if self.parents.get(at) == 0 {
                     break;
                 }
-                let parent = self
-                    .slot(self.parents.get(at))
-                    .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
+                // A delta's chain may continue in an older level.
+                let Some(parent) = self.slot(self.parents.get(at)) else {
+                    ensure!(self.tombstones.is_some(), "missing parent");
+                    break;
+                };
                 ensure!(
                     self.root_ids.get(parent) == self.root_ids.get(at),
                     "parent crosses roots"

@@ -219,6 +219,7 @@ fn exhaustive_never_includes_fuzzy() {
     .unwrap();
     let view = View {
         base: Arc::new(segment),
+        deltas: vec![],
         layers: Vec::new(),
         roots: vec![Root {
             id: 1,
@@ -269,6 +270,7 @@ fn paging_filters_overlay_tombstones_and_cancellation() {
     layer.put(303, Some(record(303, 1, b"report-new.pdf", false)));
     let view = View {
         base,
+        deltas: vec![],
         layers: vec![Arc::new(layer)],
         roots,
         epoch: 8,
@@ -502,6 +504,7 @@ fn ranked_pages_agree_with_exhaustive_stream() {
     }
     let view = View {
         base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        deltas: vec![],
         layers: vec![Arc::new(layer)],
         roots,
         epoch: 1,
@@ -737,6 +740,7 @@ fn magic_scope_stream_is_exhaustive_and_avoids_unrelated_folders() {
     overlay.put(4, None);
     let view = View {
         base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        deltas: vec![],
         layers: vec![Arc::new(overlay)],
         roots,
         epoch: 1,
@@ -787,6 +791,7 @@ fn magic_large_scope_falls_back_without_truncating() {
     }
     let view = View {
         base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        deltas: vec![],
         layers: vec![],
         roots,
         epoch: 1,
@@ -827,6 +832,7 @@ fn magic_literal_postings_include_renames_and_keep_complete_matches() {
     overlay.put(3, None);
     let view = View {
         base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
+        deltas: vec![],
         layers: vec![Arc::new(overlay)],
         roots,
         epoch: 1,
@@ -912,6 +918,7 @@ fn magic_indexed_predicates_match_full_scan_with_overlay_changes() {
     let view = View {
         base: Arc::new(unsafe { Segment::open(&file).unwrap() }),
         roots,
+        deltas: vec![],
         layers: vec![Arc::new(first), Arc::new(latest)],
         epoch: 3,
     };
@@ -1017,6 +1024,7 @@ fn magic_metadata_skips_non_candidates_and_cancellation_never_completes() {
     let view = View {
         base: Arc::new(Segment::build(records, roots.clone(), 1).unwrap()),
         roots,
+        deltas: vec![],
         layers: vec![],
         epoch: 1,
     };
@@ -1168,4 +1176,94 @@ fn daemon_stops_promptly_on_sigterm_mid_build() {
         .flatten()
         .any(|e| e.file_name().to_string_lossy().starts_with("segment-"));
     assert!(!published, "a cancelled build was published");
+}
+
+/// FIL-30: a burst of changes is flushed into a delta segment instead of a
+/// rewritten base. Search sees it, and every file the retained manifests
+/// reference stays on disk.
+#[test]
+fn daemon_flushes_a_burst_into_a_delta_and_keeps_the_base() {
+    use filex::catalog::manifest;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("files");
+    let data = dir.path().join("index");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    // Large enough that a 4,096-change burst stays under 1/8 of the base.
+    for d in 0..36 {
+        let folder = root.join(format!("d{d}"));
+        std::fs::create_dir(&folder).unwrap();
+        for f in 0..1000 {
+            std::fs::write(folder.join(format!("d{d}-f{f}.txt")), b"").unwrap();
+        }
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let shutdown = stop.clone();
+    let path = data.clone();
+    let roots = vec![root.clone()];
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown).unwrap());
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| {
+        client
+            .status()
+            .is_ok_and(|s| !s.building && s.error.is_none() && !s.roots.is_empty())
+    });
+    // Startup can publish more than one generation (the watcher-ready
+    // reconcile); change files only once publication has settled.
+    let newest = || manifest::candidates(&data).unwrap()[0].1.epoch;
+    let mut settled = (newest(), Instant::now());
+    wait_until(|| {
+        if newest() != settled.0 {
+            settled = (newest(), Instant::now());
+        }
+        settled.1.elapsed() > Duration::from_secs(2) && client.status().is_ok_and(|s| !s.building)
+    });
+    let base = manifest::candidates(&data).unwrap()[0].1.clone();
+    assert!(base.deltas.is_empty());
+
+    let bulk = root.join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for f in 0..4200 {
+        std::fs::write(bulk.join(format!("bulk-{f}.txt")), b"").unwrap();
+    }
+    std::fs::remove_file(root.join("d0/d0-f0.txt")).unwrap();
+    // A new folder's contents are listed in place (FIL-27).
+    client
+        .hint(1, vec![bulk.clone(), root.join("d0/d0-f0.txt")])
+        .unwrap();
+    wait_until(|| {
+        manifest::candidates(&data)
+            .unwrap()
+            .first()
+            .is_some_and(|(_, m)| !m.deltas.is_empty())
+    });
+    let manifests = manifest::candidates(&data).unwrap();
+    let flushed = &manifests[0].1;
+    assert_eq!(flushed.segment, base.segment, "the base was not rewritten");
+    assert_eq!(flushed.version, manifest::VERSION);
+    for (_, m) in manifests.iter().take(2) {
+        for file in m.files() {
+            assert!(
+                data.join(file).exists(),
+                "{file} was retired while referenced"
+            );
+        }
+    }
+
+    let cancel = AtomicBool::new(false);
+    let search = |text: &str| {
+        let query = Query {
+            text: text.into(),
+            client: 1,
+            ..Default::default()
+        };
+        client.search(query, &cancel).unwrap().hits
+    };
+    wait_until(|| search("bulk-4199").len() == 1);
+    assert_eq!(search("bulk-1234.txt").len(), 1);
+    assert!(search("d0-f0.txt").is_empty());
+    assert_eq!(search("d0-f1.txt").len(), 1);
+    stop.store(true, Ordering::Relaxed);
+    thread.join().unwrap();
 }
