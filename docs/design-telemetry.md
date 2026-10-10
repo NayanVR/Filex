@@ -8,7 +8,7 @@ of `docs/roadmap.md` Phase 2c.
 > custom `FILEX_CRASH_ENDPOINT` POST uploader described in "Transport" below
 > was **removed**. Everything else in this doc still holds — the capture,
 > the `scrub` backstop, the durable on-disk queue, the `CrashReport` shape,
-> on-by-default/opt-out consent (`crash_reports`). What changed:
+> on-by-default/opt-out consent (`share_diagnostics`). What changed:
 >
 > - **Transport = the `observability` feature (Sentry).** The durable queue
 >   is now Sentry's *offline buffer*: panics are captured to disk by our own
@@ -19,15 +19,15 @@ of `docs/roadmap.md` Phase 2c.
 >   a live in-process flush is lost.
 > - **Gating is now DSN + consent** (not endpoint + consent). Nothing sends
 >   unless the build embeds a Sentry DSN (`FILEX_SENTRY_DSN`, baked by CI —
->   a public client key) *and* `crash_reports` is on. No DSN ⇒ local-only.
+>   a public client key) *and* `share_diagnostics` is on. No DSN ⇒ local-only.
 > - **Scope widened beyond crashes.** With Sentry in place the same consent
 >   also covers anonymous **performance measurements** (search latency,
 >   index bootstrap, resource use) and **release-health sessions**
 >   (crash-free rate, adoption) — all still path-scrubbed, none carrying
 >   queries/paths/tags. The Settings toggle is relabelled "Share anonymous
->   diagnostics" to match; the serde key stays `crash_reports`.
+>   diagnostics" to match; the setting is now `share_diagnostics`.
 > - **Windows asks at install (2026-10-10).** The MSI's Privacy page
->   seeds `crash_reports` on first run; still opt-out (ticked by default).
+>   seeds `share_diagnostics` on first run; still opt-out (ticked by default).
 >   See `docs/design-windows-installer.md` decision 6 and `PRIVACY.md`.
 > - **Still not linked into `filex-indexd`.** Sentry is UI-process only; the
 >   elevated service is built without the `observability` feature and links
@@ -62,7 +62,7 @@ always-on data collection. Only crashes, only with consent, only scrubbed.
 
 ## Privacy invariants (non-negotiable)
 
-- **Nothing is uploaded when `crash_reports` is off, or when no endpoint is
+- **Nothing is uploaded when `share_diagnostics` is off, or when no endpoint is
   configured.** Crashes are still captured *locally* regardless (the queue
   file); only upload is gated.
 - **Never captured:** the search query string, index contents, tag names,
@@ -94,7 +94,7 @@ always-on data collection. Only crashes, only with consent, only scrubbed.
 2. **Scrub** (`telemetry::scrub`): pure, unit-tested; applied to the panic
    message and backtrace at capture time, so the queued file is already
    clean (defence in depth — even a leaked queue file has no paths).
-3. **Consent**: `Settings.crash_reports: bool`, **default `true`**. A
+3. **Consent**: `Settings.share_diagnostics: bool`, **default `true`**. A
    "Send crash reports" toggle in the Settings pane turns it off. No
    startup prompt (backward-compatible: existing `settings.json` without
    the field defaults to on via the struct's `#[serde(default)]`).
@@ -156,7 +156,7 @@ additions.
 1. `telemetry` module: `scrub` + `CrashReport` + the local queue
    (write/list/prune), pure and tested. No UI, no network.
 2. `install_panic_hook`, wired into both binaries.
-3. `Settings.crash_reports` + the one-time first-run consent prompt (UI).
+3. `Settings.share_diagnostics` + the one-time first-run consent prompt (UI).
 4. Background uploader (`ureq` POST, `FILEX_CRASH_ENDPOINT`), drained on
    launch when consented; fake-transport tests.
 

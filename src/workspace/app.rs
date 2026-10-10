@@ -6,7 +6,7 @@ pub fn run() {
     let _logging_guard = filex::diagnostics::logging::init("filex");
     filex::diagnostics::telemetry::install_panic_hook("filex");
     // Sentry (UI process only; on-by-default, opt-out). The
-    // `crash_reports` setting is consent and gates the whole integration,
+    // `share_diagnostics` setting is consent and gates the whole integration,
     // so read it from disk before the app exists. The returned guard
     // flushes pending events on exit and must live for the whole run.
     // Builds without `observability` never link the SDK — which is how the
@@ -15,7 +15,7 @@ pub fn run() {
     let _sentry_guard = {
         let consent = filex::settings::default_settings_file()
             .and_then(|file| filex::settings::Settings::load(&file).ok())
-            .is_some_and(|settings| settings.crash_reports);
+            .is_some_and(|settings| settings.share_diagnostics);
         filex::diagnostics::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
     };
     // A startup line at the default level, so a blank log file means "not

@@ -66,7 +66,7 @@ Steps 4–6 are ours to fix outright. Steps 2–3 are the loud ones and they are
    `PrivacyDlg`) with a crash-report checkbox, ticked by default. SignPath
    Foundation's terms (FIL-9) require apps that send data to show the policy
    during install and offer an opt-out there. The choice lands in
-   `HKLM\Software\Filex\CrashReports` and seeds `crash_reports` once, when
+   `HKLM\Software\Filex\CrashReports` and seeds `share_diagnostics` once, when
    the settings file is first created (`settings::installer`).
 
 ## Why the updater must switch (decision 3, the non-obvious part)

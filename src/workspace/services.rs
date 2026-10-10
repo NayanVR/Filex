@@ -194,13 +194,13 @@ impl Workspace {
     }
 
     /// Drain any queued crash reports to Sentry at launch — only with the
-    /// user's consent (`crash_reports`, on-by-default/opt-out). Runs
+    /// user's consent (`share_diagnostics`, on-by-default/opt-out). Runs
     /// off-thread; each scrubbed report is captured and deleted on success,
     /// failures stay queued for next launch (Phase 2c). Sentry is the only
     /// transport, so without the `observability` feature this is a no-op and
     /// the durable queue simply caps at [`filex::diagnostics::telemetry::QUEUE_CAP`].
     pub(super) fn spawn_crash_upload(&self, cx: &mut Context<Self>) {
-        if !self.settings.read(cx).settings().crash_reports {
+        if !self.settings.read(cx).settings().share_diagnostics {
             return;
         }
         #[cfg(feature = "observability")]

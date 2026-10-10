@@ -53,7 +53,7 @@ impl SettingsSection {
                 "show-hidden" | "confirm-delete" | "dirs-first" | "thumbnails"
             ),
             Self::Search => id == "index-system-files",
-            Self::Privacy => id == "crash-reports",
+            Self::Privacy => id == "share-diagnostics",
             _ => false,
         }
     }
@@ -116,11 +116,11 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
         no_follow_up,
     ),
     (
-        "crash-reports",
+        "share-diagnostics",
         "Share anonymous diagnostics",
         "Scrubbed crashes + performance only — never file names, paths, or queries",
-        |s| s.crash_reports,
-        |s| s.crash_reports = !s.crash_reports,
+        |s| s.share_diagnostics,
+        |s| s.share_diagnostics = !s.share_diagnostics,
         // Turning it on drains anything already queued.
         Workspace::spawn_crash_upload,
     ),

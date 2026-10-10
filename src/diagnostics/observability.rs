@@ -1,6 +1,6 @@
 //! Sentry integration (UI process only) — the sole network transport for
 //! crash/error reporting, measurements, and release-health sessions.
-//! On-by-default, opt-out: the `crash_reports` setting is consent.
+//! On-by-default, opt-out: the `share_diagnostics` setting is consent.
 //!
 //! Same privacy invariant as [`crate::diagnostics::telemetry`]: **no path-shaped data
 //! ever leaves the machine**, enforced twice — drained crash reports were
@@ -42,7 +42,7 @@ fn dsn() -> Option<String> {
 
 /// Initialise Sentry for the UI process. The returned guard must be held
 /// for the whole process lifetime (dropping it flushes pending events);
-/// `None` without consent or a DSN. `consent` mirrors the `crash_reports`
+/// `None` without consent or a DSN. `consent` mirrors the `share_diagnostics`
 /// setting. PII off, no server name, path scrubber on both hooks.
 pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<ClientInitGuard> {
     if !consent {

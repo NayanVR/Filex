@@ -33,7 +33,7 @@ updater = ["dep:ureq"]
 # It is a *build-time* gate, not a consent gate: the filex-indexd
 # daemon must never link a telemetry SDK, so it is built without this
 # feature (release CI builds the service plain and the UI with it). The
-# UI's consent is on-by-default/opt-out (the `crash_reports` setting), so
+# UI's consent is on-by-default/opt-out (the `share_diagnostics` setting), so
 # shipped UI builds report by default. Uses the ureq transport + rustls to
 # match filex's existing HTTP stack instead of pulling in reqwest/tokio.
 # Upholds the same privacy invariant as `telemetry`: every outgoing event
