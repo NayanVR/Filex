@@ -175,6 +175,7 @@ struct State {
     pending: Option<Control>,
     visible: bool,
     shutdown: bool,
+    kind: Option<String>,
     request_id: u64,
 }
 struct Shared {
@@ -201,6 +202,10 @@ impl Preview {
     pub fn is_visible(&self) -> bool {
         self.shared.state.lock().is_ok_and(|s| s.visible)
     }
+    /// Reports API initialization, not verified first paint. Useful for smoke tests.
+    pub fn ready_kind(&self) -> Option<String> {
+        self.shared.state.lock().ok().and_then(|s| s.kind.clone())
+    }
     pub fn show(&self, paths: Vec<PathBuf>, selected: usize) {
         if paths.is_empty() {
             self.close();
@@ -220,6 +225,7 @@ impl Preview {
             state.request_id = state.request_id.wrapping_add(1);
             state.pending = Some(Control::Present(paths, selected - start, state.request_id));
             state.visible = true;
+            state.kind = None;
             self.shared.changed.notify_one();
         }
     }
@@ -227,6 +233,7 @@ impl Preview {
         if let Ok(mut state) = self.shared.state.lock() {
             state.pending = Some(Control::Close);
             state.visible = false;
+            state.kind = None;
             self.shared.changed.notify_one();
         }
     }
@@ -305,7 +312,14 @@ fn supervise(
             while let Ok(event) = child.receiver.try_recv() {
                 match event {
                     Ok(Event::Heartbeat) => last_event = Instant::now(),
-                    Ok(Event::Ready { .. }) => last_event = Instant::now(),
+                    Ok(Event::Ready { kind, request_id }) => {
+                        last_event = Instant::now();
+                        if let Ok(mut state) = shared.state.lock() {
+                            if state.visible && state.request_id == request_id {
+                                state.kind = Some(kind);
+                            }
+                        }
+                    }
                     Ok(Event::Closed) => {
                         finished = true;
                         break;
@@ -340,6 +354,7 @@ fn supervise(
                 if let Ok(mut state) = shared.state.lock() {
                     if state.pending.is_none() {
                         state.visible = false;
+                        state.kind = None;
                     }
                 }
             }
@@ -358,6 +373,7 @@ fn supervise(
             if let Ok(mut state) = shared.state.lock() {
                 if state.pending.is_none() {
                     state.visible = false;
+                    state.kind = None;
                 }
             }
             let _ = errors.unbounded_send(error);
