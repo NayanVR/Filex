@@ -11,7 +11,8 @@
 #
 # Required secrets:
 #   FILEX_SIGNING_KEY  — hex Ed25519 private key from `filex-sign keygen`.
-#   TAP_GITHUB_TOKEN   — PAT with push access to the Homebrew tap repo.
+#   TAP_DEPLOY_KEY     — private half of a write-enabled SSH deploy key on the
+#                        Homebrew tap repo (never expires, scoped to that repo).
 # Optional secrets:
 #   FILEX_SENTRY_DSN   — Sentry DSN (a public client key) compiled into the
 #                        UI app for opt-in observability. When unset, Sentry
@@ -217,7 +218,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TAP_REPO }}
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
           path: tap
       - name: Render cask
         env:

@@ -188,7 +188,7 @@ Ordered so each block is independently testable and lands one concern.
 
 0. **Tap + key setup. — TOOLING DONE 2026-08-01; manual steps pending.**
    `filex-sign keygen` generates the keypair; `packaging/README.md` has the
-   one-time checklist (secrets `FILEX_SIGNING_KEY` / `TAP_GITHUB_TOKEN`,
+   one-time checklist (secrets `FILEX_SIGNING_KEY` / `TAP_DEPLOY_KEY`,
    filling the embedded constants, creating the `homebrew-filex` tap).
    These are **manual, owner-only** steps (the private key must never enter
    a transcript or the repo), so the constants ship as empty placeholders

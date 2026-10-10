@@ -200,7 +200,7 @@ README and on the release page: no browser download, no Mark-of-the-Web,
 hash-verified against the manifest. Submit to `microsoft/winget-pkgs` with
 `InstallerType: burn` and `/quiet` switches; automate subsequent version
 bumps with `wingetcreate update` in the release workflow (needs a PAT +
-fork, same shape as the existing `TAP_GITHUB_TOKEN` step).
+fork, same shape as the existing `TAP_DEPLOY_KEY` step).
 
 **To verify before we promise it in docs:** whether an unsigned Burn bundle
 installed via winget genuinely avoids the SmartScreen wall on a clean
