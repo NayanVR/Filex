@@ -19,6 +19,40 @@ pub fn default_settings_file() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("filex").join("settings.json"))
 }
 
+/// Developer artifact folders `exclude_dev_folders` skips out of the box.
+pub const DEFAULT_EXCLUDED_FOLDERS: [&str; 21] = [
+    "node_modules",
+    ".git",
+    ".hg",
+    ".svn",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".gradle",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".parcel-cache",
+    "dist-newstyle",
+    "Pods",
+    "DerivedData",
+    ".cargo",
+    ".rustup",
+];
+
+/// A user-typed exclude entry as a bare folder name: trimmed, and `None`
+/// when empty, a dot entry, or containing a path separator (on any OS, so
+/// a settings file stays valid when synced across platforms).
+pub fn folder_name(input: &str) -> Option<String> {
+    let name = input.trim();
+    (!name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\']))
+        .then(|| name.to_owned())
+}
+
 /// Everything filex persists about how the app should behave. Fields
 /// deliberately cover Phase 2a features that aren't built yet (sort,
 /// delete behavior) so the on-disk shape stays stable as they land.
@@ -34,6 +68,14 @@ pub struct Settings {
     /// memory win, and they stay browsable either way. Takes full effect on
     /// the next index rebuild.
     pub index_system_files: bool,
+    /// Skip every folder named in `excluded_folder_names`, at any depth,
+    /// when indexing (FIL-28). On by default, including for settings files
+    /// written before it existed; the folders stay browsable.
+    /// Takes full effect on the next index rebuild.
+    pub exclude_dev_folders: bool,
+    /// Folder names (not paths or globs) skipped while
+    /// `exclude_dev_folders` is on. User-editable; see [`folder_name`].
+    pub excluded_folder_names: Vec<String>,
     pub sort: SortSettings,
     pub confirm_delete: bool,
     pub delete_to_trash: bool,
@@ -145,6 +187,8 @@ impl Default for Settings {
             roots: Vec::new(),
             show_hidden_files: false,
             index_system_files: false,
+            exclude_dev_folders: true,
+            excluded_folder_names: DEFAULT_EXCLUDED_FOLDERS.map(String::from).to_vec(),
             sort: SortSettings::default(),
             confirm_delete: true,
             delete_to_trash: true,
@@ -195,6 +239,19 @@ pub enum SortBy {
 }
 
 impl Settings {
+    /// Add a typed folder name to the exclude list. False when the input
+    /// isn't a valid name (see [`folder_name`]) or is already listed.
+    pub fn add_excluded_folder(&mut self, input: &str) -> bool {
+        let Some(name) = folder_name(input) else {
+            return false;
+        };
+        if self.excluded_folder_names.contains(&name) {
+            return false;
+        }
+        self.excluded_folder_names.push(name);
+        true
+    }
+
     /// Carry explicit folder symbols through a move or rename. Copies keep
     /// the source choices and duplicate them for the new path. Descendant
     /// choices follow a moved/copied parent folder too.
@@ -428,6 +485,56 @@ mod tests {
         assert_eq!(settings.sort, SortSettings::default());
         assert!(settings.keyboard_shortcuts.is_empty());
         assert!(settings.folder_icons.is_empty());
+    }
+
+    #[test]
+    fn excluded_folder_list_defaults_and_round_trips() {
+        let settings = Settings::default();
+        assert!(settings.exclude_dev_folders);
+        assert!(
+            settings
+                .excluded_folder_names
+                .iter()
+                .any(|n| n == "node_modules")
+        );
+
+        // A file written before FIL-28 gets the default list.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, r#"{ "version": 1 }"#).unwrap();
+        let loaded = Settings::load(&file).unwrap();
+        assert!(loaded.exclude_dev_folders, "upgrades start excluding too");
+        assert_eq!(loaded.excluded_folder_names, settings.excluded_folder_names);
+
+        // An edited list (including an emptied one) survives a save.
+        for names in [vec!["build".to_owned()], Vec::new()] {
+            let edited = Settings {
+                exclude_dev_folders: true,
+                excluded_folder_names: names,
+                ..Default::default()
+            };
+            edited.save(&file).unwrap();
+            assert_eq!(Settings::load(&file).unwrap(), edited);
+        }
+    }
+
+    #[test]
+    fn excluded_folder_input_is_validated() {
+        assert_eq!(folder_name("  build \n").as_deref(), Some("build"));
+        for bad in ["", "   ", ".", "..", "a/b", "a\\b", "/abs"] {
+            assert_eq!(folder_name(bad), None, "{bad:?}");
+        }
+        let mut settings = Settings {
+            excluded_folder_names: Vec::new(),
+            ..Default::default()
+        };
+        assert!(settings.add_excluded_folder(" build "));
+        assert!(
+            !settings.add_excluded_folder("build"),
+            "duplicates are dropped"
+        );
+        assert!(!settings.add_excluded_folder("src/build"));
+        assert_eq!(settings.excluded_folder_names, ["build"]);
     }
 
     #[test]

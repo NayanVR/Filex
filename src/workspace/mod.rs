@@ -275,7 +275,6 @@ struct Workspace {
     daemon_status: filex::daemon::ipc::Status,
     search_hits: std::collections::HashMap<PathBuf, filex::daemon::ipc::Hit>,
     search_more: bool,
-    index_system_files: bool,
     search_page_query: Option<filex::daemon::ipc::Query>,
     search_paging: bool,
     search_client_id: u64,
@@ -292,6 +291,8 @@ struct Workspace {
     /// `Custom` accent on change).
     accent_hex: gpui::Entity<SearchInput>,
     _accent_hex_subscription: gpui::Subscription,
+    /// The "add a folder name" field of the index exclude list (FIL-28).
+    excluded_folder_input: gpui::Entity<SearchInput>,
     results: Vec<SearchRow>,
     search_generation: u64,
     /// The Magic card's state when the query parses as a command.
@@ -476,6 +477,11 @@ impl Workspace {
                 });
             }
         });
+        let excluded_folder_input = cx.new(SearchInput::new);
+        excluded_folder_input.update(cx, |input, cx| {
+            input.set_propagate_empty(false);
+            input.set_placeholder("Folder name, e.g. build", cx);
+        });
         let settings = cx.new(SettingsStore::new);
         // Settings changes re-derive everything visible that depends on
         // them (the hidden-file filter on the browse list, and the
@@ -483,16 +489,17 @@ impl Workspace {
         let settings_subscription =
             cx.subscribe(&settings, |this, _store, event, cx| match event {
                 SettingsEvent::Changed(previous) => {
-                    let include_system = this.settings.read(cx).settings().index_system_files;
-                    if this.index_system_files != include_system {
-                        this.index_system_files = include_system;
-                        if let Some(client) = this.service.clone() {
-                            cx.background_executor()
-                                .spawn(async move {
-                                    let _ = client.call(filex::daemon::ipc::Command::Reconcile);
-                                })
-                                .detach();
-                        }
+                    let current = this.settings.read(cx).settings();
+                    let filter_changed = previous.index_system_files != current.index_system_files
+                        || previous.exclude_dev_folders != current.exclude_dev_folders
+                        || (current.exclude_dev_folders
+                            && previous.excluded_folder_names != current.excluded_folder_names);
+                    if filter_changed && let Some(client) = this.service.clone() {
+                        cx.background_executor()
+                            .spawn(async move {
+                                let _ = client.call(filex::daemon::ipc::Command::Reconcile);
+                            })
+                            .detach();
                     }
                     let current = this.settings.read(cx).settings();
                     let reload = previous.sort != current.sort
@@ -513,7 +520,6 @@ impl Workspace {
             .map(|file| Recents::load(&file))
             .unwrap_or_default();
         shortcuts::install(&settings.read(cx).settings().keyboard_shortcuts.clone(), cx);
-        let index_system_files = settings.read(cx).settings().index_system_files;
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             cwd: cwd.clone(),
@@ -533,7 +539,6 @@ impl Workspace {
             daemon_status: filex::daemon::ipc::Status::default(),
             search_hits: Default::default(),
             search_more: false,
-            index_system_files,
             search_page_query: None,
             search_paging: false,
             search_client_id: std::time::SystemTime::now()
@@ -550,6 +555,7 @@ impl Workspace {
             _search_input_subscription: subscription,
             accent_hex,
             _accent_hex_subscription: accent_hex_subscription,
+            excluded_folder_input,
             results: Vec::new(),
             search_generation: 0,
             magic: None,

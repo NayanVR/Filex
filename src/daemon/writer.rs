@@ -267,7 +267,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                         reconcile = true;
                     }
                     Command::Paths { paths, remove } => {
-                        let include_system = ingest::include_system_files();
+                        let filter = ingest::IndexFilter::load();
                         let mut batch: std::collections::BTreeMap<PathBuf, bool> =
                             paths.into_iter().map(|p| (p, remove)).collect();
                         while batch.len() < EVENT_BATCH_LIMIT {
@@ -286,8 +286,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                         }
                         batch.retain(|p, _| {
                             !p.starts_with(&directory)
-                                && (include_system
-                                    || !roots.iter().any(|r| ingest::excluded_system(&r.path, p)))
+                                && !roots.iter().any(|r| filter.excludes(&r.path, p))
                         });
                         let paths: Vec<_> = batch.keys().cloned().collect();
                         if mode == Mode::Reconcile && building {

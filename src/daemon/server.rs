@@ -12,7 +12,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -57,8 +57,8 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
     let shared = handle.shared.clone();
     let events = handle.commands.clone();
     let event_owner = shared.clone();
-    let include_system = Arc::new(AtomicBool::new(crate::ingest::include_system_files()));
-    let event_system = include_system.clone();
+    let filter = Arc::new(RwLock::new(crate::ingest::IndexFilter::load()));
+    let event_filter = filter.clone();
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(mut event) => {
@@ -70,13 +70,13 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
                 }
                 {
                     let view = event_owner.view.read().unwrap();
+                    let filter = event_filter.read().unwrap();
                     event.paths.retain(|p| {
                         !p.starts_with(&ignored)
-                            && view.roots.iter().any(|r| {
-                                p.starts_with(&r.path)
-                                    && (event_system.load(Ordering::Relaxed)
-                                        || !crate::ingest::excluded_system(&r.path, p))
-                            })
+                            && view
+                                .roots
+                                .iter()
+                                .any(|r| p.starts_with(&r.path) && !filter.excludes(&r.path, p))
                     });
                 }
                 if event.paths.is_empty() {
@@ -257,7 +257,7 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
                     Ok(Some(Response::Status(status)))
                 }
                 Command::Reconcile => {
-                    include_system.store(crate::ingest::include_system_files(), Ordering::Relaxed);
+                    *filter.write().unwrap() = crate::ingest::IndexFilter::load();
                     handle.commands.try_send(writer::Command::Reconcile)?;
                     Ok(Some(Response::Ack))
                 }

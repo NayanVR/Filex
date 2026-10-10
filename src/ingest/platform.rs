@@ -103,3 +103,8 @@ pub(super) const SYSTEM_DIRS: &[&str] = &[
     "proc", "sys", "dev", "run", "boot", "usr", "bin", "sbin", "lib", "lib64", "etc", "var", "opt",
     "srv",
 ];
+
+/// Whether folder names compare case-insensitively: NTFS and APFS/HFS+
+/// default to case-insensitive, Linux filesystems don't. A case-sensitive
+/// APFS volume would over-match here, which only excludes more.
+pub(super) const CASE_INSENSITIVE_NAMES: bool = cfg!(any(windows, target_os = "macos"));

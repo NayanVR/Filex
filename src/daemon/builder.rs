@@ -184,10 +184,12 @@ pub(super) fn delta_changes(view: &View, merge_deltas: bool) -> (Vec<Record>, Ve
 fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) -> Result<usize> {
     let mut allocated = HashSet::new();
     let mut skipped = 0;
+    let filter = ingest::IndexFilter::load();
     for root in &request.view.roots {
         skipped += ingest::walk(
             root,
             &request.directory,
+            &filter,
             |path, parent, identity| {
                 let existing = unchanged_id(&request.view, path, parent, identity).or_else(|| {
                     request.view.find_native(root.id, *identity).filter(|&id| {

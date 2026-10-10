@@ -52,7 +52,7 @@ impl SettingsSection {
                 id,
                 "show-hidden" | "confirm-delete" | "dirs-first" | "thumbnails"
             ),
-            Self::Search => id == "index-system-files",
+            Self::Search => matches!(id, "index-system-files" | "exclude-dev-folders"),
             Self::Privacy => id == "share-diagnostics",
             _ => false,
         }
@@ -89,6 +89,14 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
         "Include operating system and application folders in search. Uses more memory and applies after rebuilding the index.",
         |s| s.index_system_files,
         |s| s.index_system_files = !s.index_system_files,
+        no_follow_up,
+    ),
+    (
+        "exclude-dev-folders",
+        "Exclude developer folders",
+        "Skip the folder names listed below, at any depth. Applies after rebuilding the index.",
+        |s| s.exclude_dev_folders,
+        |s| s.exclude_dev_folders = !s.exclude_dev_folders,
         no_follow_up,
     ),
     (
@@ -294,6 +302,7 @@ impl Workspace {
             }
             page = page.child(group);
             if section == SettingsSection::Search {
+                page = page.child(self.render_excluded_folders(&theme, &settings, cx));
                 page = page.child(self.render_search_locations(&theme, cx));
             }
         }
@@ -302,7 +311,18 @@ impl Workspace {
             .track_focus(&self.settings_focus)
             .key_context("Settings")
             .capture_key_down(cx.listener(Self::handle_settings_key))
-            .on_key_down(|_, _, cx| cx.stop_propagation())
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                cx.stop_propagation();
+                // Enter bubbles up from the focused add field (FIL-28).
+                if event.keystroke.key == "enter"
+                    && this
+                        .excluded_folder_input
+                        .focus_handle(cx)
+                        .is_focused(window)
+                {
+                    this.add_excluded_folder(cx);
+                }
+            }))
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(ui::settings_pane::shell_header(&theme, "Settings", close))
             .child(div().flex().flex_1().min_h_0().child(nav).child(page));
@@ -311,6 +331,105 @@ impl Workspace {
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
                 .child(card)
                 .into_any_element(),
+        )
+    }
+
+    /// Add the add-field's text to the exclude list, clearing the field on
+    /// success. An invalid or duplicate name stays put to be corrected.
+    fn add_excluded_folder(&mut self, cx: &mut Context<Self>) {
+        let text = self.excluded_folder_input.read(cx).text().to_owned();
+        let mut added = false;
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |s| added = s.add_excluded_folder(&text))
+        });
+        if added {
+            self.excluded_folder_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+    }
+
+    /// The editable exclude list under the "Exclude developer folders"
+    /// toggle: one removable chip per name, an add field, and a reset.
+    /// Editable while the toggle is off, so it can be prepared first.
+    fn render_excluded_folders(
+        &self,
+        theme: &Theme,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut chips = div().flex().flex_wrap().gap_1p5();
+        let mut names = settings.excluded_folder_names.clone();
+        names.sort_by_key(|n| n.to_lowercase());
+        for (ix, name) in names.into_iter().enumerate() {
+            chips = chips.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pl_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .child(name.clone())
+                    .child(
+                        ui::top_bar::toolbar_button(
+                            theme,
+                            ("excluded-folder-remove", ix),
+                            "icons/x.svg",
+                            theme.text_dim,
+                        )
+                        .size(px(22.))
+                        .tooltip(ui::tooltip::text_tooltip(format!("Remove {name}"), *theme))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings.update(cx, |store, cx| {
+                                store.update(cx, |s| s.excluded_folder_names.retain(|n| *n != name))
+                            });
+                        })),
+                    ),
+            );
+        }
+        let add_box = div()
+            .flex()
+            .items_center()
+            .flex_1()
+            .min_w_0()
+            .px_2()
+            .h(px(34.))
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg)
+            .text_sm()
+            .text_color(theme.text)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.excluded_folder_input.clone()),
+            );
+        let add = ui::modal::button(theme, "excluded-folder-add", "Add", true)
+            .on_click(cx.listener(|this, _, _, cx| this.add_excluded_folder(cx)));
+        let reset = ui::modal::button(theme, "excluded-folder-reset", "Reset to defaults", false)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings.update(cx, |store, cx| {
+                    store.update(cx, |s| {
+                        s.excluded_folder_names = Settings::default().excluded_folder_names
+                    })
+                });
+            }));
+        ui::settings_pane::group(theme).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_2()
+                .child(ui::settings_pane::note(
+                    theme,
+                    "Excluded folder names. Exact names only, no paths or wildcards.",
+                ))
+                .child(chips)
+                .child(div().flex().gap_2().child(add_box).child(add).child(reset)),
         )
     }
 

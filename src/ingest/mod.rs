@@ -3,11 +3,13 @@ mod platform;
 
 use crate::catalog::segment::{Identity, Record, Root, raw_name};
 use anyhow::Result;
-use platform::SYSTEM_DIRS;
 pub use platform::identity;
+use platform::{CASE_INSENSITIVE_NAMES, SYSTEM_DIRS};
 #[cfg(target_os = "macos")]
 pub use platform::{has_full_disk_access, open_full_disk_access_settings};
 use std::{
+    collections::HashSet,
+    ffi::OsStr,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -45,12 +47,12 @@ pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
 pub fn walk(
     root: &Root,
     excluded: &Path,
+    filter: &IndexFilter,
     mut allocate: impl FnMut(&Path, u64, &Identity) -> u64,
     mut emit: impl FnMut(Record) -> Result<()>,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<usize> {
     let mut skipped = 0;
-    let include_system = include_system_files();
     let meta = std::fs::symlink_metadata(&root.path)?;
     let root_identity = identity(&root.path, &meta);
     let root_id = allocate(&root.path, 0, &root_identity);
@@ -76,7 +78,14 @@ pub fn walk(
                 }
             };
             let path = entry.path();
-            if path.starts_with(excluded) || (!include_system && excluded_system(&root.path, &path))
+            // `file_type` comes from the directory entry itself on most
+            // platforms, so the name check costs no extra stat.
+            let pruned = !filter.excluded_names.is_empty()
+                && entry.file_type().is_ok_and(|t| t.is_dir())
+                && filter.excluded_name(&entry.file_name());
+            if pruned
+                || path.starts_with(excluded)
+                || (!filter.include_system && excluded_system(&root.path, &path))
             {
                 continue;
             }
@@ -127,12 +136,70 @@ pub fn canonical_event_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-pub fn include_system_files() -> bool {
-    crate::settings::default_settings_file()
-        .and_then(|p| crate::settings::Settings::load(&p).ok())
-        .is_some_and(|s| s.index_system_files)
+/// What the indexer leaves out, resolved from settings: OS folders directly
+/// under a root, and (FIL-28) user-listed folder names at any depth.
+#[derive(Debug, Clone, Default)]
+pub struct IndexFilter {
+    include_system: bool,
+    /// Case-folded per [`CASE_INSENSITIVE_NAMES`]; empty while the
+    /// setting is off.
+    excluded_names: HashSet<String>,
 }
-pub fn excluded_system(root: &Path, path: &Path) -> bool {
+impl IndexFilter {
+    pub fn from_settings(settings: &crate::settings::Settings) -> Self {
+        let excluded_names = if settings.exclude_dev_folders {
+            settings
+                .excluded_folder_names
+                .iter()
+                .map(|n| fold(n))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        Self {
+            include_system: settings.index_system_files,
+            excluded_names,
+        }
+    }
+    /// The filter from the settings file on disk; defaults when it's
+    /// missing or unreadable.
+    pub fn load() -> Self {
+        crate::settings::default_settings_file()
+            .and_then(|p| crate::settings::Settings::load(&p).ok())
+            .map(|s| Self::from_settings(&s))
+            .unwrap_or_else(|| Self::from_settings(&Default::default()))
+    }
+    fn excluded_name(&self, name: &OsStr) -> bool {
+        !self.excluded_names.is_empty()
+            && self.excluded_names.contains(&fold(&name.to_string_lossy()))
+    }
+    /// Whether a live event path under `root` falls in an excluded area.
+    /// Ancestors are matched by name alone; the last component only when
+    /// it is a directory, so a *file* named `target` is still indexed.
+    pub fn excludes(&self, root: &Path, path: &Path) -> bool {
+        if !self.include_system && excluded_system(root, path) {
+            return true;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            return false;
+        };
+        let mut names = relative.iter().peekable();
+        while let Some(name) = names.next() {
+            if self.excluded_name(name) && (names.peek().is_some() || path.is_dir()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+fn fold(name: &str) -> String {
+    if CASE_INSENSITIVE_NAMES {
+        name.to_lowercase()
+    } else {
+        name.to_owned()
+    }
+}
+fn excluded_system(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
         .ok()
         .and_then(|p| p.components().next())
@@ -145,6 +212,105 @@ pub fn excluded_system(root: &Path, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn dev_filter(names: &[&str]) -> super::IndexFilter {
+        super::IndexFilter::from_settings(&crate::settings::Settings {
+            exclude_dev_folders: true,
+            excluded_folder_names: names.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// FIL-28: listed folder names are pruned at any depth (contents
+    /// included), files with the same name are kept, and nothing is
+    /// pruned while the setting is off.
+    #[test]
+    fn walk_prunes_excluded_folder_names_at_any_depth() {
+        use super::{Root, walk};
+        use std::{fs, sync::atomic::AtomicBool};
+
+        let tree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tree.path().join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(tree.path().join("app/web/node_modules/lib")).unwrap();
+        fs::write(tree.path().join("app/web/node_modules/lib/index.js"), b"x").unwrap();
+        fs::write(tree.path().join("app/web/main.js"), b"x").unwrap();
+        fs::write(
+            tree.path().join("app/node_modules"),
+            b"a file, not a folder",
+        )
+        .unwrap();
+        let root = Root {
+            id: 1,
+            path: tree.path().to_path_buf(),
+            device: 0,
+        };
+        let names = |filter| {
+            let mut next = 0;
+            let mut seen = Vec::new();
+            walk(
+                &root,
+                &tree.path().join("not-the-database"),
+                &filter,
+                |_, _, _| {
+                    next += 1;
+                    next
+                },
+                |record| {
+                    seen.push(String::from_utf8_lossy(&record.name).into_owned());
+                    Ok(())
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            seen
+        };
+
+        let seen = names(dev_filter(&["node_modules"]));
+        assert!(seen.iter().any(|n| n == "main.js"), "{seen:?}");
+        for gone in ["pkg", "lib", "index.js"] {
+            assert!(!seen.iter().any(|n| n == gone), "{gone} leaked: {seen:?}");
+        }
+        assert_eq!(
+            seen.iter().filter(|n| *n == "node_modules").count(),
+            1,
+            "only the same-named file survives: {seen:?}"
+        );
+
+        let seen = names(super::IndexFilter::from_settings(
+            &crate::settings::Settings {
+                exclude_dev_folders: false,
+                ..Default::default()
+            },
+        ));
+        assert!(seen.iter().any(|n| n == "index.js"), "off means unchanged");
+    }
+
+    #[test]
+    fn live_event_paths_under_an_excluded_folder_are_dropped() {
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path();
+        std::fs::create_dir_all(root.join("web/target")).unwrap();
+        let filter = dev_filter(&["target"]);
+        assert!(filter.excludes(root, &root.join("web/target/debug/app")));
+        assert!(
+            filter.excludes(root, &root.join("web/target")),
+            "the folder itself"
+        );
+        assert!(!filter.excludes(root, &root.join("web/target.rs")));
+        assert!(
+            !filter.excludes(root, &root.join("web/notes/target")),
+            "a missing or file path named target is kept"
+        );
+        assert!(!super::IndexFilter::default().excludes(root, &root.join("web/target/x")));
+    }
+
+    #[test]
+    fn folder_names_match_case_per_platform() {
+        let tree = tempfile::tempdir().unwrap();
+        let path = tree.path().join("App/Node_Modules/x");
+        let excluded = dev_filter(&["node_modules"]).excludes(tree.path(), &path);
+        assert_eq!(excluded, cfg!(any(windows, target_os = "macos")));
+    }
+
     /// FIL-27 regression: a stop raised mid-directory ends the walk at the
     /// next entry. It used to be checked once per directory, so a stopping
     /// daemon still inspected the rest of a large directory first.
@@ -168,6 +334,7 @@ mod tests {
         let result = walk(
             &root,
             &tree.path().join("not-the-database"),
+            &Default::default(),
             |_, parent, _| {
                 parents.push(parent);
                 parents.len() as u64
@@ -221,6 +388,7 @@ mod tests {
             let skipped = walk(
                 &root,
                 &excluded,
+                &Default::default(),
                 |_, _, _| {
                     next += 1;
                     next
