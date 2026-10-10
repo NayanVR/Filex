@@ -141,7 +141,11 @@ fn crash_event(report: &CrashReport) -> Event<'static> {
     let mut event = Event {
         level: Level::Fatal,
         message: Some(report.message.clone()),
+        // The crashing binary's version and time, not the uploader's: a
+        // queued report can be drained long after, by a newer build.
         release: Some(Cow::Owned(report.version.clone())),
+        timestamp: std::time::UNIX_EPOCH
+            + std::time::Duration::from_millis(report.unix_millis as u64),
         ..Default::default()
     };
     event.platform = "native".into();
@@ -266,6 +270,20 @@ mod tests {
             .abs_path
             .as_deref();
         assert_eq!(frame_path, Some("<path>"));
+    }
+
+    #[test]
+    fn crash_event_keeps_capture_time_and_version() {
+        // Regression: a report queued by an old daemon and drained later
+        // was stamped with the upload time, passing as a fresh crash.
+        let mut report = report_with("boom", "");
+        report.unix_millis = 1_700_000_000_123;
+        let event = crash_event(&report);
+        assert_eq!(
+            event.timestamp,
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123)
+        );
+        assert_eq!(event.release.as_deref(), Some("0.1.0"));
     }
 
     #[test]
