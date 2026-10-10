@@ -2,6 +2,8 @@
 name = "filex"
 version = "0.2.1"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NayanVR/Filex"
 
 [features]
 default = ["app"]
@@ -197,6 +199,8 @@ windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Storage_FileSystem",
+  # Settings: the MSI's crash-report choice (HKLM\Software\Filex).
+  "Win32_System_Registry",
 ] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]

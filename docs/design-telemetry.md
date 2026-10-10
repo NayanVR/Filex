@@ -26,6 +26,9 @@ of `docs/roadmap.md` Phase 2c.
 >   (crash-free rate, adoption) — all still path-scrubbed, none carrying
 >   queries/paths/tags. The Settings toggle is relabelled "Share anonymous
 >   diagnostics" to match; the serde key stays `crash_reports`.
+> - **Windows asks at install (2026-10-10).** The MSI's Privacy page
+>   seeds `crash_reports` on first run; still opt-out (ticked by default).
+>   See `docs/design-windows-installer.md` decision 6 and `PRIVACY.md`.
 > - **Still not linked into `filex-indexd`.** Sentry is UI-process only; the
 >   elevated service is built without the `observability` feature and links
 >   no telemetry SDK. See `docs/design-distribution.md` for how the two

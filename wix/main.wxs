@@ -45,6 +45,20 @@
                 KeyPath="yes" />
           </Component>
 
+          <!-- The privacy page's crash-report choice. The app reads it once,
+               when it creates its settings file (settings::installer), so
+               silent updates rewriting the default never override a later
+               toggle in Settings. -->
+          <Component Id="FilexCrashReportsChoice" Guid="*" Win64="yes">
+            <RegistryValue
+                Root="HKLM"
+                Key="Software\Filex"
+                Name="CrashReports"
+                Type="integer"
+                Value="[FILEX_CRASH_REPORTS_REG]"
+                KeyPath="yes" />
+          </Component>
+
           <Component Id="FilexIndexd" Guid="*" Win64="yes">
             <File
                 Id="FilexIndexdExe"
@@ -88,9 +102,79 @@
 
     <Feature Id="Main" Title="Filex" Level="1">
       <ComponentRef Id="FilexApp" />
+      <ComponentRef Id="FilexCrashReportsChoice" />
       <ComponentRef Id="FilexIndexd" />
       <ComponentRef Id="FilexStartMenuShortcut" />
     </Feature>
+
+    <!-- Installer UI: Welcome -> Privacy (crash-report checkbox, on by
+         default) -> Ready -> progress. WixUI_InstallDir's flow minus the
+         directory and license pages. Silent installs (the updater's /qn)
+         skip the UI and keep the default; pass FILEX_CRASH_REPORTS=0 to
+         opt out unattended. -->
+    <Property Id="FILEX_CRASH_REPORTS" Value="1" Secure="yes" />
+    <Property Id="FILEX_CRASH_REPORTS_REG" Value="1" />
+    <!-- An unticked checkbox deletes its property; map that (or an explicit
+         0) to the registry's 0. -->
+    <SetProperty
+        Id="FILEX_CRASH_REPORTS_REG"
+        Value="0"
+        After="CostFinalize"
+        Sequence="execute"><![CDATA[FILEX_CRASH_REPORTS <> "1"]]></SetProperty>
+
+    <UI Id="FilexUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="WixUI_Mode" Value="InstallDir" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <Dialog Id="PrivacyDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Privacy" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="What Filex sends, and your choice about crash reports." />
+        <Control Id="PrivacyText" Type="ScrollableText" X="20" Y="54" Width="330" Height="140" Sunken="yes" TabSkip="no">
+          <Text SourceFile="$(sys.SOURCEFILEDIR)privacy.rtf" />
+        </Control>
+        <Control Id="CrashReportsCheckBox" Type="CheckBox" X="20" Y="204" Width="330" Height="18" CheckBoxValue="1" Property="FILEX_CRASH_REPORTS" Text="Send crash reports and anonymous diagnostics to help improve Filex" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="PrivacyDlg">NOT Installed</Publish>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">Installed AND PATCH</Publish>
+
+      <Publish Dialog="PrivacyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg">1</Publish>
+      <Publish Dialog="PrivacyDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="PrivacyDlg" Order="1">NOT Installed</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2">Installed AND NOT PATCH</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">Installed AND PATCH</Publish>
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg">1</Publish>
+
+      <Property Id="ARPNOMODIFY" Value="1" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
 
   </Product>
 </Wix>

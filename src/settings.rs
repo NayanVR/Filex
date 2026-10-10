@@ -240,7 +240,7 @@ impl Settings {
         let contents = match std::fs::read_to_string(file) {
             Ok(contents) => contents,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let mut settings = Self::default();
+                let mut settings = Self::first_run(installer::crash_reports_choice());
                 if let Some(legacy) = legacy_roots_file {
                     settings.roots = crate::ingest::load_roots(legacy);
                 }
@@ -251,6 +251,17 @@ impl Settings {
             }
         };
         serde_json::from_str(&contents).with_context(|| format!("parsing {}", file.display()))
+    }
+
+    /// Defaults for a machine with no settings file yet, seeded with the
+    /// crash-report choice made in the installer (if any). Only consulted
+    /// while the file is missing, so a reinstall or silent update that
+    /// rewrites the installer value never overrides the user's later toggle.
+    fn first_run(installer_crash_reports: Option<bool>) -> Self {
+        Self {
+            crash_reports: installer_crash_reports.unwrap_or(true),
+            ..Self::default()
+        }
     }
 
     /// Write settings as pretty JSON via a sibling temp file + rename,
@@ -269,6 +280,42 @@ impl Settings {
         let tmp = file.with_extension("json.tmp");
         std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, file).with_context(|| format!("replacing {}", file.display()))
+    }
+}
+
+/// Choices recorded by the platform installer. Only the Windows MSI asks
+/// anything today; the macOS cask and Linux tarball have no install UI.
+mod installer {
+    /// The "Send crash reports" checkbox from the MSI's privacy page,
+    /// stored as `HKLM\Software\Filex\CrashReports` (REG_DWORD 0/1) by
+    /// `wix/main.wxs`. Assumes a 64-bit process reading the 64-bit view,
+    /// which is where the x64 MSI writes. Missing key or value = no choice.
+    #[cfg(target_os = "windows")]
+    pub fn crash_reports_choice() -> Option<bool> {
+        use windows::Win32::System::Registry::{
+            HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW,
+        };
+        use windows::core::w;
+        let mut value = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: `value`/`size` are a valid DWORD buffer and its length.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                w!("Software\\Filex"),
+                w!("CrashReports"),
+                RRF_RT_REG_DWORD,
+                None,
+                Some(std::ptr::from_mut(&mut value).cast()),
+                Some(&mut size),
+            )
+        };
+        status.is_ok().then_some(value != 0)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn crash_reports_choice() -> Option<bool> {
+        None
     }
 }
 
@@ -370,6 +417,15 @@ mod tests {
         let settings =
             Settings::load(&dir.path().join("settings.json"), Some(&missing_legacy)).unwrap();
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn first_run_honours_the_installer_crash_report_choice() {
+        assert!(!Settings::first_run(Some(false)).crash_reports);
+        assert!(Settings::first_run(Some(true)).crash_reports);
+        // No installer choice (macOS/Linux, or a pre-privacy-page MSI) keeps
+        // the opt-out default.
+        assert_eq!(Settings::first_run(None), Settings::default());
     }
 
     #[test]

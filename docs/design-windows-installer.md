@@ -62,6 +62,12 @@ Steps 4–6 are ours to fix outright. Steps 2–3 are the loud ones and they are
    tree, no component checkboxes, no install-directory picker
    (`%ProgramFiles%\Filex`, fixed). `DisableModify` in ARP. The only
    decision offered is "Install" and, at the end, "Launch".
+   **AMENDMENT 2026-10-10:** the MSI now has a Privacy page (`wix/main.wxs`
+   `PrivacyDlg`) with a crash-report checkbox, ticked by default. SignPath
+   Foundation's terms (FIL-9) require apps that send data to show the policy
+   during install and offer an opt-out there. The choice lands in
+   `HKLM\Software\Filex\CrashReports` and seeds `crash_reports` once, when
+   the settings file is first created (`settings::installer`).
 
 ## Why the updater must switch (decision 3, the non-obvious part)
 
