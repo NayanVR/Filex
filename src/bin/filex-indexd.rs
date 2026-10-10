@@ -38,11 +38,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
     if roots.is_empty() {
-        if let Some(path) = filex::settings::default_settings_file() {
-            let legacy = filex::ingest::default_roots_file();
-            if let Ok(settings) = filex::settings::Settings::load(&path, legacy.as_deref()) {
-                roots = settings.roots;
-            }
+        if let Some(path) = filex::settings::default_settings_file()
+            && let Ok(settings) = filex::settings::Settings::load(&path)
+        {
+            roots = settings.roots;
         }
         if roots.is_empty() {
             roots = filex::drives::default_index_roots();

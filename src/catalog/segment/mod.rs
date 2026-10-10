@@ -659,8 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_generation_rebuild_preserves_large_ids_native_identity_and_signed_dates() {
-        use sha2::{Digest, Sha256};
+    fn roundtrip_preserves_large_ids_native_identity_and_signed_dates() {
         let records: Vec<_> = (0..520u64)
             .map(|i| Record {
                 id: (1 << 40) + i * 3,
@@ -677,7 +676,7 @@ mod tests {
                 mtime: Some(i64::MIN + i as i64),
             })
             .collect();
-        let mut old = Segment::build(
+        let segment = Segment::build(
             records.clone(),
             vec![Root {
                 id: 1,
@@ -687,67 +686,20 @@ mod tests {
             7,
         )
         .unwrap();
-        macro_rules! plain {
-            ($($field:ident),+) => { $(old.$field = Column::Legacy(old.$field.iter().collect::<Vec<_>>().into());)+ };
-        }
-        plain!(
-            ids,
-            parents,
-            root_ids,
-            names,
-            devices,
-            native_order,
-            keys,
-            births,
-            sizes,
-            mtimes,
-            children,
-            raw_offsets
-        );
-        old.raw = BytePool::plain(old.raw.read(0..old.raw.len()).into_owned());
-        old.meta_postings = Postings::build(
-            (0..old.meta_postings.len()).map(|i| old.meta_postings.get(i as u32).collect()),
-        )
-        .unwrap();
-        old.meta_postings.use_legacy_offsets();
-        old.search = LiteralIndex::build_suffix(records.iter().map(|r| {
-            if r.parent == 0 {
-                ""
-            } else {
-                std::str::from_utf8(&r.name).unwrap()
-            }
-        }))
-        .unwrap()
-        .into_fm();
-        old.search.use_legacy_offsets();
         let dir = tempfile::tempdir().unwrap();
-        let old_path = dir.path().join("old.fx2");
-        old.save(&old_path).unwrap();
-        drop(old);
-        let mut bytes = std::fs::read(&old_path).unwrap();
-        bytes[..8].copy_from_slice(b"FXSEG002");
-        let end = bytes.len() - 32;
-        let hash = Sha256::digest(&bytes[..end]);
-        bytes[end..].copy_from_slice(&hash);
-        std::fs::write(&old_path, bytes).unwrap();
-        let old = unsafe { Segment::open(&old_path) }.unwrap();
-        let new = Segment::build(
-            (0..old.len()).map(|i| old.record(i)),
-            old.roots.clone(),
-            old.sequence,
-        )
-        .unwrap();
-        let new_path = dir.path().join("new.fx3");
-        new.save(&new_path).unwrap();
-        assert_eq!(&std::fs::read(&new_path).unwrap()[..8], b"FXSEG004");
-        let new = unsafe { Segment::open(&new_path) }.unwrap();
+        let path = dir.path().join("segment.fx2");
+        segment.save(&path).unwrap();
+        assert_eq!(&std::fs::read(&path).unwrap()[..8], b"FXSEG004");
+        let reopened = unsafe { Segment::open(&path) }.unwrap();
         for (slot, record) in records.iter().enumerate() {
-            assert_eq!(&old.record(slot), record);
-            assert_eq!(&new.record(slot), record);
-            assert_eq!(new.find_native(1, record.identity), Some(record.id));
+            assert_eq!(&reopened.record(slot), record);
+            assert_eq!(reopened.find_native(1, record.identity), Some(record.id));
         }
         for query in ["f", "strasse", "txt", "-51", "missing"] {
-            assert_eq!(old.search.search(query, 202), new.search.search(query, 202));
+            assert_eq!(
+                segment.search.search(query, 202),
+                reopened.search.search(query, 202)
+            );
         }
     }
 }

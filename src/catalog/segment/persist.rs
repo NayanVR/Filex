@@ -26,7 +26,6 @@ struct Image {
     children: ColumnImage,
     meta_keys: Vec<String>,
     meta_postings: PostingsImage,
-    #[serde(default)]
     tombstones: Option<Vec<u64>>,
 }
 

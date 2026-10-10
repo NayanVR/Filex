@@ -21,11 +21,6 @@ pub enum PostingsImage {
     },
 }
 impl Postings {
-    #[cfg(test)]
-    pub(crate) fn use_legacy_offsets(&mut self) {
-        self.offsets = Column::Legacy(self.offsets.iter().collect::<Vec<_>>().into());
-    }
-
     pub(crate) fn remap(&mut self, reader: &Reader) -> Result<()> {
         self.offsets.remap(reader)?;
         self.bytes.remap(reader)?;

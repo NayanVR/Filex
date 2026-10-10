@@ -48,7 +48,7 @@ pub struct QueryShape {
     pub query_bytes: usize,
     pub tier_reached: Option<u8>,
     pub filter_kinds: Vec<u8>,
-    pub occurrence_count: usize,
+    pub matching_names: usize,
     pub returned_names: usize,
     pub p50_micros: f64,
     pub p95_micros: f64,
@@ -91,9 +91,7 @@ pub fn measure(index: &LiteralIndex, query: &str, fixture_query_id: usize) -> Qu
         query_bytes: query.len(),
         tier_reached: actual.last().map(|(tier, _)| *tier as u8),
         filter_kinds: Vec::new(),
-        occurrence_count: index
-            .range(super::normalize::nfc_fold(query).as_bytes())
-            .len(),
+        matching_names: all.len(),
         returned_names: actual.len(),
         p50_micros: samples[99],
         p95_micros: samples[189],
@@ -104,92 +102,12 @@ pub fn measure(index: &LiteralIndex, query: &str, fixture_query_id: usize) -> Qu
     }
 }
 
-#[derive(Serialize)]
-pub struct FmComparison {
-    pub representation: &'static str,
-    pub build_seconds_including_bwt: f64,
-    pub suffix_or_fm_bytes: usize,
-    pub ranked_retrieval_bytes: usize,
-    pub total_search_bytes: usize,
-    pub saving_fraction: f64,
-    pub worst_p95_micros: f64,
-    pub ranges_and_top_100_match: bool,
-    pub passes_latency_and_saving: bool,
-    pub ranked_retrieval_exceeds_search: bool,
-}
-
-pub fn compare_fm(index: &LiteralIndex, wavelet: bool) -> FmComparison {
-    let start = Instant::now();
-    let (bwt, skip) = index.fm_input();
-    let fm = if wavelet {
-        super::fm::FmIndex::wavelet(bwt, skip)
-    } else {
-        super::fm::FmIndex::sampled(bwt, skip)
-    };
-    let build_seconds_including_bwt = start.elapsed().as_secs_f64();
-    let mut worst_p95_micros = 0f64;
-    let mut correct = true;
-    for query in queries() {
-        let folded = super::normalize::nfc_fold(&query);
-        let expected_range = index.range(folded.as_bytes());
-        let actual_range = fm.range(folded.as_bytes());
-        correct &= expected_range == actual_range
-            || (expected_range.is_empty() && actual_range.is_empty());
-        let expected = index.oracle(&query, 100);
-        let execute = || {
-            index
-                .search_with_range(&query, 100, |needle| fm.range(needle))
-                .into_iter()
-                .flat_map(|(tier, name)| index.files(name).map(move |file| (tier, name, file)))
-                .take(100)
-                .collect::<Vec<_>>()
-        };
-        let expected_files: Vec<_> = expected
-            .into_iter()
-            .flat_map(|(tier, name)| index.files(name).map(move |file| (tier, name, file)))
-            .take(100)
-            .collect();
-        correct &= execute() == expected_files;
-        for _ in 0..10 {
-            black_box(execute());
-        }
-        let mut samples = Vec::with_capacity(200);
-        for _ in 0..200 {
-            let start = Instant::now();
-            black_box(execute());
-            samples.push(start.elapsed().as_secs_f64() * 1_000_000.0);
-        }
-        samples.sort_by(f64::total_cmp);
-        worst_p95_micros = worst_p95_micros.max(samples[189]);
-    }
-    let total_search_bytes = index.bytes() - index.suffix_bytes() + fm.bytes();
-    let saving_fraction = 1.0 - total_search_bytes as f64 / index.bytes() as f64;
-    FmComparison {
-        representation: if wavelet {
-            "wavelet_bwt"
-        } else {
-            "sampled_bwt_512"
-        },
-        build_seconds_including_bwt,
-        suffix_or_fm_bytes: fm.bytes(),
-        ranked_retrieval_bytes: index.wavelet_bytes(),
-        total_search_bytes,
-        saving_fraction,
-        worst_p95_micros,
-        ranges_and_top_100_match: correct,
-        passes_latency_and_saving: correct
-            && worst_p95_micros <= 10_000.0
-            && saving_fraction >= 0.25,
-        ranked_retrieval_exceeds_search: index.wavelet_bytes() > fm.bytes(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn observations_do_not_serialize_query_text() {
-        let index = LiteralIndex::build_suffix(["test.txt"]).unwrap();
+        let index = LiteralIndex::build(["test.txt"]).unwrap();
         let report = measure(&index, "private-query-sentinel", 0);
         let output = serde_json::to_string(&report).unwrap();
         assert!(!output.contains("private-query-sentinel"));

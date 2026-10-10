@@ -106,18 +106,6 @@ pub fn walk(
     }
     Ok(skipped)
 }
-pub fn default_roots_file() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("filex/roots.list"))
-}
-pub fn load_roots(path: &Path) -> Vec<PathBuf> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect()
-}
 pub fn validate_new_root(existing: &[PathBuf], path: &Path) -> Result<PathBuf> {
     let canonical = path.canonicalize()?;
     anyhow::ensure!(canonical.is_dir(), "root is not a directory");
@@ -141,7 +129,7 @@ pub fn canonical_event_path(path: &Path) -> PathBuf {
 
 pub fn include_system_files() -> bool {
     crate::settings::default_settings_file()
-        .and_then(|p| crate::settings::Settings::load(&p, None).ok())
+        .and_then(|p| crate::settings::Settings::load(&p).ok())
         .is_some_and(|s| s.index_system_files)
 }
 pub fn excluded_system(root: &Path, path: &Path) -> bool {

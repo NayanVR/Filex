@@ -38,14 +38,8 @@ pub struct Visit {
     pub last_opened: i64,
     /// Whether the user opened this path itself, as opposed to only
     /// earning parent credit from a child. Ranking counts both; the sidebar
-    /// shows only the former. Defaults to `true` so pre-parent-credit and
-    /// legacy-migrated records stay displayed.
-    #[serde(default = "default_true")]
+    /// shows only the former.
     pub opened: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// The parent directory worth crediting when `path` is opened, if any.
@@ -68,39 +62,12 @@ pub struct Recents {
 
 impl Recents {
     /// Load from `file`. A missing or corrupt file reads as empty —
-    /// recents are a convenience, never worth failing over. Also accepts
-    /// the **legacy format** (a bare JSON array of paths), migrating those
-    /// to weight 1 stamped at load time so order survives the upgrade.
+    /// recents are a convenience, never worth failing over.
     pub fn load(file: &Path) -> Self {
-        let Ok(contents) = std::fs::read_to_string(file) else {
-            return Self::default();
-        };
-        Self::from_json(&contents, frecency::now_secs())
-    }
-
-    /// The parse half of [`load`](Self::load), with an explicit clock so
-    /// the legacy migration is testable.
-    fn from_json(contents: &str, now: i64) -> Self {
-        if let Ok(current) = serde_json::from_str::<Self>(contents) {
-            return current;
-        }
-        match serde_json::from_str::<Vec<PathBuf>>(contents) {
-            // Legacy entries were most-recent-first with no timestamps.
-            // Stamping them all at `now` keeps that order (ties break by
-            // position) without inventing history.
-            Ok(paths) => Self {
-                visits: paths
-                    .into_iter()
-                    .map(|path| Visit {
-                        path,
-                        weight: 1.0,
-                        last_opened: now,
-                        opened: true,
-                    })
-                    .collect(),
-            },
-            Err(_) => Self::default(),
-        }
+        std::fs::read_to_string(file)
+            .ok()
+            .and_then(|contents| serde_json::from_str(&contents).ok())
+            .unwrap_or_default()
     }
 
     /// The most-recently-opened paths, newest first, capped at
@@ -405,25 +372,5 @@ mod tests {
         let file = dir.path().join("recents.json");
         std::fs::write(&file, "{ not json").unwrap();
         assert!(Recents::load(&file).is_empty());
-    }
-
-    #[test]
-    fn legacy_path_array_migrates_preserving_order() {
-        // The pre-frecency on-disk format.
-        let r = Recents::from_json(r#"["/a","/b","/c"]"#, 1_000);
-        assert_eq!(paths(&r), ["/a", "/b", "/c"]);
-        assert!(
-            score_of(&r, "/a", 1_000) > 0.0,
-            "migrated visits carry weight"
-        );
-        assert_eq!(r.visits()[0].last_opened, 1_000, "stamped at load time");
-    }
-
-    #[test]
-    fn current_format_is_preferred_over_legacy_parse() {
-        let mut r = Recents::default();
-        r.record_at("/a".into(), 42);
-        let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(Recents::from_json(&json, 9_999), r);
     }
 }

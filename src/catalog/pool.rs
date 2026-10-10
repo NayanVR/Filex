@@ -174,12 +174,6 @@ impl BytePool {
             }
         }
     }
-    pub fn as_plain(&self) -> &[u8] {
-        match self {
-            Self::Plain(data) => data,
-            _ => panic!("suffix laboratory requires plain text"),
-        }
-    }
     pub fn read(&self, range: Range<usize>) -> Cow<'_, [u8]> {
         assert!(range.start <= range.end && range.end <= self.len());
         match self {

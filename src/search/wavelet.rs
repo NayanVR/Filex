@@ -142,24 +142,6 @@ impl WaveletMatrix {
         }
         found
     }
-    pub fn rank(&self, value: u32, end: usize) -> usize {
-        assert!(end <= self.len);
-        if self.levels.len() < 32 && value >> self.levels.len() != 0 {
-            return 0;
-        }
-        let (mut left, mut right) = (0, end);
-        for (level, bits) in self.levels.iter().enumerate() {
-            let (l1, r1) = (bits.rank1(left), bits.rank1(right));
-            if value & (1 << (self.levels.len() - level - 1)) == 0 {
-                left -= l1;
-                right -= r1;
-            } else {
-                left = self.zeros[level] + l1;
-                right = self.zeros[level] + r1;
-            }
-        }
-        right - left
-    }
     pub fn bytes(&self) -> usize {
         self.levels.iter().map(RankBits::bytes).sum::<usize>()
             + self.levels.capacity() * std::mem::size_of::<RankBits>()

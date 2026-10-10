@@ -18,14 +18,14 @@ edit before sending a request.
 | Temporary exhaustive candidate intersections | `src/search/candidates.rs`, `src/catalog/segment/mod.rs` |
 | Catalog validation and mapped files | `src/catalog/segment/persist.rs`, `storage.rs` |
 | Packed columns, compressed text pages and posting runs | `src/catalog/columns.rs`, `pool.rs`, `postings.rs` |
-| Compact gram-block search, legacy FM readers and bounded fuzzy matches | `src/search/` |
+| Compact gram-block search and bounded fuzzy matches | `src/search/` |
 | Search input, cancellation, pagination and Magic integration | `src/workspace/search.rs` |
 
-There is one production catalog representation: `Segment`. New generations use
-the [compact layout](index-compact.md); preceding FM generations remain readable.
-The earlier mutable
-catalog, separate column prototype and DFS tree prototype have been removed.
-Alternate search representations remain under the `index-v2-lab` feature.
+There is one production catalog representation: `Segment`. It uses the
+[compact layout](index-compact.md), the only layout readers accept. The earlier
+mutable catalog, FM search structures, column prototype and DFS tree prototype
+have been removed. The `index-v2-lab` feature keeps measurement tools, such as
+block-size tuning.
 
 ## Updating and compacting
 

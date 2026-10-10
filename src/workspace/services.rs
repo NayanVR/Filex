@@ -15,7 +15,7 @@ impl Workspace {
                 let Ok(roots) = this.update(cx, |this, _| this.roots.len()) else {
                     break;
                 };
-                filex::diagnostics::observability::record_resource_sample(0, roots);
+                filex::diagnostics::observability::record_resource_sample(roots);
             }
         })
         .detach();

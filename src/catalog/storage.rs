@@ -173,10 +173,7 @@ impl Reader {
             "segment checksum mismatch"
         );
         let map = Arc::new(unsafe { Mmap::map(&file)? });
-        ensure!(
-            matches!(&map[..8], b"FXSEG002" | b"FXSEG003" | b"FXSEG004"),
-            "unsupported segment version"
-        );
+        ensure!(&map[..8] == b"FXSEG004", "unsupported segment version");
         let metadata = Span {
             offset: u64::from_le_bytes(map[8..16].try_into()?),
             len: u64::from_le_bytes(map[16..24].try_into()?),

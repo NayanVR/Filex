@@ -41,16 +41,13 @@ impl Integer for i64 {
     const MAX: u64 = u64::MAX;
 }
 
-pub enum Column<T: Integer> {
-    Legacy(Packed<T>),
-    Blocks {
-        words: Packed<u64>,
-        bases: Packed<u64>,
-        offsets: Packed<u32>,
-        widths: Packed<u8>,
-        len: usize,
-        marker: PhantomData<T>,
-    },
+pub struct Column<T: Integer> {
+    words: Packed<u64>,
+    bases: Packed<u64>,
+    offsets: Packed<u32>,
+    widths: Packed<u8>,
+    len: usize,
+    marker: PhantomData<T>,
 }
 
 impl<T: Integer> Default for Column<T> {
@@ -60,16 +57,12 @@ impl<T: Integer> Default for Column<T> {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ColumnImage {
-    Blocks {
-        words: Span,
-        bases: Span,
-        offsets: Span,
-        widths: Span,
-        len: usize,
-    },
-    Legacy(Span),
+pub struct ColumnImage {
+    words: Span,
+    bases: Span,
+    offsets: Span,
+    widths: Span,
+    len: usize,
 }
 
 impl<T: Integer> From<Vec<T>> for Column<T> {
@@ -104,7 +97,7 @@ impl<T: Integer> From<Vec<T>> for Column<T> {
         bases.shrink_to_fit();
         offsets.shrink_to_fit();
         widths.shrink_to_fit();
-        Self::Blocks {
+        Self {
             words: words.into(),
             bases: bases.into(),
             offsets: offsets.into(),
@@ -117,43 +110,29 @@ impl<T: Integer> From<Vec<T>> for Column<T> {
 
 impl<T: Integer> Column<T> {
     pub fn len(&self) -> usize {
-        match self {
-            Self::Legacy(v) => v.len(),
-            Self::Blocks { len, .. } => *len,
-        }
+        self.len
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
     pub fn get(&self, index: usize) -> T {
         assert!(index < self.len());
-        match self {
-            Self::Legacy(v) => v[index],
-            Self::Blocks {
-                words,
-                bases,
-                offsets,
-                widths,
-                ..
-            } => {
-                let block = index / BLOCK;
-                let width = widths[block] as usize;
-                let base = bases[block];
-                if width == 0 {
-                    return T::from_ordered(base);
-                }
-                let bit = (index % BLOCK) * width;
-                let word = offsets[block] as usize + bit / 64;
-                let mut delta = words[word] >> (bit % 64);
-                if bit % 64 + width > 64 {
-                    delta |= words[word + 1] << (64 - bit % 64);
-                }
-                if width < 64 {
-                    delta &= (1u64 << width) - 1;
-                }
-                T::from_ordered(base + delta)
-            }
+        let block = index / BLOCK;
+        let width = self.widths[block] as usize;
+        let base = self.bases[block];
+        if width == 0 {
+            return T::from_ordered(base);
         }
+        let bit = (index % BLOCK) * width;
+        let word = self.offsets[block] as usize + bit / 64;
+        let mut delta = self.words[word] >> (bit % 64);
+        if bit % 64 + width > 64 {
+            delta |= self.words[word + 1] << (64 - bit % 64);
+        }
+        if width < 64 {
+            delta &= (1u64 << width) - 1;
+        }
+        T::from_ordered(base + delta)
     }
     pub fn iter(&self) -> impl ExactSizeIterator<Item = T> + '_ {
         (0..self.len()).map(|i| self.get(i))
@@ -168,21 +147,10 @@ impl<T: Integer> Column<T> {
         (!self.is_empty()).then(|| self.get(self.len() - 1))
     }
     pub fn bytes(&self) -> usize {
-        match self {
-            Self::Legacy(values) => values.capacity() * std::mem::size_of::<T>(),
-            Self::Blocks {
-                words,
-                bases,
-                offsets,
-                widths,
-                ..
-            } => {
-                words.capacity() * 8
-                    + bases.capacity() * 8
-                    + offsets.capacity() * 4
-                    + widths.capacity()
-            }
-        }
+        self.words.capacity() * 8
+            + self.bases.capacity() * 8
+            + self.offsets.capacity() * 4
+            + self.widths.capacity()
     }
     pub fn partition_point(&self, mut predicate: impl FnMut(T) -> bool) -> usize {
         let (mut lo, mut hi) = (0, self.len());
@@ -218,38 +186,22 @@ impl<T: Integer> Column<T> {
         self.binary_search_by(|v| v.cmp(key))
     }
     pub fn save(&self, writer: &mut Writer) -> Result<ColumnImage> {
-        match self {
-            Self::Legacy(v) => Ok(ColumnImage::Legacy(v.save(writer)?)),
-            Self::Blocks {
-                words,
-                bases,
-                offsets,
-                widths,
-                len,
-                ..
-            } => Ok(ColumnImage::Blocks {
-                words: words.save(writer)?,
-                bases: bases.save(writer)?,
-                offsets: offsets.save(writer)?,
-                widths: widths.save(writer)?,
-                len: *len,
-            }),
-        }
+        Ok(ColumnImage {
+            words: self.words.save(writer)?,
+            bases: self.bases.save(writer)?,
+            offsets: self.offsets.save(writer)?,
+            widths: self.widths.save(writer)?,
+            len: self.len,
+        })
     }
     pub fn load(reader: &Reader, image: ColumnImage) -> Result<Self> {
-        let ColumnImage::Blocks {
+        let ColumnImage {
             words,
             bases,
             offsets,
             widths,
             len,
-        } = image
-        else {
-            let ColumnImage::Legacy(span) = image else {
-                unreachable!()
-            };
-            return Ok(Self::Legacy(Packed::load(reader, span)?));
-        };
+        } = image;
         ensure!(
             len <= u32::MAX as usize,
             "column count exceeds ordinal range"
@@ -293,7 +245,7 @@ impl<T: Integer> Column<T> {
             }
         }
         ensure!(end == words.len(), "trailing column payload");
-        Ok(Self::Blocks {
+        Ok(Self {
             words,
             bases,
             offsets,
@@ -303,21 +255,10 @@ impl<T: Integer> Column<T> {
         })
     }
     pub(crate) fn remap(&mut self, reader: &Reader) -> Result<()> {
-        match self {
-            Self::Legacy(v) => v.remap(reader),
-            Self::Blocks {
-                words,
-                bases,
-                offsets,
-                widths,
-                ..
-            } => {
-                words.remap(reader)?;
-                bases.remap(reader)?;
-                offsets.remap(reader)?;
-                widths.remap(reader)
-            }
-        }
+        self.words.remap(reader)?;
+        self.bases.remap(reader)?;
+        self.offsets.remap(reader)?;
+        self.widths.remap(reader)
     }
 }
 
@@ -357,7 +298,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("column");
             let mut writer = Writer::create(&path).unwrap();
-            let image = ColumnImage::Blocks {
+            let image = ColumnImage {
                 words: Packed::from(if width == 0 {
                     vec![]
                 } else {

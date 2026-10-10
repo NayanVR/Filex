@@ -152,11 +152,6 @@ harness = false
 name = "magic_bench"
 harness = false
 
-[[bench]]
-name = "suffix_probe"
-harness = false
-required-features = ["index-v2-lab"]
-
 [dev-dependencies]
 criterion = "0.8.2"
 tempfile = "3.27.0"

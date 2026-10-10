@@ -3,7 +3,6 @@
 pub mod blocks;
 pub(crate) mod candidates;
 pub mod filter;
-pub mod fm;
 pub mod fuzzy;
 pub mod literal;
 pub mod phrases;

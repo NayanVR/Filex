@@ -14,10 +14,7 @@ pub fn run() {
     #[cfg(feature = "observability")]
     let _sentry_guard = {
         let consent = filex::settings::default_settings_file()
-            .and_then(|file| {
-                let legacy = filex::ingest::default_roots_file();
-                filex::settings::Settings::load(&file, legacy.as_deref()).ok()
-            })
+            .and_then(|file| filex::settings::Settings::load(&file).ok())
             .is_some_and(|settings| settings.crash_reports);
         filex::diagnostics::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
     };

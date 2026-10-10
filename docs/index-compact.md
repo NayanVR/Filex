@@ -7,9 +7,9 @@ exact/prefix/boundary/substring rank, bounded fuzzy candidates, native names,
 
 ## Search unique names, not every character position
 
-The preceding FM representation stores a suffix-to-name wavelet matrix, a BWT
+The earlier FM representation (removed in 2026-10) stored a suffix-to-name wavelet matrix, a BWT
 matrix, and additional boundary-ranking structures. Together those structures
-occupy about 90 MiB in the saved 2.13-million-entry corpus. They buy much lower
+occupied about 90 MiB in the saved 2.13-million-entry corpus. They bought much lower
 literal-query latency than this application requires.
 
 New indexes retain the ranked unique-name dictionary, name-to-file postings,
@@ -115,11 +115,9 @@ unchanged validated base (including overlays that only append new IDs), record
 enumeration reads known catalog slots directly instead of reconstructing every
 path. Changes to existing IDs or roots retain the ancestor-validation path.
 
-New segment files start with `FXSEG004`. Readers accept `FXSEG002`, `FXSEG003`,
-and `FXSEG004`; legacy numeric spans and FM search structures are decoded without
-eager conversion. A normal rebuild writes the new representation. Manifest and
-IPC versions remain 2, and generation filenames retain the `.fx2` suffix; the
-header identifies the segment layout. Older binaries cannot read `FXSEG004`.
+Segment files start with `FXSEG004`, the only layout readers accept; an index
+written in an earlier layout is rebuilt by a reconcile. Generation filenames
+retain the `.fx2` suffix; the header identifies the segment layout.
 An old manifest plus WAL remains available during conversion under the existing
 two-generation protocol. Once both generations are compact, downgrading requires
 rebuilding with the older application.

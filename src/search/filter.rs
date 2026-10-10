@@ -7,9 +7,8 @@
 //! search field never rejects input.
 //!
 //! No state and no GPUI, so it unit-tests in isolation. `kind:`/`ext:` are
-//! derivable from the filename; `size:`/`modified:` need the arena's
-//! size/mtime fields, and [`Filter::matches`] reports them unknown (so
-//! never positively matching) until those are populated.
+//! derivable from the filename; `size:`/`modified:` need the record's
+//! size/mtime, and [`Filter::matches`] treats an unknown value as no match.
 
 use serde::{Deserialize, Serialize};
 

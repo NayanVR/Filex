@@ -1,7 +1,5 @@
 //! Persisted application settings: one JSON file at
-//! `<config_dir>/filex/settings.json`. It folds in the legacy
-//! `roots.list` — a missing settings file migrates roots from there on
-//! first load, and the old file stays a read-only fallback for a version.
+//! `<config_dir>/filex/settings.json`.
 //!
 //! Pure I/O + serde, no GPUI. The app wraps it in an entity that emits
 //! change events; the index daemon reads it directly.
@@ -28,7 +26,7 @@ pub fn default_settings_file() -> Option<PathBuf> {
 #[serde(default)]
 pub struct Settings {
     pub version: u32,
-    /// Indexed roots (absolute paths). Replaces the legacy roots.list.
+    /// Indexed roots (absolute paths).
     pub roots: Vec<PathBuf>,
     pub show_hidden_files: bool,
     /// Index OS/system folders. Off by default — on Windows they dominate
@@ -232,19 +230,15 @@ impl Settings {
     }
 
     /// Load settings from `file`. A missing file is first launch, not an
-    /// error: defaults, with roots migrated from the legacy `roots.list`.
+    /// error: first-run defaults.
     /// A file that exists but doesn't parse *is* an error, so the caller
     /// can log and run on defaults rather than silently overwriting a file
     /// the user may want to fix.
-    pub fn load(file: &Path, legacy_roots_file: Option<&Path>) -> Result<Self> {
+    pub fn load(file: &Path) -> Result<Self> {
         let contents = match std::fs::read_to_string(file) {
             Ok(contents) => contents,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let mut settings = Self::first_run(installer::crash_reports_choice());
-                if let Some(legacy) = legacy_roots_file {
-                    settings.roots = crate::ingest::load_roots(legacy);
-                }
-                return Ok(settings);
+                return Ok(Self::first_run(installer::crash_reports_choice()));
             }
             Err(err) => {
                 return Err(err).with_context(|| format!("reading {}", file.display()));
@@ -369,7 +363,7 @@ mod tests {
             .insert("view".into(), String::new());
 
         settings.save(&file).unwrap();
-        let loaded = Settings::load(&file, None).unwrap();
+        let loaded = Settings::load(&file).unwrap();
         assert_eq!(loaded, settings);
     }
 
@@ -396,26 +390,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_migrates_roots_from_legacy_list() {
+    fn missing_file_is_plain_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join("roots.list");
-        std::fs::write(&legacy, "/tmp/x\n/tmp/y\n").unwrap();
-
-        let settings = Settings::load(&dir.path().join("settings.json"), Some(&legacy)).unwrap();
-        assert_eq!(
-            settings.roots,
-            vec![PathBuf::from("/tmp/x"), PathBuf::from("/tmp/y")]
-        );
-        // Everything else is defaults.
-        assert!(!settings.show_hidden_files);
-    }
-
-    #[test]
-    fn missing_file_and_no_legacy_is_plain_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing_legacy = dir.path().join("roots.list");
-        let settings =
-            Settings::load(&dir.path().join("settings.json"), Some(&missing_legacy)).unwrap();
+        let settings = Settings::load(&dir.path().join("settings.json")).unwrap();
         assert_eq!(settings, Settings::default());
     }
 
@@ -433,7 +410,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("settings.json");
         std::fs::write(&file, "{ not json").unwrap();
-        let err = Settings::load(&file, None).unwrap_err();
+        let err = Settings::load(&file).unwrap_err();
         assert!(err.to_string().contains("settings.json"));
     }
 
@@ -448,7 +425,7 @@ mod tests {
             r#"{ "version": 1, "show_hidden_files": true, "future": 42 }"#,
         )
         .unwrap();
-        let settings = Settings::load(&file, None).unwrap();
+        let settings = Settings::load(&file).unwrap();
         assert!(settings.show_hidden_files);
         assert_eq!(settings.sort, SortSettings::default());
         assert!(settings.keyboard_shortcuts.is_empty());

@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 use gpui::{Context, EventEmitter};
 
-use filex::ingest as manager;
 use filex::settings::{Settings, default_settings_file};
 
 pub enum SettingsEvent {
@@ -28,25 +27,23 @@ pub struct SettingsStore {
 impl EventEmitter<SettingsEvent> for SettingsStore {}
 
 impl SettingsStore {
-    /// Load settings (migrating roots from the legacy roots.list on
-    /// first launch — the migrated file is written immediately so the
-    /// settings file becomes the source of truth). A corrupt file logs
+    /// Load settings, writing first-run defaults immediately so the
+    /// installer's choices are recorded once. A corrupt file logs
     /// a warning and runs on defaults; the next change overwrites it.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let file = default_settings_file();
-        let legacy = manager::default_roots_file();
-        let mut migrated = false;
+        let mut first_run = false;
         let settings = match &file {
             Some(path) => {
-                migrated = !path.exists();
-                match Settings::load(path, legacy.as_deref()) {
+                first_run = !path.exists();
+                match Settings::load(path) {
                     Ok(settings) => settings,
                     Err(err) => {
                         tracing::warn!(
                             "unusable settings file ({err:#}); using defaults — the next \
                              settings change will overwrite it"
                         );
-                        migrated = false;
+                        first_run = false;
                         Settings::default()
                     }
                 }
@@ -57,7 +54,7 @@ impl SettingsStore {
             }
         };
         let store = Self { settings, file };
-        if migrated {
+        if first_run {
             store.persist(cx);
         }
         store

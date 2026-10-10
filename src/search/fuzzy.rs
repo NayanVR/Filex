@@ -20,11 +20,6 @@ pub struct FuzzyImage {
     postings: PostingsImage,
 }
 impl FuzzyIndex {
-    #[cfg(test)]
-    pub(crate) fn use_legacy_offsets(&mut self) {
-        self.postings.use_legacy_offsets();
-    }
-
     pub(crate) fn remap(&mut self, reader: &Reader) -> Result<()> {
         self.postings.remap(reader)?;
         Ok(())

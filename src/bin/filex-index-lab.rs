@@ -120,7 +120,7 @@ fn main() -> Result<()> {
     }
     if args.len() != 2 {
         bail!(
-            "usage: filex-index-lab <analyze|literal|fm|mapped|mixed|typing|magic|profile|blocks> SEGMENT; <compact|compact-isolated|verify> INPUT OUTPUT; build-json RECORDS OUTPUT"
+            "usage: filex-index-lab <analyze|literal|mapped|mixed|typing|magic|profile|blocks> SEGMENT; <compact|compact-isolated|verify> INPUT OUTPUT; build-json RECORDS OUTPUT"
         );
     }
     let load_start = Instant::now();
@@ -409,40 +409,19 @@ fn main() -> Result<()> {
                 })
             ))?
         );
-    } else if args[0] == "literal" || args[0] == "fm" {
+    } else if args[0] == "literal" {
         let start = Instant::now();
         let names: Vec<String> = (0..index.len())
             .filter(|&i| index.parent(i) != 0)
             .filter_map(|i| String::from_utf8(index.raw_name(i).into_owned()).ok())
             .collect();
-        let literal = LiteralIndex::build_suffix(names.iter().map(String::as_str))?;
+        let literal = LiteralIndex::build(names.iter().map(String::as_str))?;
         drop(names);
         drop(index);
         println!(
             "{}",
-            serde_json::json!({"names": literal.name_count(), "suffixes": literal.suffix_count(), "bytes": literal.bytes(), "wavelet_bytes": literal.wavelet_bytes(), "build_seconds": start.elapsed().as_secs_f64()})
+            serde_json::json!({"names": literal.name_count(), "bytes": literal.bytes(), "build_seconds": start.elapsed().as_secs_f64()})
         );
-        if args[0] == "fm" {
-            let mut selected = false;
-            let mut stop = false;
-            for wavelet in [false, true] {
-                let comparison = workload::compare_fm(&literal, wavelet);
-                if comparison.passes_latency_and_saving {
-                    selected = true;
-                    stop |= comparison.total_search_bytes > 150 * 1024 * 1024;
-                }
-                println!("{}", serde_json::to_string(&comparison)?);
-                ensure!(
-                    comparison.ranges_and_top_100_match,
-                    "FM correctness gate failed"
-                );
-            }
-            if !selected {
-                stop = literal.bytes() > 150 * 1024 * 1024;
-            }
-            ensure!(!stop, "Stage 2 combined search storage budget exceeded");
-            return Ok(());
-        }
         let mut passed = true;
         for (id, query) in workload::queries().iter().enumerate() {
             let report = workload::measure(&literal, query, id);

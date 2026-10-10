@@ -298,13 +298,12 @@ cargo test --locked --bin filex
 cargo check --locked --all-targets --features index-v2-lab
 cargo check --locked --no-default-features --target x86_64-pc-windows-msvc
 cargo check --locked --no-default-features --target x86_64-unknown-linux-gnu
-cargo bench --locked --no-default-features --features index-v2-lab --bench suffix_probe
 cargo test --locked --release --no-default-features --features index-v2-lab \
   --test index_v2 ten_thousand_changes_converge_during_queries -- --ignored --nocapture
 ```
 
 The feature-gated laboratory accepts an immutable v2 segment for `analyze`,
-`literal`, `fm` and `mapped` modes. `compact INPUT OUTPUT` retains the earlier
+`literal` and `mapped` modes. `compact INPUT OUTPUT` retains the earlier
 in-process rebuild for comparisons. `compact-isolated INPUT OUTPUT` uses the
 production worker and holds the old mapping through the build. `build-json RECORDS OUTPUT` builds an isolated corpus of
 sorted catalog records rooted at `/corpus`; it is a measurement helper, not a
@@ -313,8 +312,6 @@ migration or production ingestion path. No v1 decoder is retained in the repo.
 ```sh
 cargo run --release --locked --no-default-features --features index-v2-lab \
   --bin filex-index-lab -- mapped "$V2_SEGMENT"
-cargo run --release --locked --no-default-features --features index-v2-lab \
-  --bin filex-index-lab -- fm "$V2_SEGMENT"
 ```
 
 ## Release qualification still required
