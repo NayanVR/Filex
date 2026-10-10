@@ -2,7 +2,7 @@
 //! the hoverable row scaffold. Row content (place/state icons via
 //! [`super::icon`], labels) is supplied by the caller.
 //!
-//! Every sidebar entry (places, indexed roots, action rows, banners)
+//! Every sidebar entry (places, tags, action rows, banners)
 //! starts from [`sidebar_row`] so hover feedback and spacing stay
 //! uniform; callers chain their content and `.on_click`, plus style
 //! overrides (dim text for action rows, smaller warn text for banners).

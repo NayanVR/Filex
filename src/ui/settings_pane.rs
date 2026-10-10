@@ -96,6 +96,18 @@ pub fn choice_row(
         .child(control)
 }
 
+/// A row with a button on the right, such as a removable list entry.
+pub fn action_row(
+    theme: &Theme,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    row_shell()
+        .child(row_label(theme, label, description))
+        .child(control)
+}
+
 /// The container for a segmented control (a pill split into [`segment`]s).
 pub fn segmented(theme: &Theme) -> Div {
     div()

@@ -279,6 +279,65 @@ impl View {
         }
         result
     }
+    /// Entries per root across the base and its deltas, excluding root
+    /// records. Overlays are not counted; they flush within minutes. Costs
+    /// one lookup per delta entry and deleted descendant, so call it per
+    /// publication, not per query.
+    pub fn root_counts(&self) -> std::collections::BTreeMap<u32, u64> {
+        // The newest base-or-delta (parent, root) of `id`; `None` if deleted.
+        let current = |id| match self.delta_entry(id) {
+            Some((delta, slot)) => slot.map(|s| (delta.parent(s), delta.root(s))),
+            None => self
+                .base
+                .slot(id)
+                .map(|s| (self.base.parent(s), self.base.root(s))),
+        };
+        let mut counts: std::collections::BTreeMap<u32, i64> = self
+            .roots
+            .iter()
+            .map(|r| (r.id, self.base.root_count(r.id) as i64))
+            .collect();
+        let mut changed = std::collections::BTreeSet::new();
+        for delta in &self.deltas {
+            changed.extend((0..delta.len()).map(|slot| delta.id(slot)));
+            changed.extend(delta.tombstones.iter().flatten().copied());
+        }
+        let mut deleted = Vec::new();
+        for id in changed {
+            if let Some(slot) = self.base.slot(id)
+                && self.base.parent(slot) != 0
+            {
+                *counts.entry(self.base.root(slot)).or_default() -= 1;
+            }
+            match current(id) {
+                Some((parent, root)) if parent != 0 => *counts.entry(root).or_default() += 1,
+                Some(_) => {}
+                None => deleted.push(id),
+            }
+        }
+        // Deleting a directory tombstones only the directory; its
+        // descendants stay in older levels, hidden. Uncount them.
+        let mut seen = std::collections::HashSet::new();
+        while let Some(directory) = deleted.pop() {
+            let children: Vec<u64> = self
+                .segments()
+                .flat_map(|s| s.child_ids(directory))
+                .collect();
+            for child in children {
+                if seen.insert(child)
+                    && let Some((parent, root)) = current(child)
+                    && parent == directory
+                {
+                    *counts.entry(root).or_default() -= 1;
+                    deleted.push(child);
+                }
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(root, n)| (root, n.max(0) as u64))
+            .collect()
+    }
     pub fn records(&self) -> impl Iterator<Item = Record> + '_ {
         self.records_projected(true, true)
     }

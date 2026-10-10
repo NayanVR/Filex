@@ -294,10 +294,7 @@ impl Workspace {
             }
             page = page.child(group);
             if section == SettingsSection::Search {
-                page = page.child(ui::settings_pane::note(
-                    &theme,
-                    "Add search locations from the sidebar using “Index this folder”.",
-                ));
+                page = page.child(self.render_search_locations(&theme, cx));
             }
         }
         let card = ui::settings_pane::settings_card(&theme, "settings-panel")
@@ -553,58 +550,48 @@ impl Workspace {
         row.child(hex_box).into_any_element()
     }
 
-    // `use<>`: the built element owns its data; without opting out of
-    // lifetime capture it couldn't be collected across loop iterations.
-    pub(super) fn render_root_row(
-        &self,
-        ix: usize,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = *cx.theme();
-        let slot = &self.roots[ix];
-        let path = slot.path.clone();
-        // Clicking a healthy root navigates to it; clicking a failed one
-        // surfaces why it failed in the status bar.
-        let failure: Option<SharedString> = match &slot.state {
-            IndexState::Failed(err) => Some(err.clone()),
-            _ => None,
-        };
-        // Building spins (indexing is live); ready/failed are static.
-        // Sidebar rows aren't virtualized, so animating here is fine.
-        let marker = match &slot.state {
-            IndexState::Building => ui::icon::spinner(
-                "icons/loader-circle.svg",
-                theme.text_dim,
-                14.,
-                ("root-spin", ix),
-            ),
-            IndexState::Ready => ui::icon::ui_icon("icons/dot.svg", theme.accent)
-                .size(px(14.))
-                .into_any_element(),
-            IndexState::Failed(_) => ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn)
-                .size(px(14.))
-                .into_any_element(),
-        };
-        let menu_path = slot.path.clone();
-        let tip = slot.path.display().to_string();
-        ui::sidebar::sidebar_row(&theme, ("root", ix))
-            .tooltip(ui::tooltip::text_tooltip(tip, theme))
-            .child(marker)
-            .child(ui::sidebar::sidebar_label(slot.label.clone()))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.open_root_menu(menu_path.clone(), event.position, window, cx);
-                }),
+    fn render_search_locations(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let mut group = ui::settings_pane::group(theme);
+        for (ix, slot) in self.roots.iter().enumerate() {
+            let status: SharedString = match &slot.state {
+                IndexState::Building => "Indexing…".into(),
+                IndexState::Ready => "Ready".into(),
+                IndexState::Failed(err) => err.clone(),
+            };
+            let path = slot.path.clone();
+            group = group.child(ui::settings_pane::action_row(
+                theme,
+                slot.label.clone(),
+                format!("{} · {status}", slot.path.display()),
+                ui::modal::button(theme, ("remove-root", ix), "Remove", false)
+                    .flex_none()
+                    .text_xs()
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_root(&path, cx))),
+            ));
+        }
+        group = group.child(ui::settings_pane::action_row(
+            theme,
+            "Add current folder",
+            self.cwd.display().to_string(),
+            ui::modal::button(theme, "add-root", "Add", false)
+                .flex_none()
+                .text_xs()
+                .on_click(cx.listener(|this, _, _, cx| this.add_current_folder(cx))),
+        ));
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.text)
+                    .child("Search locations"),
             )
-            .on_click(
-                cx.listener(move |this, _: &ClickEvent, _window, cx| match &failure {
-                    Some(err) => {
-                        this.notice = Some(err.clone());
-                        cx.notify();
-                    }
-                    None => this.navigate(path.clone(), cx),
-                }),
-            )
+            .child(group)
+            .child(ui::settings_pane::note(
+                theme,
+                "You can also right-click a folder and choose “Index This Folder”.",
+            ))
     }
 }

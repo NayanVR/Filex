@@ -107,6 +107,8 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
         roots: roots.clone(),
         epoch: seq,
     });
+    // Per-root entry counts for status, refreshed when a build publishes.
+    let mut counts = initial.root_counts();
     let shared = Arc::new(Shared {
         view: RwLock::new(initial),
         status: RwLock::new(Status {
@@ -214,7 +216,13 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                         reconcile = false;
                     }
                 }
-                update_status(&owner, &roots, seq, building || reconcile || awaiting_watch);
+                update_status(
+                    &owner,
+                    &roots,
+                    &counts,
+                    seq,
+                    building || reconcile || awaiting_watch,
+                );
                 let command = match deferred
                     .pop_front()
                     .map(Ok)
@@ -400,6 +408,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                             roots: roots.clone(),
                                             epoch: seq,
                                         });
+                                        counts = next_view.root_counts();
                                         replacement = Some(next_view.clone());
                                         owner.status.write().unwrap().error = if built.skipped > 0 {
                                             Some(format!(
@@ -635,8 +644,13 @@ fn publish(owner: &Shared, frozen: &[Arc<Overlay>], active: &Overlay, roots: &[R
         epoch,
     });
 }
-fn update_status(owner: &Shared, roots: &[Root], epoch: u64, building: bool) {
-    let view = owner.view.read().unwrap();
+fn update_status(
+    owner: &Shared,
+    roots: &[Root],
+    counts: &std::collections::BTreeMap<u32, u64>,
+    epoch: u64,
+    building: bool,
+) {
     let mut status = owner.status.write().unwrap();
     status.epoch = epoch;
     status.building = building;
@@ -644,7 +658,7 @@ fn update_status(owner: &Shared, roots: &[Root], epoch: u64, building: bool) {
         .iter()
         .map(|r| RootStatus {
             path: r.path.clone(),
-            files: view.base.root_count(r.id),
+            files: counts.get(&r.id).copied().unwrap_or(0),
             state: if building {
                 "Building index"
             } else if status.error.is_some() {

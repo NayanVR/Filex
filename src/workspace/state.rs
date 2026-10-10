@@ -71,7 +71,6 @@ pub(super) enum MenuTarget {
         from_search: bool,
     },
     /// An indexed root in the sidebar.
-    Root { path: PathBuf },
     /// A pinned folder in the sidebar's Favorites section.
     Favorite { path: PathBuf },
     /// Icon choices for one folder, opened from its context menu.

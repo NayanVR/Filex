@@ -64,7 +64,6 @@ struct Header {
     version: u32,
     sequence: u64,
     roots: Vec<Root>,
-    #[serde(default)]
     tombstones: Option<Vec<u64>>,
 }
 
@@ -237,7 +236,9 @@ fn write_line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
 
 // Private worker spool: a JSON header followed by fixed-width metadata and raw
 // name bytes. This is scratch, not the durable WAL or segment format.
-fn write_record(writer: &mut impl Write, record: &Record) -> Result<()> {
+// Public only for the worker-process integration tests.
+#[doc(hidden)]
+pub fn write_record(writer: &mut impl Write, record: &Record) -> Result<()> {
     ensure!(
         record.name.len() <= MAX_RECORD_BYTES as usize - RECORD_HEADER_BYTES,
         "segment build record exceeds size limit"
@@ -259,20 +260,7 @@ fn write_record(writer: &mut impl Write, record: &Record) -> Result<()> {
     Ok(())
 }
 
-fn read_record(
-    reader: &mut impl BufRead,
-    version: u32,
-    line: &mut String,
-) -> Result<Option<Record>> {
-    if version == 1 {
-        return if read_line(reader, line, MAX_RECORD_BYTES)? == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(
-                serde_json::from_str(line).context("invalid segment build record")?,
-            ))
-        };
-    }
+fn read_record(reader: &mut impl BufRead) -> Result<Option<Record>> {
     let mut header = [0u8; RECORD_HEADER_BYTES];
     if reader.read(&mut header[..1])? == 0 {
         return Ok(None);
@@ -374,7 +362,7 @@ fn compile(input: &Path, output: &Path) -> Result<()> {
     ensure!(header_bytes != 0, "missing segment build header");
     let header: Header = serde_json::from_str(&line).context("invalid segment build header")?;
     ensure!(
-        matches!(header.version, 1 | 2 | REQUEST_VERSION),
+        header.version == REQUEST_VERSION,
         "unsupported segment build request"
     );
 
@@ -383,15 +371,11 @@ fn compile(input: &Path, output: &Path) -> Result<()> {
     let mut order = Vec::new();
     let mut position = header_bytes as u64;
     loop {
-        let Some(record) = read_record(&mut reader, header.version, &mut line)? else {
+        let Some(record) = read_record(&mut reader)? else {
             break;
         };
         order.push((record.id, position));
-        position += if header.version == 1 {
-            line.len()
-        } else {
-            RECORD_HEADER_BYTES + record.name.len()
-        } as u64;
+        position += (RECORD_HEADER_BYTES + record.name.len()) as u64;
     }
     order.sort_unstable();
     ensure!(
@@ -406,14 +390,8 @@ fn compile(input: &Path, output: &Path) -> Result<()> {
             if position != offset {
                 reader.seek(SeekFrom::Start(offset))?;
             }
-            let record = read_record(&mut reader, header.version, &mut line)?
-                .context("truncated segment build input")?;
-            position = offset
-                + if header.version == 1 {
-                    line.len()
-                } else {
-                    RECORD_HEADER_BYTES + record.name.len()
-                } as u64;
+            let record = read_record(&mut reader)?.context("truncated segment build input")?;
+            position = offset + (RECORD_HEADER_BYTES + record.name.len()) as u64;
             Ok(record)
         })();
         match record {
@@ -505,21 +483,13 @@ mod tests {
             let mut encoded = Vec::new();
             write_record(&mut encoded, &record).unwrap();
             let mut reader = encoded.as_slice();
-            let mut line = String::new();
-            assert_eq!(
-                read_record(&mut reader, REQUEST_VERSION, &mut line).unwrap(),
-                Some(record)
-            );
-            assert!(
-                read_record(&mut reader, REQUEST_VERSION, &mut line)
-                    .unwrap()
-                    .is_none()
-            );
+            assert_eq!(read_record(&mut reader).unwrap(), Some(record));
+            assert!(read_record(&mut reader).unwrap().is_none());
             for end in 1..encoded.len() {
-                assert!(read_record(&mut &encoded[..end], REQUEST_VERSION, &mut line).is_err());
+                assert!(read_record(&mut &encoded[..end]).is_err());
             }
             encoded[62..66].copy_from_slice(&u32::MAX.to_le_bytes());
-            assert!(read_record(&mut encoded.as_slice(), REQUEST_VERSION, &mut line).is_err());
+            assert!(read_record(&mut encoded.as_slice()).is_err());
         }
     }
 
@@ -651,7 +621,7 @@ mod tests {
         let output = directory.path().join("output");
         std::fs::write(
             &input,
-            b"{\"version\":1,\"sequence\":0,\"roots\":[]}\nnot-json\n",
+            b"{\"version\":3,\"sequence\":0,\"roots\":[],\"tombstones\":null}\nnot-a-record\n",
         )
         .unwrap();
         assert!(compile(&input, &output).is_err());
@@ -802,9 +772,28 @@ mod tests {
         // to hide that copy, but a merge of both deltas drops it.
         let two = flush(&pending, false, directory.path(), "two");
         assert_eq!(two.tombstones.as_deref(), Some(&[11, 160][..]));
-        assert_eq!(observe(&view(vec![one.clone(), two], vec![], 3)), expected);
+        assert_eq!(
+            observe(&view(vec![one.clone(), two.clone()], vec![], 3)),
+            expected
+        );
         let merged = flush(&pending, true, directory.path(), "merged");
         assert_eq!(merged.tombstones.as_deref(), Some(&[3, 5, 150, 160][..]));
-        assert_eq!(observe(&view(vec![merged], vec![], 3)), expected);
+        let merged = view(vec![merged], vec![], 3);
+        assert_eq!(observe(&merged), expected);
+
+        // Status counts follow the deltas without a base rewrite.
+        let counted = |view: &View| {
+            let mut counts = std::collections::BTreeMap::new();
+            for record in view.records().filter(|r| r.parent != 0) {
+                *counts.entry(record.root).or_insert(0) += 1;
+            }
+            counts
+        };
+        let only = view(vec![one.clone()], vec![], 2);
+        let split = view(vec![one, two], vec![], 3);
+        for view in [&only, &split, &merged] {
+            assert_eq!(view.root_counts(), counted(view));
+        }
+        assert_ne!(only.root_counts(), counted(&view(vec![], vec![], 1)));
     }
 }

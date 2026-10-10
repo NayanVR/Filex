@@ -19,9 +19,7 @@ pub struct Manifest {
     /// The base segment.
     pub segment: String,
     pub roots: Vec<Root>,
-    /// Delta segments over the base, oldest first. Version 3 and later:
-    /// older binaries skip these manifests and fall back to a reconcile.
-    #[serde(default)]
+    /// Delta segments over the base, oldest first.
     pub deltas: Vec<String>,
 }
 pub const VERSION: u32 = 3;
@@ -66,8 +64,7 @@ pub fn candidates(dir: &Path) -> Result<Vec<(PathBuf, Manifest)>> {
             );
             let m: Manifest = serde_json::from_slice(&env.payload)?;
             ensure!(
-                matches!(m.version, 2 | VERSION)
-                    && m.files().all(|f| !f.contains('/') && !f.contains('\\')),
+                m.version == VERSION && m.files().all(|f| !f.contains('/') && !f.contains('\\')),
                 "invalid manifest"
             );
             Ok(m)

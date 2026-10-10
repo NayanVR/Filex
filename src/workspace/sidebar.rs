@@ -290,24 +290,6 @@ impl Workspace {
             }
         }
 
-        // INDEXED.
-        let (header, collapsed) = self.section_header(&theme, "indexed", "Search locations", cx);
-        content = content.child(header);
-        if !collapsed {
-            let root_rows: Vec<gpui::AnyElement> = (0..self.roots.len())
-                .map(|ix| self.render_root_row(ix, cx).into_any_element())
-                .collect();
-            content = content.children(root_rows).child(
-                ui::sidebar::sidebar_row(&theme, "add-root")
-                    .text_color(theme.text_dim)
-                    .child(ui::icon::ui_icon("icons/plus.svg", theme.text_dim).size(px(14.)))
-                    .child("Index this folder")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.add_current_folder(cx);
-                    })),
-            );
-        }
-
         // DRIVES (only once the background refresh has found any).
         if !self.drives.is_empty() {
             let (header, collapsed) = self.section_header(&theme, "drives", "Drives", cx);

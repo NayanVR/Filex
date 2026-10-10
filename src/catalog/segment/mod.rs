@@ -337,6 +337,9 @@ impl Segment {
     pub fn parent(&self, slot: usize) -> u64 {
         self.parents.get(slot)
     }
+    pub fn root(&self, slot: usize) -> u32 {
+        self.root_ids.get(slot)
+    }
     pub fn child_ids(&self, parent: u64) -> impl Iterator<Item = u64> + '_ {
         let lo = self
             .children

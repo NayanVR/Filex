@@ -264,9 +264,7 @@ mod tests {
         let base = vec![entry(1, 0, "fixture", true), entry(2, 1, "old.txt", false)];
         write(directory, "segment-1.fx2", base, 3, None);
         write(directory, "segment-2.fx2", vec![], 4, Some(vec![]));
-        let mut previous = manifest(1, 3, "segment-1.fx2", &[]);
-        previous.version = 2;
-        manifest::publish(directory, &previous).unwrap();
+        manifest::publish(directory, &manifest(1, 3, "segment-1.fx2", &[])).unwrap();
         // Claims a newer sequence than its delta holds.
         manifest::publish(
             directory,

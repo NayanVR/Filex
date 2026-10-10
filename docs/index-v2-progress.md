@@ -323,7 +323,7 @@ Windows and Linux library cross-checks pass; their runtime tests, GPUI builds an
 MSI install/uninstall jobs are configured in CI and have not been executed by this
 local session. A real version-upgrade MSI run, full live-volume startup/idle RSS,
 permission restoration, sustained compaction latency, cold-device queries and
-low-memory/large-corpus runs remain release checks. Native journal replay,
-size-tiered partial compaction and battery/I/O scheduling are explicitly deferred
-by the revised design. Root counts in the sidebar describe the last compacted
-base and can lag live changes until compaction.
+low-memory/large-corpus runs remain release checks. Native journal replay
+and battery/I/O scheduling are explicitly deferred by the revised design. Indexed
+file counts cover the base and its deltas; pending overlay changes join them at
+the next flush.

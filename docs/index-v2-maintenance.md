@@ -87,8 +87,10 @@ The costs:
 - A flush adds a file. A delta merge rewrites every delta, so under a steady
   trickle every fourth build rewrites the merged delta. That is bounded by
   1/8 of the base, against a whole-base rewrite before.
-- Per-root file counts in status still come from the base, so they lag until
-  the next base merge (FIL-8).
+- Status file counts (`View::root_counts`) are recomputed once per
+  publication from the base and deltas: one lookup per delta entry, plus each
+  descendant of a deleted directory, since a delete tombstones only the
+  directory. Pending overlay changes join the count at the next flush.
 - The watcher queue holds 16,384 commands. At 256, any burst of file events
   (a checkout, an unzip) overflowed it, and an overflow forces a reconcile of
   every root. The queue is allocated up front, at about 40 bytes per slot.
@@ -123,8 +125,8 @@ error excerpt returned to the writer.
 After a successful build, the owner validates the segment's checksum, columns,
 lookup ordering, tree and root references. Only then can the writer durably
 publish a manifest and expose a new query epoch. Manifest version 3 lists a
-generation's deltas; older binaries skip version 3 manifests and fall back to a
-reconcile. Two valid manifests are kept for recovery. A segment file is deleted
+generation's deltas. Only the current manifest and worker-request versions are
+read; an index written by an older build is rebuilt by a reconcile. Two valid manifests are kept for recovery. A segment file is deleted
 only when neither manifest references it and no live query view maps it
 (`retire`), because consecutive generations share their base.
 

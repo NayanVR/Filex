@@ -102,20 +102,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn open_root_menu(
-        &mut self,
-        path: PathBuf,
-        position: Point<Pixels>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = Some(ContextMenu {
-            position: Self::clamped_menu_position(position, 90., window),
-            target: MenuTarget::Root { path },
-        });
-        cx.notify();
-    }
-
     pub(super) fn open_favorite_menu(
         &mut self,
         path: PathBuf,

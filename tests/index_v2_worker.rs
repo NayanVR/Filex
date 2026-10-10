@@ -40,13 +40,12 @@ fn input(path: &Path, records: impl IntoIterator<Item = Record>) {
     }];
     serde_json::to_writer(
         &mut file,
-        &serde_json::json!({"version":1,"sequence":7,"roots":roots}),
+        &serde_json::json!({"version":3,"sequence":7,"roots":roots,"tombstones":null}),
     )
     .unwrap();
     writeln!(file).unwrap();
     for record in records {
-        serde_json::to_writer(&mut file, &record).unwrap();
-        writeln!(file).unwrap();
+        filex::daemon::builder::write_record(&mut file, &record).unwrap();
     }
     file.flush().unwrap();
 }

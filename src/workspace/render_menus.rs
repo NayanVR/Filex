@@ -319,22 +319,6 @@ impl Workspace {
                         .into_any_element(),
                 );
             }
-            MenuTarget::Root { path } => {
-                let label = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                items.push(ui::menu::heading(&theme, label).into_any_element());
-                let p = path.clone();
-                items.push(
-                    ui::menu::item(&theme, "menu-remove-root", "Remove from Index", true)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.remove_root(&p.clone(), cx);
-                        }))
-                        .into_any_element(),
-                );
-            }
             MenuTarget::Favorite { path } => {
                 let label = path
                     .file_name()
