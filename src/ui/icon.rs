@@ -361,6 +361,29 @@ pub fn folder_icon(theme: &Theme, icon: FolderIcon, edge: f32) -> AnyElement {
     folder.into_any_element()
 }
 
+/// The full-color Filex app icon, rasterized once. Falls back to the
+/// accent folder glyph if rasterization fails.
+pub fn app_icon(theme: &Theme, edge: f32) -> AnyElement {
+    static IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::new(|| {
+        let svg = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/branding/filex.svg"
+        ));
+        render_icon_svg(svg, 256)
+            .inspect_err(|err| tracing::warn!("could not render app icon: {err:#}"))
+            .ok()
+    });
+    match IMAGE.as_ref() {
+        Some(image) => img(image.clone())
+            .size(px(edge))
+            .flex_none()
+            .into_any_element(),
+        None => ui_icon("icons/folder.svg", theme.accent)
+            .size(px(edge))
+            .into_any_element(),
+    }
+}
+
 /// The SVG asset path for a file kind.
 fn kind_asset(kind: FileKind) -> &'static str {
     match kind {
@@ -405,6 +428,18 @@ mod tests {
             automatic_folder_icon(Path::new("/tmp/misc")),
             FolderIcon::Plain
         );
+    }
+
+    #[test]
+    fn app_icon_svg_rasterizes() {
+        let svg = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/branding/filex.svg"
+        ));
+        let image = render_icon_svg(svg, 256).unwrap();
+        let bytes = image.as_bytes(0).unwrap();
+        // Center of the folder front face is opaque.
+        assert_eq!(bytes[(128 * 256 + 128) * 4 + 3], 255);
     }
 
     #[test]

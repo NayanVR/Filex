@@ -339,7 +339,7 @@ impl Workspace {
                     .gap_2()
                     .px_4()
                     .h(px(42.))
-                    .child(ui::icon::ui_icon("icons/folder.svg", theme.accent).size(px(22.)))
+                    .child(ui::icon::app_icon(&theme, 22.))
                     .child(
                         div()
                             .text_base()
