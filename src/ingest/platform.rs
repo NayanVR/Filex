@@ -104,6 +104,15 @@ pub(super) const SYSTEM_DIRS: &[&str] = &[
     "srv",
 ];
 
+/// Top-level folders that hold *other* volumes or network mounts, left out
+/// of a whole-disk root (`/`) whatever the system-files setting says. A
+/// root indexes one disk, as Windows indexes each fixed drive; external
+/// and network volumes are added as their own roots.
+#[cfg(target_os = "macos")]
+pub(super) const OTHER_VOLUME_DIRS: &[&str] = &["Volumes", "Network", "home"];
+#[cfg(not(target_os = "macos"))]
+pub(super) const OTHER_VOLUME_DIRS: &[&str] = &[];
+
 /// Whether folder names compare case-insensitively: NTFS and APFS/HFS+
 /// default to case-insensitive, Linux filesystems don't. A case-sensitive
 /// APFS volume would over-match here, which only excludes more.

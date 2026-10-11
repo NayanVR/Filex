@@ -119,10 +119,21 @@ mod platform {
         })
     }
 
-    /// Fresh-install default on Unix: the home directory. Unlike Windows
-    /// (whole fixed drives), indexing all of `/` here needs elevated or
-    /// full-disk access and includes the OS itself, so the default stays
-    /// scoped to the user.
+    /// Fresh-install default on macOS: the whole startup disk, like
+    /// Windows' fixed drives. The OS folders, other volumes and the user's
+    /// excluded folder names are pruned by `ingest::IndexFilter`; FSEvents
+    /// covers `/` with one stream. Without Full Disk Access the protected
+    /// folders are skipped and counted, not fatal.
+    #[cfg(target_os = "macos")]
+    pub fn default_index_roots() -> Vec<std::path::PathBuf> {
+        vec![std::path::PathBuf::from("/")]
+    }
+
+    /// Fresh-install default on Linux: the home directory. Watching `/`
+    /// needs fanotify (`CAP_SYS_ADMIN`); the inotify fallback costs one
+    /// watch per directory and would exhaust `max_user_watches` long before
+    /// a whole disk is covered (docs/indexing-architecture.md §2).
+    #[cfg(not(target_os = "macos"))]
     pub fn default_index_roots() -> Vec<std::path::PathBuf> {
         std::env::home_dir().into_iter().collect()
     }

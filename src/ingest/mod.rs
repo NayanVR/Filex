@@ -4,7 +4,7 @@ mod platform;
 use crate::catalog::segment::{Identity, Record, Root, raw_name};
 use anyhow::Result;
 pub use platform::identity;
-use platform::{CASE_INSENSITIVE_NAMES, SYSTEM_DIRS};
+use platform::{CASE_INSENSITIVE_NAMES, OTHER_VOLUME_DIRS, SYSTEM_DIRS};
 #[cfg(target_os = "macos")]
 pub use platform::{has_full_disk_access, open_full_disk_access_settings};
 use std::{
@@ -83,9 +83,7 @@ pub fn walk(
             let pruned = !filter.excluded_names.is_empty()
                 && entry.file_type().is_ok_and(|t| t.is_dir())
                 && filter.excluded_name(&entry.file_name());
-            if pruned
-                || path.starts_with(excluded)
-                || (!filter.include_system && excluded_system(&root.path, &path))
+            if pruned || path.starts_with(excluded) || filter.excludes_top_level(&root.path, &path)
             {
                 continue;
             }
@@ -177,7 +175,7 @@ impl IndexFilter {
     /// Ancestors are matched by name alone; the last component only when
     /// it is a directory, so a *file* named `target` is still indexed.
     pub fn excludes(&self, root: &Path, path: &Path) -> bool {
-        if !self.include_system && excluded_system(root, path) {
+        if self.excludes_top_level(root, path) {
             return true;
         }
         let Ok(relative) = path.strip_prefix(root) else {
@@ -199,12 +197,20 @@ fn fold(name: &str) -> String {
         name.to_owned()
     }
 }
-fn excluded_system(root: &Path, path: &Path) -> bool {
+impl IndexFilter {
+    /// OS folders (unless the setting includes them) and other-volume
+    /// mount folders, matched by the first component under `root`.
+    fn excludes_top_level(&self, root: &Path, path: &Path) -> bool {
+        (!self.include_system && first_component_in(root, path, SYSTEM_DIRS))
+            || first_component_in(root, path, OTHER_VOLUME_DIRS)
+    }
+}
+fn first_component_in(root: &Path, path: &Path, names: &[&str]) -> bool {
     path.strip_prefix(root)
         .ok()
         .and_then(|p| p.components().next())
         .is_some_and(|part| {
-            SYSTEM_DIRS
+            names
                 .iter()
                 .any(|s| part.as_os_str().to_string_lossy().eq_ignore_ascii_case(s))
         })
@@ -218,6 +224,42 @@ mod tests {
             excluded_folder_names: names.iter().map(|n| n.to_string()).collect(),
             ..Default::default()
         })
+    }
+
+    /// A whole-disk root (the macOS default) leaves out other volumes even
+    /// when OS folders are included, so a `/` root never wanders onto
+    /// external or network drives.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_whole_disk_root_skips_os_folders_and_other_volumes() {
+        use std::path::Path;
+        let root = Path::new("/");
+        let default = super::IndexFilter::from_settings(&Default::default());
+        assert!(default.excludes(root, Path::new("/System/Library/x")));
+        assert!(default.excludes(root, Path::new("/Volumes/Backup/a.txt")));
+        assert!(!default.excludes(root, Path::new("/Users/me/notes.txt")));
+        assert!(!default.excludes(root, Path::new("/Applications/Safari.app")));
+
+        let with_system = super::IndexFilter::from_settings(&crate::settings::Settings {
+            index_system_files: true,
+            ..Default::default()
+        });
+        assert!(!with_system.excludes(root, Path::new("/Library/Fonts")));
+        assert!(with_system.excludes(root, Path::new("/Volumes/Backup/a.txt")));
+        // An external drive added as its own root is indexed normally.
+        assert!(!default.excludes(
+            Path::new("/Volumes/Backup"),
+            Path::new("/Volumes/Backup/a.txt")
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_indexes_the_whole_startup_disk_by_default() {
+        assert_eq!(
+            crate::drives::default_index_roots(),
+            [std::path::PathBuf::from("/")]
+        );
     }
 
     /// FIL-28: listed folder names are pruned at any depth (contents
