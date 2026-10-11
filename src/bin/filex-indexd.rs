@@ -11,7 +11,13 @@ fn main() -> anyhow::Result<()> {
             .next()
             .ok_or_else(|| anyhow::anyhow!("missing build output"))?;
         anyhow::ensure!(args.next().is_none(), "unexpected segment worker argument");
-        return filex::daemon::builder::run_worker(input.as_ref(), output.as_ref());
+        return match filex::daemon::builder::run_worker(input.as_ref(), output.as_ref()) {
+            Err(error) if error.is::<filex::daemon::builder::WorkerSkew>() => {
+                eprintln!("Error: {error:#}");
+                std::process::exit(filex::daemon::builder::WORKER_SKEW_EXIT);
+            }
+            result => result,
+        };
     }
     let mut directory = filex::daemon::ipc::default_directory();
     let mut roots = Vec::new();

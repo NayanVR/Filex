@@ -238,6 +238,15 @@ jobs:
             homepage "https://github.com/${GITHUB_REPOSITORY}"
 
             app "Filex.app"
+
+            # Quit the app before an upgrade; Homebrew reopens it afterwards. A
+            # running filex-indexd isn't stopped here: it notices its replaced binary
+            # and restarts itself (FIL-21).
+            uninstall quit: "dev.filex.app"
+
+            # Only on --zap. An uninstall launchctl: entry also runs on every upgrade and
+            # deletes the plist of the opt-in launch agent (packaging/launchd).
+            zap launchctl: "dev.filex.indexd"
           end
           CASK
       - name: Commit + push

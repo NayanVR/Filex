@@ -5,7 +5,10 @@
 //! Only the catalog writer can publish the completed file in a manifest.
 use super::view::View;
 use crate::{
-    catalog::segment::{Identity, Record, Root, Segment, raw_name},
+    catalog::{
+        segment::{Identity, Record, Root, Segment, raw_name},
+        storage::SEGMENT_FORMAT,
+    },
     ingest,
 };
 use anyhow::{Context, Result, ensure};
@@ -32,6 +35,22 @@ const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ERROR_BYTES: u64 = 16 * 1024;
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Exit status of a segment worker handed a request from a different build
+/// of `filex-indexd` — the binary on disk was replaced under a running
+/// daemon. Distinct from failure (1) so the daemon restarts instead of
+/// retrying a build that can never succeed (FIL-21).
+pub const WORKER_SKEW_EXIT: i32 = 3;
+
+/// The daemon and its segment worker are different builds.
+#[derive(Debug)]
+pub struct WorkerSkew;
+impl std::fmt::Display for WorkerSkew {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("segment worker is a different build of filex-indexd")
+    }
+}
+impl std::error::Error for WorkerSkew {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
@@ -65,6 +84,10 @@ struct Header {
     sequence: u64,
     roots: Vec<Root>,
     tombstones: Option<Vec<u64>>,
+    /// [`SEGMENT_FORMAT`] the daemon can open; empty from builds before it
+    /// was sent, which fails the check as it should.
+    #[serde(default)]
+    segment_format: String,
 }
 
 /// Scratch files belong to a build until the writer accepts its output.
@@ -103,6 +126,7 @@ pub(super) fn build(request: BuildRequest, stop: &AtomicBool) -> Result<Built> {
             sequence: request.view.epoch,
             roots: request.view.roots.clone(),
             tombstones: delta.as_ref().map(|(_, deleted)| deleted.clone()),
+            segment_format: segment_format(),
         },
     )?;
 
@@ -323,6 +347,9 @@ fn run_process(input: &Path, output: &Path, errors: &Path, stop: &AtomicBool) ->
                 File::open(errors)?
                     .take(MAX_ERROR_BYTES)
                     .read_to_string(&mut message)?;
+                if status.code() == Some(WORKER_SKEW_EXIT) {
+                    return Err(anyhow::Error::new(WorkerSkew).context(message.trim().to_string()));
+                }
                 anyhow::bail!("segment worker failed ({status}): {}", message.trim());
             }
             return Ok(());
@@ -347,6 +374,10 @@ pub fn run_worker(input: &Path, output: &Path) -> Result<()> {
     compile(input, output)
 }
 
+fn segment_format() -> String {
+    String::from_utf8_lossy(SEGMENT_FORMAT).into_owned()
+}
+
 fn read_line(reader: &mut impl BufRead, line: &mut String, limit: u64) -> Result<usize> {
     line.clear();
     let bytes = reader.take(limit + 1).read_line(line)?;
@@ -363,10 +394,12 @@ fn compile(input: &Path, output: &Path) -> Result<()> {
     let header_bytes = read_line(&mut reader, &mut line, MAX_HEADER_BYTES)?;
     ensure!(header_bytes != 0, "missing segment build header");
     let header: Header = serde_json::from_str(&line).context("invalid segment build header")?;
-    ensure!(
-        header.version == REQUEST_VERSION,
-        "unsupported segment build request"
-    );
+    if header.version != REQUEST_VERSION || header.segment_format != segment_format() {
+        return Err(anyhow::Error::new(WorkerSkew).context(format!(
+            "unsupported segment build request (version {}, format {:?})",
+            header.version, header.segment_format
+        )));
+    }
 
     // A move can preserve an ID smaller than its newly enumerated parent.
     // Sort compact (ID, offset) pairs, never a second arena of complete records.
@@ -507,6 +540,7 @@ mod tests {
                 version: REQUEST_VERSION,
                 sequence: 9,
                 tombstones: None,
+                segment_format: segment_format(),
                 roots: vec![Root {
                     id: 1,
                     path: "/fixture".into(),
@@ -558,6 +592,7 @@ mod tests {
                 sequence: 1,
                 roots: vec![],
                 tombstones: None,
+                segment_format: segment_format(),
             },
         )
         .unwrap();
@@ -797,5 +832,29 @@ mod tests {
             assert_eq!(view.root_counts(), counted(view));
         }
         assert_ne!(only.root_counts(), counted(&view(vec![], vec![], 1)));
+    }
+
+    #[test]
+    fn a_request_from_another_build_is_skew_not_failure() {
+        // FIL-21: a request version, segment format or (from builds that
+        // predate it) a missing format all mean a different build.
+        let current = format!(
+            "{{\"version\":{REQUEST_VERSION},\"sequence\":0,\"roots\":[],\"tombstones\":null"
+        );
+        for header in [
+            format!(
+                "{{\"version\":{},\"sequence\":0,\"roots\":[],\"tombstones\":null,\"segment_format\":\"{}\"}}",
+                REQUEST_VERSION - 1,
+                segment_format()
+            ),
+            format!("{current},\"segment_format\":\"FXSEG999\"}}"),
+            format!("{current}}}"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("input");
+            std::fs::write(&input, format!("{header}\n")).unwrap();
+            let error = compile(&input, &directory.path().join("output")).unwrap_err();
+            assert!(error.is::<WorkerSkew>(), "{header}: {error:#}");
+        }
     }
 }

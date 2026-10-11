@@ -70,6 +70,9 @@ pub struct Shared {
     pub view: RwLock<Arc<View>>,
     pub status: RwLock<Status>,
     pub stop: Arc<AtomicBool>,
+    /// Set with `stop` when the daemon must exit for its replacement
+    /// binary to take over (FIL-21); `server::run` then exits as a failure.
+    pub restart: AtomicBool,
     pub overflow: AtomicBool,
     pub coverage_error: RwLock<Option<String>>,
 }
@@ -118,6 +121,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
             error: None,
         }),
         stop: Arc::new(AtomicBool::new(false)),
+        restart: AtomicBool::new(false),
         overflow: AtomicBool::new(false),
         coverage_error: RwLock::new(None),
     });
@@ -436,23 +440,9 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                             }
                                             retire(&directory, &manifests, &live);
                                         }
-                                        // First successful v2 activation is the only migration cleanup point.
-                                        if built.skipped == 0
-                                            && let Some(parent) = directory.parent()
-                                        {
-                                            let old_dir = parent.join("index");
-                                            if let Ok(entries) = std::fs::read_dir(old_dir) {
-                                                for entry in entries.flatten() {
-                                                    if entry
-                                                        .path()
-                                                        .extension()
-                                                        .is_some_and(|e| e == "fxidx")
-                                                    {
-                                                        let _ = std::fs::remove_file(entry.path());
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        // A full build supersedes everything older on
+                                        // disk, readable or not.
+                                        super::recovery::remove_legacy_files(&directory);
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -470,6 +460,14 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                         retry_delay = next_retry_delay(retry_delay);
                                     }
                                 }
+                            }
+                            Err(e) if must_restart(&e) => {
+                                // Every retry would hand the same request to the
+                                // same newer worker. The WAL already holds every
+                                // change, so stopping loses nothing.
+                                tracing::warn!(error = %e, "binary replaced; restarting filex-indexd");
+                                owner.restart.store(true, Ordering::Relaxed);
+                                owner.stop.store(true, Ordering::Relaxed);
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -607,6 +605,13 @@ fn retire(
 /// `BUILD_RETRY_LIMIT`. A persistent failure (a worker whose segment this
 /// build cannot open, a full disk) otherwise re-walks every root on a fixed
 /// 30s cycle forever, which costs a saturated core and publishes nothing.
+/// A build failed because the worker is a newer build *and* the binary on
+/// disk really changed. Both, so a version check that misfires within one
+/// build backs off like any failure instead of restarting in a loop.
+fn must_restart(error: &anyhow::Error) -> bool {
+    error.is::<super::builder::WorkerSkew>() && super::executable::replaced_since_startup()
+}
+
 fn next_retry_delay(previous: Duration) -> Duration {
     previous.saturating_mul(2).min(BUILD_RETRY_LIMIT)
 }
@@ -883,6 +888,16 @@ mod tests {
                 "segment-4.fx2",
             ]
         );
+    }
+
+    #[test]
+    fn skew_alone_does_not_restart_the_daemon() {
+        // Without a replaced binary a skew report is a bug in this build:
+        // back off and retry rather than exit, restart and walk in a loop.
+        assert!(!must_restart(&anyhow::Error::new(
+            super::super::builder::WorkerSkew
+        )));
+        assert!(!must_restart(&anyhow::anyhow!("disk full")));
     }
 
     #[test]

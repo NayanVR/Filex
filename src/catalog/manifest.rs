@@ -76,6 +76,21 @@ pub fn candidates(dir: &Path) -> Result<Vec<(PathBuf, Manifest)>> {
     candidates.sort_by_key(|(_, m)| std::cmp::Reverse(m.epoch));
     Ok(candidates)
 }
+/// Whether a `manifest-*.json` was written by an older index format —
+/// unreadable to this build and never coming back. A *newer* version is
+/// left alone: a daemon briefly older than the binary on disk (FIL-21)
+/// must not delete the index its successor wrote.
+pub fn is_older_format(path: &Path) -> bool {
+    #[derive(Deserialize)]
+    struct Versioned {
+        version: u32,
+    }
+    let parsed = (|| -> Result<u32> {
+        let env: Envelope = serde_json::from_slice(&std::fs::read(path)?)?;
+        Ok(serde_json::from_slice::<Versioned>(&env.payload)?.version)
+    })();
+    parsed.is_ok_and(|version| version < VERSION)
+}
 pub fn sync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;

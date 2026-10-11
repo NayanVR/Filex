@@ -17,4 +17,13 @@ cask "filex" do
   homepage "https://github.com/NayanVR/filex"
 
   app "Filex.app"
+
+  # Quit the app before an upgrade; Homebrew reopens it afterwards. A
+  # running filex-indexd isn't stopped here: it notices its replaced binary
+  # and restarts itself (FIL-21).
+  uninstall quit: "dev.filex.app"
+
+  # Only on `--zap`. `uninstall launchctl:` also runs on every upgrade and
+  # deletes the plist of the opt-in launch agent (packaging/launchd).
+  zap launchctl: "dev.filex.indexd"
 end

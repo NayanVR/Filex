@@ -141,6 +141,55 @@ pub(super) fn recover(directory: &Path, configured: Vec<PathBuf>) -> Result<Reco
     })
 }
 
+/// Delete what earlier index formats and failed recoveries left behind,
+/// once a full build has published a generation that supersedes them:
+/// pre-v2 `../index/*.fxidx` snapshots, manifests in an older format (their
+/// segments are already retired), and quarantined `orphan-*`/`corrupt-*`
+/// WALs and `*.invalid` manifests. Nothing here is readable by this
+/// build, so keeping it only costs disk.
+pub(super) fn remove_legacy_files(directory: &Path) {
+    remove_v1_index(directory);
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let quarantined = (name.starts_with("orphan-") || name.starts_with("corrupt-"))
+            && name.ends_with(".wal")
+            || name.starts_with("manifest-") && name.ends_with(".invalid");
+        let older = name.starts_with("manifest-")
+            && name.ends_with(".json")
+            && manifest::is_older_format(&path);
+        if quarantined || older {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// The pre-v2 snapshots lived as `*.fxidx` in a sibling `index` folder.
+/// Only those files go, and the folder only if that empties it: with a
+/// custom `--data-dir`, `../index` can be the live data directory itself
+/// or a folder of the user's.
+fn remove_v1_index(directory: &Path) {
+    let Some(old) = directory.parent().map(|p| p.join("index")) else {
+        return;
+    };
+    if old == directory {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&old) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().is_some_and(|e| e == "fxidx") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let _ = std::fs::remove_dir(&old);
+}
+
 /// Open a manifest's base and deltas, checking they form one generation:
 /// same roots, a base without tombstones, deltas with them, and sequences
 /// that increase up to the manifest's.
@@ -279,5 +328,70 @@ mod tests {
         assert_eq!(recovered.sequence, 3);
         assert!(recovered.deltas.is_empty());
         assert_eq!(recovered.files, [directory.join("segment-1.fx2")]);
+    }
+
+    #[test]
+    fn a_full_build_removes_every_older_format_leftover() {
+        let app = tempfile::tempdir().unwrap();
+        let dir = app.path().join("index-v2");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(app.path().join("index")).unwrap();
+        std::fs::write(app.path().join("index/volume.fxidx"), b"v1").unwrap();
+
+        let mut current = manifest(5, 5, "segment-5.fx2", &[]);
+        manifest::publish(&dir, &current).unwrap();
+        for version in [manifest::VERSION - 1, manifest::VERSION + 1] {
+            current.epoch += 1;
+            current.version = version;
+            manifest::publish(&dir, &current).unwrap();
+        }
+        for name in [
+            "segment-5.fx2",
+            "updates.wal",
+            "orphan-1.wal",
+            "corrupt-2.wal",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.join("manifest-00000000000000000004.invalid"), b"x").unwrap();
+
+        remove_legacy_files(&dir);
+
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        // The current generation, the live WAL, and a *newer* format's
+        // manifest (an older daemon must not delete its successor's index).
+        assert_eq!(
+            left,
+            [
+                "manifest-00000000000000000005.json",
+                "manifest-00000000000000000007.json",
+                "segment-5.fx2",
+                "updates.wal",
+            ]
+        );
+        assert!(!app.path().join("index").exists());
+    }
+
+    #[test]
+    fn legacy_cleanup_never_touches_a_data_directory_named_index() {
+        // Regression: removing `../index` wholesale deleted the live index
+        // when `--data-dir` itself was called `index`, and would delete a
+        // user's own `index` folder beside a custom data directory.
+        let app = tempfile::tempdir().unwrap();
+        let live = app.path().join("index");
+        std::fs::create_dir_all(&live).unwrap();
+        manifest::publish(&live, &manifest(1, 1, "segment-1.fx2", &[])).unwrap();
+        remove_legacy_files(&live);
+        assert!(live.join("manifest-00000000000000000001.json").exists());
+
+        let data = app.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(live.join("notes.txt"), b"theirs").unwrap();
+        remove_legacy_files(&data);
+        assert!(live.join("notes.txt").exists());
     }
 }

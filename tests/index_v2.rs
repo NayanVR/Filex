@@ -1267,3 +1267,89 @@ fn daemon_flushes_a_burst_into_a_delta_and_keeps_the_base() {
     stop.store(true, Ordering::Relaxed);
     thread.join().unwrap();
 }
+
+#[test]
+fn literal_probe_tells_filenames_from_descriptions() {
+    // The workspace's phrase check (`prefer_literal`) sends exactly this
+    // query: literal-only, one hit. Names typed as a description must
+    // miss; names typed as the file must hit, case-insensitively and
+    // with their spaces.
+    let roots = vec![Root {
+        id: 1,
+        path: "/test".into(),
+        device: 1,
+    }];
+    let segment = Segment::build(
+        [
+            record(1, 0, b"root", true),
+            record(2, 1, b"The Music Man.mp4", false),
+            record(3, 1, b"big bang theory s01e01.mkv", false),
+            record(4, 1, b"photos", true),
+        ],
+        roots.clone(),
+        0,
+    )
+    .unwrap();
+    let view = View {
+        base: Arc::new(segment),
+        deltas: vec![],
+        layers: Vec::new(),
+        roots,
+        epoch: 0,
+    };
+    let probe = |text: &str| {
+        let q = Query {
+            text: text.into(),
+            limit: 1,
+            fuzzy: false,
+            ..Default::default()
+        };
+        query::search(&view, &q, &AtomicBool::new(false), &Default::default())
+            .unwrap()
+            .hits
+            .len()
+    };
+    assert_eq!(probe("the music man"), 1);
+    assert_eq!(probe("big bang theory"), 1);
+    // A description shares words with names but never their run of text;
+    // "photos" alone matching is why the probe needs the whole query.
+    assert_eq!(probe("photos from last week"), 0);
+    assert_eq!(probe("big videos"), 0);
+}
+
+#[test]
+fn a_worker_from_another_build_exits_with_the_skew_code() {
+    // FIL-21: the daemon tells "replaced binary" from "build failed" by
+    // this exit code, so it restarts instead of retrying forever.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    std::fs::write(
+        &input,
+        "{\"version\":1,\"sequence\":0,\"roots\":[],\"tombstones\":null}\n",
+    )
+    .unwrap();
+    let mut worker = std::process::Command::new(env!("CARGO_BIN_EXE_filex-indexd"))
+        .arg("--build-segment")
+        .arg(&input)
+        .arg(dir.path().join("output"))
+        // The worker exits on stdin EOF (its owner died); keep it open.
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // `wait()` would close stdin first and race that EOF exit, so hold the
+    // pipe until the worker has exited on its own.
+    let _stdin = worker.stdin.take();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = worker.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "worker did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        status.code(),
+        Some(filex::daemon::builder::WORKER_SKEW_EXIT)
+    );
+}

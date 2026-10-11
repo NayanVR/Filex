@@ -37,6 +37,7 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
         .truncate(false)
         .open(directory.join("owner.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock)?;
+    super::executable::note_startup();
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let mut random = [0u8; 32];
     getrandom::getrandom(&mut random).map_err(|e| anyhow::anyhow!("randomness failed: {e}"))?;
@@ -370,6 +371,12 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
     drop(handle);
     let _ = wake.join();
     let _ = std::fs::remove_file(endpoint_path);
+    // A failure exit, so launchd (KeepAlive SuccessfulExit=false), systemd
+    // (Restart=on-failure) or the app's reconnect starts the new binary.
+    ensure!(
+        !shared.restart.load(Ordering::Relaxed),
+        "filex-indexd was replaced on disk; exiting so the new build starts"
+    );
     Ok(())
 }
 fn same_token(a: &str, b: &str) -> bool {

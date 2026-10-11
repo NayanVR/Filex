@@ -12,6 +12,11 @@ use std::{
     sync::Arc,
 };
 
+/// The on-disk segment format tag. A daemon and a segment worker must agree
+/// on it; it travels in the build request so a mismatch fails before any
+/// work rather than after (FIL-21).
+pub const SEGMENT_FORMAT: &[u8; 8] = b"FXSEG004";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Span {
     offset: u64,
@@ -118,7 +123,7 @@ impl Writer {
         let data_end = self.file.stream_position()?;
         self.file.rewind()?;
         let mut header = [0; 64];
-        header[..8].copy_from_slice(b"FXSEG004");
+        header[..8].copy_from_slice(SEGMENT_FORMAT);
         header[8..16].copy_from_slice(&span.offset.to_le_bytes());
         header[16..24].copy_from_slice(&span.len.to_le_bytes());
         self.file.write_all(&header)?;
@@ -173,7 +178,7 @@ impl Reader {
             "segment checksum mismatch"
         );
         let map = Arc::new(unsafe { Mmap::map(&file)? });
-        ensure!(&map[..8] == b"FXSEG004", "unsupported segment version");
+        ensure!(&map[..8] == SEGMENT_FORMAT, "unsupported segment version");
         let metadata = Span {
             offset: u64::from_le_bytes(map[8..16].try_into()?),
             len: u64::from_le_bytes(map[16..24].try_into()?),

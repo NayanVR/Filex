@@ -40,7 +40,13 @@ fn input(path: &Path, records: impl IntoIterator<Item = Record>) {
     }];
     serde_json::to_writer(
         &mut file,
-        &serde_json::json!({"version":3,"sequence":7,"roots":roots,"tombstones":null}),
+        &serde_json::json!({
+            "version": 3,
+            "sequence": 7,
+            "roots": roots,
+            "tombstones": null,
+            "segment_format": String::from_utf8_lossy(filex::catalog::storage::SEGMENT_FORMAT),
+        }),
     )
     .unwrap();
     writeln!(file).unwrap();
