@@ -17,6 +17,8 @@ impl Workspace {
             cx.notify();
             return;
         };
+        // What the daemon indexes right now — before this change lands.
+        let live: Vec<PathBuf> = self.roots.iter().map(|r| r.path.clone()).collect();
         cx.spawn(async move |this, cx| {
             let configured = path.clone();
             let result = cx
@@ -34,13 +36,7 @@ impl Workspace {
                     Ok(_) => {
                         this.settings.update(cx, |store, cx| {
                             store.update(cx, |s| {
-                                if add {
-                                    if !s.roots.contains(&configured) {
-                                        s.roots.push(configured);
-                                    }
-                                } else {
-                                    s.roots.retain(|p| p != &configured);
-                                }
+                                s.roots = edited_roots(&s.roots, &live, configured, add);
                             })
                         });
                         this.notice = None;
@@ -52,5 +48,62 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+}
+
+/// The saved root list after adding or removing `path`. An empty saved
+/// list means "the platform defaults", which the daemon is indexing
+/// (`live`) but nothing has written down. The first edit must write them
+/// out, or adding one folder replaces them on the next daemon start —
+/// adding `/Users/Shared` silently dropped the home folder from the index.
+fn edited_roots(saved: &[PathBuf], live: &[PathBuf], path: PathBuf, add: bool) -> Vec<PathBuf> {
+    let mut roots = if !saved.is_empty() {
+        saved.to_vec()
+    } else if !live.is_empty() {
+        live.to_vec()
+    } else {
+        filex::drives::default_index_roots()
+    };
+    roots.retain(|p| p != &path);
+    if add {
+        roots.push(path);
+    }
+    roots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn the_first_added_root_keeps_the_defaults() {
+        // Regression: settings saved only the added folder, so the next
+        // daemon start indexed it alone and lost the home folder.
+        let roots = edited_roots(&[], &paths(&["/Users/me"]), "/Users/Shared".into(), true);
+        assert_eq!(roots, paths(&["/Users/me", "/Users/Shared"]));
+    }
+
+    #[test]
+    fn removing_a_default_root_writes_the_rest_out() {
+        let live = paths(&["/Users/me", "/Volumes/Data"]);
+        let roots = edited_roots(&[], &live, "/Volumes/Data".into(), false);
+        assert_eq!(roots, paths(&["/Users/me"]));
+    }
+
+    #[test]
+    fn a_saved_list_is_edited_in_place() {
+        let saved = paths(&["/a", "/b"]);
+        assert_eq!(
+            edited_roots(&saved, &paths(&["/x"]), "/b".into(), true),
+            paths(&["/a", "/b"])
+        );
+        assert_eq!(
+            edited_roots(&saved, &paths(&["/x"]), "/a".into(), false),
+            paths(&["/b"])
+        );
     }
 }
