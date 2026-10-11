@@ -108,6 +108,10 @@ pub struct Settings {
     /// carries only crash/metric details — never file names, paths, tags or
     /// queries — and nothing sends without an embedded DSN.
     pub share_diagnostics: bool,
+    /// Whether the welcome flow still has to run. True only for a brand-new
+    /// install ([`Settings::first_run`]); a file written before onboarding
+    /// existed lacks the key and so defaults to false — existing users skip it.
+    pub onboarding_pending: bool,
     /// App shortcut overrides by stable command id; empty means unassigned.
     pub keyboard_shortcuts: std::collections::BTreeMap<String, String>,
 }
@@ -204,6 +208,7 @@ impl Default for Settings {
             favorites: Vec::new(),
             collapsed_sections: Vec::new(),
             share_diagnostics: true,
+            onboarding_pending: false,
             keyboard_shortcuts: Default::default(),
         }
     }
@@ -309,6 +314,7 @@ impl Settings {
     fn first_run(installer_share_diagnostics: Option<bool>) -> Self {
         Self {
             share_diagnostics: installer_share_diagnostics.unwrap_or(true),
+            onboarding_pending: true,
             ..Self::default()
         }
     }
@@ -448,7 +454,23 @@ mod tests {
     fn missing_file_is_plain_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let settings = Settings::load(&dir.path().join("settings.json")).unwrap();
-        assert_eq!(settings, Settings::default());
+        assert_eq!(
+            settings,
+            Settings {
+                onboarding_pending: true,
+                ..Settings::default()
+            }
+        );
+    }
+
+    /// Existing users upgrade with a settings file that predates the key;
+    /// they must not be sent through onboarding.
+    #[test]
+    fn a_file_without_the_onboarding_key_skips_onboarding() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, r#"{"show_hidden_files": true}"#).unwrap();
+        assert!(!Settings::load(&file).unwrap().onboarding_pending);
     }
 
     #[test]
@@ -457,7 +479,13 @@ mod tests {
         assert!(Settings::first_run(Some(true)).share_diagnostics);
         // No installer choice (macOS/Linux, or a pre-privacy-page MSI) keeps
         // the opt-out default.
-        assert_eq!(Settings::first_run(None), Settings::default());
+        assert_eq!(
+            Settings::first_run(None),
+            Settings {
+                onboarding_pending: true,
+                ..Settings::default()
+            }
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@
 pub mod catalog;
 pub mod diagnostics;
 pub mod drives;
+pub mod favorites_import;
 pub mod frecency;
 #[cfg(feature = "index-v2-lab")]
 pub mod index_lab;
