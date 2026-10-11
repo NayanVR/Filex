@@ -149,6 +149,10 @@ impl Workspace {
                                 this.service = Some(client);
                                 this.roots =
                                     status.roots.iter().map(IndexedRoot::from_status).collect();
+                                if let Some(onboarding) = &mut this.onboarding {
+                                    onboarding
+                                        .observe_index(status.building, std::time::Instant::now());
+                                }
                                 this.daemon_status = status;
                                 if changed && refresh && !this.query.is_empty() {
                                     this.update_search(cx);

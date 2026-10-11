@@ -59,6 +59,15 @@ impl Workspace {
         let Some(state) = self.magic.as_ref() else {
             return;
         };
+        // Applied from onboarding's live Magic step: drop into the app first
+        // so the job, any conflict dialog and undo are visible.
+        if state.selected_ops().is_empty() {
+            return;
+        }
+        self.hand_off_onboarding(cx);
+        let Some(state) = self.magic.as_ref() else {
+            return;
+        };
         let ops = state.selected_ops();
         if ops.is_empty() {
             return;
@@ -463,6 +472,7 @@ impl Workspace {
             limit
         };
         let client_id = self.search_client_id;
+        let issued = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -540,6 +550,7 @@ impl Workspace {
                         this.phrases_literal = literal_won.then(|| this.query.clone());
                         let kept = refresh.then(|| this.selected_result_paths());
                         this.results_key = Some(key);
+                        record_latency(&mut this.search_latency, &this.query, issued.elapsed());
                         this.search_page_query = query.map(|mut q| {
                             q.epoch_hint = Some(epoch);
                             q
@@ -804,5 +815,36 @@ mod tests {
         let selected = vec![before[0].target.clone(), before[1].target.clone()];
         let kept = selection_for_paths(&after, &selected, Some(&before[1].target));
         assert_eq!(kept.iter().collect::<Vec<_>>(), [0]);
+    }
+}
+
+/// Keep the first timing taken for `query`. Live index refreshes re-run the
+/// same query in the background; recording those would make the number
+/// change while the user isn't typing.
+fn record_latency(
+    slot: &mut Option<(String, std::time::Duration)>,
+    query: &str,
+    took: std::time::Duration,
+) {
+    if slot.as_ref().is_none_or(|(timed, _)| timed != query) {
+        *slot = Some((query.to_owned(), took));
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::record_latency;
+    use std::time::Duration;
+
+    #[test]
+    fn a_background_refresh_does_not_change_the_shown_latency() {
+        let mut slot = None;
+        record_latency(&mut slot, "resume pdf", Duration::from_millis(2));
+        // Same query again: an index refresh, not the user.
+        record_latency(&mut slot, "resume pdf", Duration::from_millis(9));
+        assert_eq!(slot, Some(("resume pdf".into(), Duration::from_millis(2))));
+        // A new query is timed afresh.
+        record_latency(&mut slot, "resume", Duration::from_millis(3));
+        assert_eq!(slot, Some(("resume".into(), Duration::from_millis(3))));
     }
 }

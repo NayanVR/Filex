@@ -247,6 +247,27 @@ pub mod fixed {
     use filex::listing::FileKind;
     use filex::tags::TagColor;
 
+    /// The Filex mark's light and deep blues (`assets/branding/filex.svg`),
+    /// for brand artwork that must not follow the user's accent.
+    pub fn brand_sky() -> Rgba {
+        rgb(0x28bdfc)
+    }
+
+    pub fn brand_deep() -> Rgba {
+        rgb(0x006ddc)
+    }
+
+    /// Magic mode's colour, paired with [`brand_sky`] in its gradients.
+    pub fn magic_violet() -> Rgba {
+        rgb(0x8b5cf6)
+    }
+
+    /// `color` at `alpha` opacity.
+    pub fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
+        color.alpha = alpha;
+        color
+    }
+
     /// The full-window dim behind a modal dialog.
     pub fn scrim() -> Rgba {
         rgba(0x00000099)

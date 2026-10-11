@@ -62,6 +62,9 @@ pub enum SearchInputEvent {
     Dismissed,
 }
 
+/// What an empty input says until a caller sets its own placeholder.
+pub const DEFAULT_PLACEHOLDER: &str = "type to search";
+
 pub struct SearchInput {
     focus_handle: FocusHandle,
     propagate_empty: bool,
@@ -87,7 +90,7 @@ impl SearchInput {
             focus_handle: cx.focus_handle(),
             propagate_empty: true,
             content: "".into(),
-            placeholder: "type to search".into(),
+            placeholder: DEFAULT_PLACEHOLDER.into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,

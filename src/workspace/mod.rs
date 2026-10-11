@@ -307,6 +307,11 @@ struct Workspace {
     /// The "add a folder name" field of the index exclude list (FIL-28).
     excluded_folder_input: gpui::Entity<SearchInput>,
     results: Vec<SearchRow>,
+    /// Request-to-results time of the first search for the query it names
+    /// (debounce excluded), shown by onboarding's live search demo. Live
+    /// index refreshes re-run the same query and must not overwrite it, or
+    /// the number would change while the user isn't typing.
+    search_latency: Option<(String, std::time::Duration)>,
     search_generation: u64,
     /// The Magic card's state when the query parses as a command.
     magic: Option<MagicState>,
@@ -331,6 +336,11 @@ struct Workspace {
     /// `selection` so a search doesn't disturb the browse selection —
     /// search is a Spotlight-style overlay, not part of a tab.
     search_selection: Selection,
+    /// The first-run welcome flow; while `Some`, it renders instead of the
+    /// whole app.
+    onboarding: Option<onboarding::Onboarding>,
+    /// The onboarding-to-app transition, while it plays.
+    reveal: Option<onboarding::Reveal>,
     /// The settings pane replaces the browse list while open (search
     /// still takes precedence, Spotlight-style).
     settings_open: bool,
@@ -421,6 +431,7 @@ mod file_ops;
 mod input;
 mod location;
 mod navigation;
+mod onboarding;
 mod platform;
 mod preferences;
 mod quick_look;
@@ -573,6 +584,7 @@ impl Workspace {
             _accent_hex_subscription: accent_hex_subscription,
             excluded_folder_input,
             results: Vec::new(),
+            search_latency: None,
             search_generation: 0,
             magic: None,
             magic_mode: MagicMode::Auto,
@@ -586,6 +598,8 @@ impl Workspace {
             selection: Selection::default(),
             search_selection: Selection::default(),
             settings_open: false,
+            onboarding: None,
+            reveal: None,
             renaming: None,
             journal: ops::Journal::default(),
             pending_delete: None,
@@ -624,6 +638,9 @@ impl Workspace {
             update_status: filex::update::UpdateStatus::default(),
         };
         this.load_dir(&cwd, cx);
+        if this.settings.read(cx).settings().onboarding_pending {
+            this.start_onboarding(cx);
+        }
         this.spawn_tag_prune(cx);
         this.refresh_sidebar_tags(cx);
         this.spawn_crash_upload(cx);

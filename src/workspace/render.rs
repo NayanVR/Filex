@@ -553,6 +553,10 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.onboarding.is_some() {
+            return self.render_onboarding(window, cx);
+        }
+        let reveal = self.reveal_time(window);
         let searching = !self.query.is_empty();
         let theme = *cx.theme();
         div()
@@ -698,6 +702,10 @@ impl Render for Workspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    // Settles into place as onboarding dissolves off it.
+                    .when_some(reveal, |row, t| {
+                        row.mt(px(ui::onboarding::reveal_offset(t)))
+                    })
                     .child(self.render_sidebar(cx))
                     .child(
                         div()
@@ -728,5 +736,7 @@ impl Render for Workspace {
             .children(self.render_context_menu(cx))
             .children(self.render_settings_modal(window, cx))
             .children(self.render_conflict_modal(cx))
+            .children(reveal.and_then(|t| self.render_reveal(t, cx)))
+            .into_any_element()
     }
 }

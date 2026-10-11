@@ -19,6 +19,7 @@ pub mod list_row;
 pub mod magic_card;
 pub mod menu;
 pub mod modal;
+pub mod onboarding;
 pub mod pane;
 pub mod scrollbar;
 pub mod search_input;

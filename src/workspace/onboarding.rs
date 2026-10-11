@@ -1,0 +1,794 @@
+//! First-run onboarding: a full-window welcome flow rendered *instead of*
+//! the app until finished or skipped, so no file shortcut can act on a
+//! list the user can't see. Design record: `docs/design-onboarding.md`.
+
+use std::time::{Duration, Instant};
+
+use super::*;
+
+/// One screen of the flow, in order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Step {
+    Welcome,
+    Theme,
+    Favorites,
+    Search,
+    Magic,
+    Ready,
+}
+
+impl Step {
+    const ALL: [Step; 6] = [
+        Step::Welcome,
+        Step::Theme,
+        Step::Favorites,
+        Step::Search,
+        Step::Magic,
+        Step::Ready,
+    ];
+
+    /// The steps actually shown: Favorites only when there is something
+    /// to import.
+    fn visible(has_imports: bool) -> impl Iterator<Item = Step> {
+        Self::ALL
+            .into_iter()
+            .filter(move |step| has_imports || *step != Step::Favorites)
+    }
+
+    /// The step `offset` places away among the visible ones, or `None`
+    /// past either end.
+    fn shifted(self, offset: isize, has_imports: bool) -> Option<Step> {
+        let steps: Vec<Step> = Self::visible(has_imports).collect();
+        // A step hidden after the fact (imports emptied) counts from the
+        // step before it.
+        let at = steps.iter().position(|s| *s == self).unwrap_or(1) as isize;
+        steps.get(usize::try_from(at + offset).ok()?).copied()
+    }
+}
+
+pub(super) struct Onboarding {
+    step: Step,
+    /// Folders found in the OS file manager, each with its checkbox.
+    /// Empty until background discovery lands (usually within the
+    /// Welcome step), and empty for good if there is nothing new.
+    imports: Vec<(PathBuf, bool)>,
+    opened: Instant,
+    /// When the current step appeared: the clock its motion runs on.
+    step_started: Instant,
+    /// The Magic step has moved from its scripted demo to the user's own
+    /// commands.
+    magic_live: bool,
+    /// Whether the index was seen building while onboarding was up. Only
+    /// then is "indexed in N s" a true statement.
+    saw_building: bool,
+    indexed_in: Option<Duration>,
+}
+
+/// The hand-off from onboarding into the app, while it plays.
+pub(super) struct Reveal {
+    started: Instant,
+    /// Leaving from the last step: its screen lifts away over the app.
+    from_ready: bool,
+}
+
+impl Onboarding {
+    fn new(now: Instant) -> Self {
+        Self {
+            step: Step::Welcome,
+            imports: Vec::new(),
+            opened: now,
+            step_started: now,
+            magic_live: false,
+            saw_building: false,
+            indexed_in: None,
+        }
+    }
+
+    /// Fold one daemon status poll in: time the first build that
+    /// finishes while onboarding is open.
+    pub(super) fn observe_index(&mut self, building: bool, now: Instant) {
+        if building {
+            self.saw_building = true;
+        } else if self.saw_building && self.indexed_in.is_none() {
+            self.indexed_in = Some(now - self.opened);
+        }
+    }
+
+    /// Seconds into the current step's motion. Reduced motion pins every
+    /// scene to its settled frame (`settled`).
+    fn scene_time(&self, reduce_motion: bool, settled: f32) -> f32 {
+        if reduce_motion {
+            settled
+        } else {
+            self.step_started.elapsed().as_secs_f32()
+        }
+    }
+
+    /// Whether the step still moves at `t` and needs another frame. The
+    /// search demo holds still once settled so the backdrop never redraws
+    /// under a live search.
+    fn animating(&self, t: f32) -> bool {
+        let live_input = self.step == Step::Search || (self.step == Step::Magic && self.magic_live);
+        !live_input || t < ui::onboarding::STEP_IN
+    }
+
+    fn checked_imports(&self) -> Vec<PathBuf> {
+        self.imports
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+}
+
+/// What finishing writes: onboarding is done, and the imported folders
+/// join the favorites (after any already there, no duplicates).
+fn finish_settings(settings: &mut filex::settings::Settings, imports: Vec<PathBuf>) {
+    settings.onboarding_pending = false;
+    for path in imports {
+        if !settings.favorites.contains(&path) {
+            settings.favorites.push(path);
+        }
+    }
+}
+
+/// Rows shown under the demo search box; the full list lives in the app.
+const DEMO_RESULTS: usize = 6;
+
+/// The demo search box's placeholder: a query that finds something on
+/// nearly every disk.
+const DEMO_PLACEHOLDER: &str = "resume pdf";
+
+/// The live Magic step's placeholder: a command most disks can act on.
+const MAGIC_PLACEHOLDER: &str = "move all pdfs to Documents";
+
+impl Workspace {
+    /// Open the flow (first launch, or "Replay welcome" in Settings) and
+    /// look for the OS file manager's pinned folders in the background.
+    pub(super) fn start_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.onboarding = Some(Onboarding::new(Instant::now()));
+        let mut known: Vec<PathBuf> = ["home", "desktop", "documents", "downloads", "pictures"]
+            .iter()
+            .filter_map(|name| self.user_dirs.get(name).map(Path::to_path_buf))
+            .collect();
+        known.extend(self.settings.read(cx).settings().favorites.iter().cloned());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async { filex::favorites_import::discover() })
+                .await;
+            let imports = filex::favorites_import::new_folders(found, &known);
+            this.update(cx, |this, cx| {
+                if let Some(onboarding) = &mut this.onboarding {
+                    onboarding.imports = imports.into_iter().map(|p| (p, true)).collect();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn onboarding_go(&mut self, offset: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(onboarding) = &mut self.onboarding else {
+            return;
+        };
+        let has_imports = !onboarding.imports.is_empty();
+        let Some(step) = onboarding.step.shifted(offset, has_imports) else {
+            if offset > 0 {
+                self.finish_onboarding(true, window, cx);
+            }
+            return;
+        };
+        onboarding.step = step;
+        onboarding.step_started = Instant::now();
+        let magic_live = onboarding.magic_live;
+        // Each step starts from an empty box in plain search mode; the
+        // search and live Magic steps then set up their own input.
+        self.clear_search(cx);
+        match step {
+            Step::Search => {
+                self.set_search_placeholder(DEMO_PLACEHOLDER, cx);
+                self.focus_search(window, cx);
+            }
+            Step::Magic if magic_live => self.go_live_magic(window, cx),
+            _ => {
+                if step == Step::Magic {
+                    self.schedule_magic_handover(window, cx);
+                }
+                self.set_search_placeholder(search_input::DEFAULT_PLACEHOLDER, cx);
+                window.focus(&self.focus_handle, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Leave the flow for the app. `import` pins the ticked folders;
+    /// skipping doesn't.
+    fn finish_onboarding(&mut self, import: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_onboarding(import, cx);
+        self.clear_search(cx);
+        window.focus(&self.focus_handle, cx);
+    }
+
+    /// Close the flow and save what it decided, leaving the query alone
+    /// (a Magic plan applied from onboarding carries on in the app).
+    fn leave_onboarding(&mut self, import: bool, cx: &mut Context<Self>) {
+        let Some(onboarding) = self.onboarding.take() else {
+            return;
+        };
+        let imports = if import {
+            onboarding.checked_imports()
+        } else {
+            Vec::new()
+        };
+        self.settings.update(cx, |store, cx| {
+            store.update(cx, |settings| finish_settings(settings, imports));
+        });
+        self.set_search_placeholder(search_input::DEFAULT_PLACEHOLDER, cx);
+        if !cx.reduce_motion() {
+            self.reveal = Some(Reveal {
+                started: Instant::now(),
+                from_ready: onboarding.step == Step::Ready,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Seconds into the hand-off while it plays, asking for the next frame;
+    /// `None` once the app has settled.
+    pub(super) fn reveal_time(&mut self, window: &mut Window) -> Option<f32> {
+        let t = self.reveal.as_ref()?.started.elapsed().as_secs_f32();
+        if t >= ui::onboarding::REVEAL_LEN {
+            self.reveal = None;
+            return None;
+        }
+        window.request_animation_frame();
+        Some(t)
+    }
+
+    /// Onboarding dissolving off the app, `t` seconds into the hand-off.
+    pub(super) fn render_reveal(&self, t: f32, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let reveal = self.reveal.as_ref()?;
+        let theme = *cx.theme();
+        let body = reveal
+            .from_ready
+            .then(|| self.render_ready_step(&theme, ui::onboarding::INTRO_LEN, cx));
+        Some(ui::onboarding::reveal_overlay(&theme, t, body).into_any_element())
+    }
+
+    /// Applying a plan from the live Magic step: finish onboarding first, so
+    /// the plan runs in the app where its progress, any conflict dialog and
+    /// undo are on screen. Returns whether onboarding was open.
+    pub(super) fn hand_off_onboarding(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.onboarding.is_none() {
+            return false;
+        }
+        self.leave_onboarding(true, cx);
+        true
+    }
+
+    /// Once the demo has played and held for a breath, hand the Magic step to
+    /// the user.
+    fn schedule_magic_handover(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs_f32(ui::onboarding::MAGIC_HANDOVER))
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let waiting = this.onboarding.as_ref().is_some_and(|o| {
+                    o.step == Step::Magic
+                        && !o.magic_live
+                        && o.step_started.elapsed().as_secs_f32() >= ui::onboarding::MAGIC_HANDOVER
+                });
+                if waiting {
+                    this.go_live_magic(window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Switch the Magic step to the real thing: the search input in forced
+    /// Magic mode, with the app's own plan pane under it.
+    fn go_live_magic(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(onboarding) = &mut self.onboarding else {
+            return;
+        };
+        if !onboarding.magic_live {
+            onboarding.magic_live = true;
+            onboarding.step_started = Instant::now();
+        }
+        self.magic_mode = MagicMode::On;
+        self.set_search_placeholder(MAGIC_PLACEHOLDER, cx);
+        window.focus(&self.search_input.focus_handle(cx), cx);
+        self.update_search(cx);
+        cx.notify();
+    }
+
+    fn set_search_placeholder(&self, text: &'static str, cx: &mut Context<Self>) {
+        self.search_input
+            .update(cx, |input, cx| input.set_placeholder(text, cx));
+    }
+
+    fn toggle_import(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some((_, on)) = self
+            .onboarding
+            .as_mut()
+            .and_then(|onboarding| onboarding.imports.get_mut(ix))
+        {
+            *on = !*on;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn render_onboarding(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = *cx.theme();
+        let Some(onboarding) = &self.onboarding else {
+            return div().into_any_element();
+        };
+        let step = onboarding.step;
+        let settled = match step {
+            Step::Welcome => ui::onboarding::INTRO_LEN,
+            Step::Magic => ui::onboarding::MAGIC_STILL,
+            _ => 2.,
+        };
+        let t = onboarding.scene_time(cx.reduce_motion(), settled);
+        if !cx.reduce_motion() && onboarding.animating(t) {
+            window.request_animation_frame();
+        }
+        let viewport = window.viewport_size();
+        let body = match step {
+            Step::Welcome => self.render_welcome(&theme, viewport, t),
+            Step::Theme => self.render_theme_step(&theme, cx),
+            Step::Favorites => self.render_favorites_step(&theme, cx),
+            Step::Search => self.render_search_step(&theme),
+            Step::Magic => self.render_magic_step(&theme, t, cx),
+            Step::Ready => self.render_ready_step(&theme, t, cx),
+        };
+        let steps: Vec<Step> = Step::visible(!onboarding.imports.is_empty()).collect();
+        let footer = ui::onboarding::footer((step == Step::Welcome).then_some(t))
+            .child(ui::onboarding::progress_dots(
+                &theme,
+                steps.len(),
+                steps.iter().position(|s| *s == step).unwrap_or(0),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .children((step != Step::Welcome).then(|| {
+                        ui::button::button(
+                            &theme,
+                            "onboarding-back",
+                            "Back",
+                            ui::button::Variant::Secondary,
+                            ui::button::Size::Regular,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.onboarding_go(-1, window, cx);
+                            },
+                        ))
+                    }))
+                    .child(
+                        ui::button::button(
+                            &theme,
+                            "onboarding-next",
+                            match step {
+                                Step::Welcome => "Get started  ↵",
+                                Step::Ready => "Start exploring  ↵",
+                                _ => "Continue  ↵",
+                            },
+                            ui::button::Variant::Primary,
+                            ui::button::Size::Regular,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.onboarding_go(1, window, cx);
+                            },
+                        )),
+                    ),
+            );
+        ui::onboarding::screen(&theme)
+            .track_focus(&self.focus_handle)
+            .key_context("Onboarding")
+            // Escape in the (empty) search box arrives as its bubbled
+            // ClearInput; everywhere else as a plain key.
+            .on_action(
+                cx.listener(|this, _: &search_input::ClearInput, window, cx| {
+                    this.onboarding_go(-1, window, cx);
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.platform || modifiers.control || modifiers.alt {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "enter" => this.onboarding_go(1, window, cx),
+                    "escape" => this.onboarding_go(-1, window, cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
+            .child(ui::onboarding::backdrop())
+            .child(ui::onboarding::top_row().child(
+                ui::onboarding::link(&theme, "onboarding-skip", "Skip").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.finish_onboarding(false, window, cx);
+                    },
+                )),
+            ))
+            .child(ui::onboarding::stage(body, t))
+            .child(footer)
+            .into_any_element()
+    }
+
+    fn render_welcome(
+        &self,
+        theme: &Theme,
+        viewport: gpui::Size<gpui::Pixels>,
+        t: f32,
+    ) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_8()
+            .child(ui::onboarding::intro_mark(theme, viewport, t))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_3()
+                    .child(ui::onboarding::intro_title(theme, t))
+                    .child(ui::onboarding::intro_lede(
+                        theme,
+                        "Filex is a file explorer built for speed. Every file name on \
+                         your disk, searchable as fast as you can type.",
+                        t,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_theme_step(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let settings = self.settings.read(cx).settings().clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(ui::onboarding::hero(theme, "Make it yours."))
+            .child(ui::onboarding::lede(
+                theme,
+                "Pick a look. You can change it any time in Settings.",
+            ))
+            .child(ui::onboarding::sample_rows(theme))
+            .child(ui::onboarding::field(
+                theme,
+                "Theme",
+                self.render_theme_selector(theme, settings.theme, cx),
+            ))
+            .child(ui::onboarding::field(
+                theme,
+                "Accent",
+                self.render_accent_picker(theme, settings.accent, cx),
+            ))
+            .child(ui::onboarding::field(
+                theme,
+                "Density",
+                self.render_density_selector(theme, settings.density, cx),
+            ))
+            .into_any_element()
+    }
+
+    fn render_favorites_step(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let source = if cfg!(target_os = "macos") {
+            "Finder"
+        } else if cfg!(windows) {
+            "Quick Access"
+        } else {
+            "your file manager"
+        };
+        let imports = self
+            .onboarding
+            .as_ref()
+            .map(|o| o.imports.clone())
+            .unwrap_or_default();
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(ui::onboarding::hero(theme, "Bring your favorites."))
+            .child(ui::onboarding::lede(
+                theme,
+                format!(
+                    "These folders are pinned in {source}. Ticked ones join the Filex sidebar."
+                ),
+            ))
+            .child(
+                div()
+                    .id("onboarding-imports")
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .max_h(px(280.))
+                    .overflow_y_scroll()
+                    .children(imports.into_iter().enumerate().map(|(ix, (path, on))| {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        ui::onboarding::check_row(
+                            theme,
+                            ("import", ix),
+                            name,
+                            path.display().to_string(),
+                            on,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _window, cx| {
+                                this.toggle_import(ix, cx);
+                            },
+                        ))
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_search_step(&self, theme: &Theme) -> gpui::AnyElement {
+        let files: u64 = self.daemon_status.roots.iter().map(|r| r.files).sum();
+        let onboarding = self.onboarding.as_ref();
+        let counter_caption: SharedString = if self.service.is_none() {
+            "Starting the indexer…".into()
+        } else if self.daemon_status.building {
+            "files indexed so far".into()
+        } else if let Some(took) = onboarding.and_then(|o| o.indexed_in) {
+            format!("files indexed in {:.1} s", took.as_secs_f32()).into()
+        } else {
+            "files indexed".into()
+        };
+        let latency: Option<SharedString> = self
+            .search_latency
+            .as_ref()
+            .filter(|(query, _)| !self.query.is_empty() && *query == self.query)
+            .map(|(_, took)| {
+                let ms = took.as_secs_f64() * 1000.;
+                let count = self.results.len();
+                let shown = if self.search_more {
+                    format!("{count}+")
+                } else {
+                    count.to_string()
+                };
+                format!("{shown} matches in {ms:.1} ms").into()
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(ui::onboarding::counter(
+                theme,
+                ui::onboarding::with_commas(files),
+                counter_caption,
+                self.daemon_status.building || self.service.is_none(),
+            ))
+            .child(ui::onboarding::lede(
+                theme,
+                "Now try it. Type part of any file name on your disk.",
+            ))
+            .child(
+                ui::top_bar::search_box(theme, true)
+                    .max_w_full()
+                    .h(px(44.))
+                    .text_base()
+                    .child(div().flex_1().min_w_0().child(self.search_input.clone())),
+            )
+            .child(
+                div().flex().flex_col().h(px(6. * 40.)).children(
+                    self.results
+                        .iter()
+                        .take(DEMO_RESULTS)
+                        .enumerate()
+                        .map(|(ix, row)| {
+                            ui::onboarding::result_row(
+                                theme,
+                                ix,
+                                row.name.clone(),
+                                row.path_label.clone(),
+                                row.is_dir,
+                            )
+                        }),
+                ),
+            )
+            .child(ui::onboarding::caption(
+                theme,
+                latency.unwrap_or_else(|| " ".into()),
+            ))
+            .into_any_element()
+    }
+
+    fn render_magic_step(&self, theme: &Theme, t: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let live = self.onboarding.as_ref().is_some_and(|o| o.magic_live);
+        if live {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(ui::onboarding::hero(theme, "Your turn."))
+                .child(ui::onboarding::lede(
+                    theme,
+                    "Type a command about your own files. Filex shows the plan; \
+                     Apply runs it in the main window, where you can undo it.",
+                ))
+                .child(
+                    ui::onboarding::magic_box(theme)
+                        .child(div().flex_1().min_w_0().child(self.search_input.clone())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .h(px(300.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border)
+                        .overflow_hidden()
+                        .child(self.render_magic_pane(cx)),
+                )
+                .into_any_element();
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(ui::onboarding::hero(theme, "Just say it."))
+            .child(ui::onboarding::lede(
+                theme,
+                "Magic mode turns plain English into a plan. You review every file \
+                 before anything moves.",
+            ))
+            .child(ui::onboarding::magic_demo(theme, t))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(ui::onboarding::caption(
+                        theme,
+                        "In the app: type a command in search, or click ✦ to switch modes.",
+                    ))
+                    .child(
+                        ui::button::button(
+                            theme,
+                            "magic-try",
+                            "Try it yourself",
+                            ui::button::Variant::Secondary,
+                            ui::button::Size::Small,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.go_live_magic(window, cx);
+                            },
+                        )),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_ready_step(&self, theme: &Theme, t: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let overrides = self.settings.read(cx).settings().keyboard_shortcuts.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(ui::onboarding::hero(theme, "You're all set."))
+            .child(ui::onboarding::lede(
+                theme,
+                "Three keys get you most of the way.",
+            ))
+            .child(
+                div().flex().flex_col().gap_3().children(
+                    [
+                        ("search", "Search everything, from anywhere"),
+                        ("quick_look", "Peek at a file without opening it"),
+                        ("keyboard", "See every shortcut"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (id, what))| {
+                        ui::onboarding::shortcut_tip(
+                            theme,
+                            shortcuts::hint(id, &overrides),
+                            what,
+                            ix,
+                            t,
+                        )
+                    }),
+                ),
+            )
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn favorites_step_only_appears_with_something_to_import() {
+        assert_eq!(Step::Theme.shifted(1, true), Some(Step::Favorites));
+        assert_eq!(Step::Theme.shifted(1, false), Some(Step::Search));
+        assert_eq!(Step::Search.shifted(-1, false), Some(Step::Theme));
+        assert_eq!(Step::Search.shifted(1, false), Some(Step::Magic));
+        assert_eq!(Step::Magic.shifted(1, false), Some(Step::Ready));
+        assert_eq!(Step::Welcome.shifted(-1, true), None);
+        assert_eq!(Step::Ready.shifted(1, true), None);
+    }
+
+    #[test]
+    fn a_step_hidden_after_the_fact_still_moves() {
+        // On Favorites when its imports vanish: forward goes on, not back.
+        assert_eq!(Step::Favorites.shifted(1, false), Some(Step::Search));
+    }
+
+    #[test]
+    fn index_time_is_only_claimed_for_a_build_we_watched() {
+        let start = Instant::now();
+        let mut already_built = Onboarding::new(start);
+        already_built.observe_index(false, start + Duration::from_millis(100));
+        assert_eq!(already_built.indexed_in, None);
+
+        let mut fresh = Onboarding::new(start);
+        fresh.observe_index(true, start + Duration::from_secs(1));
+        fresh.observe_index(false, start + Duration::from_secs(4));
+        fresh.observe_index(false, start + Duration::from_secs(9));
+        assert_eq!(fresh.indexed_in, Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn live_input_steps_stop_redrawing_once_settled() {
+        let mut onboarding = Onboarding::new(Instant::now());
+        let settled = ui::onboarding::STEP_IN + 0.1;
+        onboarding.step = Step::Search;
+        assert!(!onboarding.animating(settled));
+        onboarding.step = Step::Magic;
+        assert!(
+            onboarding.animating(settled),
+            "the scripted demo keeps moving"
+        );
+        onboarding.magic_live = true;
+        assert!(!onboarding.animating(settled));
+        assert!(onboarding.animating(0.), "the step still eases in");
+    }
+
+    #[test]
+    fn finishing_clears_the_flag_and_appends_new_favorites_once() {
+        let mut settings = filex::settings::Settings {
+            onboarding_pending: true,
+            favorites: vec!["/kept".into()],
+            ..Default::default()
+        };
+        finish_settings(&mut settings, vec!["/kept".into(), "/new".into()]);
+        assert!(!settings.onboarding_pending);
+        assert_eq!(
+            settings.favorites,
+            vec![PathBuf::from("/kept"), PathBuf::from("/new")]
+        );
+    }
+
+    #[test]
+    fn only_ticked_imports_are_pinned() {
+        let mut onboarding = Onboarding::new(Instant::now());
+        onboarding.imports = vec![("/a".into(), true), ("/b".into(), false)];
+        assert_eq!(onboarding.checked_imports(), vec![PathBuf::from("/a")]);
+    }
+}

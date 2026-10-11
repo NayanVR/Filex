@@ -1,0 +1,193 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Motion prototype for the onboarding flow (docs/design-onboarding.md).
+  Only effects gpui-ce can reproduce: two-stop linear gradients, opacity,
+  position, size. Every timing here is ported 1:1 to src/ui/onboarding.rs.
+  Logo layers: assets/branding/layers/{back,front,mark}.svg.
+-->
+<style>
+  :root { --bg:#181b20; --panel:#14171b; --border:#2b313a; --text:#e8edf3; --dim:#9aa5b3;
+          --sky:#28bdfc; --blue:#008fe5; --deep:#006ddc; --violet:#8b5cf6; --sel:#233e50; --ok:#7ec699; }
+  body { margin:0; font-family: Inter, var(--font-sans, system-ui), sans-serif; }
+  .wrap { display:flex; flex-direction:column; gap:12px; }
+  .bar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .bar button { font:inherit; font-size:12px; padding:5px 10px; border-radius:8px; cursor:pointer;
+                border:1px solid var(--border); background:var(--panel); color:var(--text); }
+  .bar button.on { background:var(--sky); color:var(--bg); border-color:var(--sky); }
+  .bar .t { margin-left:auto; font-size:12px; color:var(--muted-foreground, #888); font-variant-numeric:tabular-nums; }
+  .win { position:relative; height:460px; border-radius:12px; overflow:hidden; color:var(--text);
+         border:1px solid var(--border); background:linear-gradient(180deg, #0b1220, var(--bg)); }
+  .lights { position:absolute; left:12px; top:12px; display:flex; gap:7px; z-index:9 }
+  .lights i { width:11px; height:11px; border-radius:50%; background:#ff5f57 } .lights i:nth-child(2){background:#febc2e} .lights i:nth-child(3){background:#28c840}
+  .band { position:absolute; height:180px; width:70%; }
+  .chip { position:absolute; white-space:nowrap; font-size:11px; padding:3px 8px; border-radius:6px;
+          background:rgba(20,23,27,.85); border:1px solid #2b313a; color:var(--dim); transform:translate(-50%,-50%); }
+  .abs { position:absolute; transform:translate(-50%,-50%); }
+  .center { position:absolute; left:0; right:0; text-align:center; }
+  h1 { margin:0; font-size:32px; font-weight:800; letter-spacing:-.02em }
+  .lede { font-size:13px; color:var(--dim) }
+  .foot { position:absolute; left:48px; right:48px; bottom:22px; display:flex; justify-content:space-between; align-items:center }
+  .dots { display:flex; gap:5px; align-items:center } .dots i { height:5px; border-radius:3px; background:var(--border) }
+  .btn { font-size:12px; padding:7px 12px; border-radius:8px; background:linear-gradient(90deg,var(--sky),var(--deep)); color:white; font-weight:600 }
+  .col { position:absolute; left:50%; width:440px; margin-left:-220px; }
+  .row { display:flex; gap:10px; align-items:center; height:28px; padding:0 10px; border-radius:7px; font-size:12px }
+  .gborder { padding:1.5px; border-radius:11px; background:linear-gradient(90deg,var(--sky),var(--violet)); }
+  .gborder > div { border-radius:10px; background:#11151b; }
+  .pill { display:inline-flex; align-items:center; font-size:11px; padding:3px 9px; border-radius:999px; color:white;
+          background:linear-gradient(90deg, rgba(40,189,252,.35), rgba(139,92,246,.35)); border:1px solid rgba(139,92,246,.5) }
+  table { border-collapse:collapse; font-size:12px; width:100%; }
+  td, th { text-align:left; padding:4px 8px; border-bottom:1px solid var(--border, #333); vertical-align:top }
+  th { color: var(--muted-foreground, #888); font-weight:500 }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar" id="bar">
+    <button data-s="intro" class="on">1 · Intro</button>
+    <button data-s="search">2 · Search</button>
+    <button data-s="magic">3 · Magic mode</button>
+    <button id="replay">↻ Replay</button>
+    <span class="t" id="clock">0.00 s</span>
+  </div>
+  <div class="win" id="win"></div>
+  <table>
+    <tr><th>Scene</th><th>Beat</th><th>Window (s)</th><th>Curve</th></tr>
+    <tr><td rowspan="7">Intro (3.4 s)</td><td>Aurora: two brand-blue gradient bands drift behind everything</td><td>always</td><td>sine drift</td></tr>
+    <tr><td>Warp: 40 file names burst out from the centre past the window edge; a file counter races to 2.4 M</td><td>0.05–1.10</td><td>ease-in cubic</td></tr>
+    <tr><td>Implode: 24 names rush in from the edges into the centre</td><td>0.95–1.55</td><td>ease-in cubic</td></tr>
+    <tr><td>Burst: gradient disc flashes out, three shockwave rings follow</td><td>1.50 / 1.55, 1.70, 1.85</td><td>ease_out_quint</td></tr>
+    <tr><td>Logo assembles: back folder drops in, front panel rises, “fx” pops with overshoot</td><td>1.50 / 1.62 / 1.80</td><td>back-out</td></tr>
+    <tr><td>Shine sweeps across the logo; halo starts breathing; logo floats</td><td>2.25–2.75, then loop</td><td>ease_out_quint, sine</td></tr>
+    <tr><td>“Find anything.” + blue “Instantly.”, lede, footer rise</td><td>2.30 / 2.55 / 2.80</td><td>ease_out_quint</td></tr>
+    <tr><td>Search</td><td>Placeholder reads “resume pdf”; results paint instantly, no animation on the search path</td><td>—</td><td>—</td></tr>
+    <tr><td>Magic (7 s loop)</td><td>Command types out → parsed chips pop → plan rows cascade → Apply glows → fade, repeat</td><td>0.3–2.6 / 2.7 / 3.3 / 4.4 / 6.4</td><td>ease_out_quint, back-out</td></tr>
+  </table>
+</div>
+<script>
+const LOGO = { back: '../assets/branding/layers/back.svg',
+               front: '../assets/branding/layers/front.svg',
+               mark: '../assets/branding/layers/mark.svg' };
+const win = document.getElementById('win'), clock = document.getElementById('clock');
+const quint = t => 1 - Math.pow(1 - t, 5), cubicIn = t => t * t * t;
+const backOut = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+const beat = (t, a, b) => Math.min(1, Math.max(0, (t - a) / (b - a)));
+const NAMES = ['budget-2026.xlsx','IMG_2041.jpg','main.rs','Resume.pdf','notes.md','invoice_0193.pdf','holiday.mov',
+  'design-v3.fig','package.json','DSC_8812.raw','taxes','README.md','podcast.mp3','Screenshot 14.02.png','thesis.docx',
+  'archive.zip','index.html','Projects','report-q3.key','song.flac','lib.rs','Passport scan.pdf','wedding-01.heic','kicad.sch'];
+const OUT = 40, IN = 24;
+const angle = i => i * 2.399963;
+const W = () => win.clientWidth, H = () => win.clientHeight;
+const LOGO_W = 150, LOGO_H = LOGO_W * 601 / 700, CY = 0.40;
+
+function aurora(t) {
+  const a = document.getElementById('b1'), b = document.getElementById('b2');
+  if (!a) return;
+  a.style.left = (-10 + 8 * Math.sin(t * 0.35)) + '%'; a.style.top = (8 + 4 * Math.sin(t * 0.5)) + '%';
+  b.style.right = (-12 + 8 * Math.cos(t * 0.3)) + '%'; b.style.bottom = (6 + 5 * Math.cos(t * 0.45)) + '%';
+}
+// A soft band is two mirrored two-stop gradients side by side.
+const band = (id, color, pos) => `<div class="band" id="${id}" style="${pos};display:flex;opacity:.55">
+  <div style="flex:1;background:linear-gradient(90deg,transparent,${color})"></div>
+  <div style="flex:1;background:linear-gradient(90deg,${color},transparent)"></div></div>`;
+const backdrop = () => band('b1', 'rgba(0,109,220,.28)', 'left:-10%;top:8%') + band('b2', 'rgba(40,189,252,.20)', 'right:-12%;bottom:6%');
+
+let scene = 'intro', t0 = performance.now();
+const scenes = {
+  intro: { len: 3.4, loop: false, build() {
+      let html = backdrop();
+      for (let i = 0; i < OUT; i++) html += `<div class="chip" id="o${i}">${NAMES[i % NAMES.length]}</div>`;
+      for (let i = 0; i < IN; i++) html += `<div class="chip" id="n${i}">${NAMES[(i * 7) % NAMES.length]}</div>`;
+      html += `<div class="center" id="counter" style="top:${CY * 100 - 5}%"><span style="font-size:44px;font-weight:800;font-variant-numeric:tabular-nums;color:white" id="num">0</span><div class="lede">file names</div></div>`;
+      html += `<div class="abs" id="halo3" style="border-radius:50%;background:rgba(40,189,252,.05)"></div><div class="abs" id="halo2" style="border-radius:50%;background:rgba(40,189,252,.07)"></div><div class="abs" id="halo1" style="border-radius:50%;background:rgba(40,189,252,.10)"></div>`;
+      html += `<div class="abs" id="burst" style="border-radius:50%;background:linear-gradient(180deg,rgba(40,189,252,.55),rgba(0,109,220,.0))"></div>`;
+      for (let r = 0; r < 3; r++) html += `<div class="abs" id="ring${r}" style="border-radius:50%;border:2px solid var(--sky)"></div>`;
+      html += `<div class="abs" id="logo" style="width:${LOGO_W}px;height:${LOGO_H}px;overflow:hidden;border-radius:14px">
+        <img id="lb" src="${LOGO.back}" style="position:absolute;left:0;top:0;width:100%">
+        <img id="lf" src="${LOGO.front}" style="position:absolute;left:0;top:0;width:100%">
+        <img id="lm" src="${LOGO.mark}" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)">
+        <div id="shine" style="position:absolute;top:0;bottom:0;width:50px;display:flex"><div style="flex:1;background:linear-gradient(90deg,transparent,rgba(255,255,255,.35))"></div><div style="flex:1;background:linear-gradient(90deg,rgba(255,255,255,.35),transparent)"></div></div></div>`;
+      html += `<div class="center" id="title" style="top:61%"><h1>Find anything. <span style="color:var(--sky)">Instantly.</span></h1></div>
+        <div class="center lede" id="lede" style="top:73%">Every file name on your disk, searchable as fast as you can type.</div>
+        <div class="foot" id="foot">${dots(0)}<div class="btn">Get started ↵</div></div>`;
+      return html; },
+    frame(t) {
+      const cx = W() / 2, cy = H() * CY, reach = Math.max(W(), H()) * 0.75;
+      aurora(t);
+      for (let i = 0; i < OUT; i++) { // warp outward
+        const el = document.getElementById('o' + i), start = 0.05 + (i % 8) * 0.04;
+        const p = beat(t, start, start + 0.75), d = cubicIn(p) * reach + 30;
+        el.style.left = cx + Math.cos(angle(i)) * d + 'px'; el.style.top = cy + Math.sin(angle(i)) * d * 0.7 + 'px';
+        el.style.opacity = p > 0 && p < 1 ? Math.min(1, p * 5) * (1 - p) : 0; }
+      for (let i = 0; i < IN; i++) { // implode inward
+        const el = document.getElementById('n' + i), start = 0.95 + (i % 6) * 0.03;
+        const p = beat(t, start, start + 0.5), d = (1 - cubicIn(p)) * reach;
+        el.style.left = cx + Math.cos(angle(i) + 0.4) * d + 'px'; el.style.top = cy + Math.sin(angle(i) + 0.4) * d * 0.7 + 'px';
+        el.style.opacity = p > 0 && p < 1 ? Math.min(1, p * 4) : 0; }
+      const counter = document.getElementById('counter');
+      document.getElementById('num').textContent = Math.floor(2481337 * quint(beat(t, 0.1, 1.0))).toLocaleString('en-US');
+      counter.style.opacity = Math.min(beat(t, 0.05, 0.3), 1 - beat(t, 0.95, 1.2));
+      const burst = quint(beat(t, 1.5, 2.1)), bd = 40 + 560 * burst, be = document.getElementById('burst');
+      Object.assign(be.style, { width: bd + 'px', height: bd + 'px', left: cx + 'px', top: cy + 'px', opacity: burst > 0 ? 1 - burst : 0 });
+      for (let r = 0; r < 3; r++) { const p = quint(beat(t, 1.55 + r * 0.15, 2.3 + r * 0.15)), d = LOGO_W + 320 * p, el = document.getElementById('ring' + r);
+        Object.assign(el.style, { width: d + 'px', height: d + 'px', left: cx + 'px', top: cy + 'px', opacity: p > 0 ? 0.8 * (1 - p) : 0 }); }
+      const breathe = t > 2 ? 0.5 + 0.5 * Math.sin((t - 2) * 2.2) : 0, haloIn = quint(beat(t, 1.6, 2.4));
+      [[1, 230], [2, 330], [3, 460]].forEach(([k, s]) => { const el = document.getElementById('halo' + k), d = s * (0.92 + 0.08 * breathe) * haloIn;
+        Object.assign(el.style, { width: d + 'px', height: d + 'px', left: cx + 'px', top: cy + 'px' }); });
+      const float = t > 2.6 ? 4 * Math.sin((t - 2.6) * 1.8) : 0, logo = document.getElementById('logo');
+      logo.style.left = cx + 'px'; logo.style.top = cy + float + 'px';
+      const pb = backOut(beat(t, 1.5, 2.0)), pf = backOut(beat(t, 1.62, 2.12)), pm = backOut(beat(t, 1.8, 2.3));
+      Object.assign(document.getElementById('lb').style, { top: -80 * (1 - pb) + 'px', opacity: Math.min(1, pb * 3) });
+      Object.assign(document.getElementById('lf').style, { top: 80 * (1 - pf) + 'px', opacity: Math.min(1, pf * 3) });
+      const ms = Math.max(0, LOGO_W * pm); Object.assign(document.getElementById('lm').style, { width: ms + 'px', opacity: Math.min(1, pm * 3) });
+      const sh = quint(beat(t, 2.25, 2.75)); document.getElementById('shine').style.left = (-60 + (LOGO_W + 120) * sh) + 'px';
+      document.getElementById('shine').style.opacity = sh > 0 && sh < 1 ? 1 : 0;
+      rise('title', t, 2.3); rise('lede', t, 2.55); rise('foot', t, 2.8); } },
+  search: { len: 2, loop: false, build() {
+      return backdrop() + `<div class="col" style="top:70px">
+        <div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:38px;font-weight:800;color:var(--sky)">312,481</span><span class="lede" style="color:var(--ok)">files indexed in 3.2 s</span></div>
+        <p class="lede">Now try it. Type part of any file name on your disk.</p>
+        <div class="gborder"><div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;font-size:14px;color:#6b7684">⌕ <span style="width:1px;height:16px;background:var(--sky)"></span>resume pdf</div></div>
+        <div style="height:150px"></div></div><div class="foot">${dots(3)}<div class="btn">Continue ↵</div></div>`; },
+    frame(t) { aurora(t); } },
+  magic: { len: 7, loop: true, build() {
+      return backdrop() + `<div class="col" style="top:56px"><h1>Just say it.</h1>
+        <p class="lede">Magic mode turns plain English into a plan. You review every file before anything moves.</p>
+        <div class="gborder"><div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;font-size:14px"><span style="color:var(--violet)">✦</span><span id="cmd"></span><span id="caret" style="width:1px;height:16px;background:var(--violet)"></span></div></div>
+        <div id="chips" style="display:flex;gap:6px;margin:10px 0;height:22px"></div>
+        <div id="plan" style="border:1px solid var(--border);border-radius:10px;background:rgba(20,23,27,.9);padding:4px;min-height:120px"></div>
+        <div id="apply" style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--dim)"><span>4 files · nothing moves until you confirm</span><span class="btn" id="applybtn" style="background:linear-gradient(90deg,var(--sky),var(--violet))">Apply</span></div>
+        </div><div class="foot">${dots(4)}<div class="btn">Continue ↵</div></div>`; },
+    frame(t) { aurora(t);
+      const CMD = 'move screenshots older than 30 days to Archive';
+      const n = Math.floor(CMD.length * beat(t, 0.3, 2.6)), out = 1 - beat(t, 6.4, 7.0);
+      document.getElementById('cmd').textContent = CMD.slice(0, n);
+      document.getElementById('cmd').style.opacity = out;
+      document.getElementById('caret').style.opacity = Math.floor(t * 2.5) % 2 ? 0 : 1;
+      const chips = ['Move', 'Screenshots', 'Older than 30 days', '→ Archive'];
+      document.getElementById('chips').innerHTML = chips.map((c, i) => { const p = backOut(beat(t, 2.7 + i * 0.12, 3.1 + i * 0.12));
+        return `<span class="pill" style="opacity:${Math.min(1, p * 2) * out};transform:translateY(${8 * (1 - p)}px)">${c}</span>`; }).join('');
+      const rows = ['Screenshot 2026-08-02 at 10.14.png', 'Screenshot 2026-08-19 at 18.40.png', 'Screenshot 2026-09-03 at 09.02.png', 'Screenshot 2026-09-07 at 21.33.png'];
+      document.getElementById('plan').innerHTML = rows.map((r, i) => { const p = quint(beat(t, 3.3 + i * 0.12, 3.8 + i * 0.12));
+        return `<div class="row" style="opacity:${p * out};margin-left:${-16 * (1 - p)}px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r}</span><span style="color:var(--dim)">~/Desktop</span><span style="color:var(--violet)">→</span><span>Archive</span></div>`; }).join('');
+      const a = quint(beat(t, 4.4, 4.9)); document.getElementById('apply').style.opacity = a * out;
+      const glow = t > 4.9 ? 0.5 + 0.5 * Math.sin((t - 4.9) * 4) : 0;
+      document.getElementById('applybtn').style.boxShadow = `0 0 ${6 + 14 * glow}px rgba(139,92,246,${0.25 + 0.35 * glow})`; } },
+};
+function dots(cur, id) { return `<div class="dots" ${id ? `id="${id}"` : ''}>${[0,1,2,3,4,5].map(i => `<i style="width:${i==cur?20:6}px;${i==cur?'background:var(--sky)':''}"></i>`).join('')}</div>`; }
+function rise(id, t, at) { const p = quint(beat(t, at, at + 0.6)), el = document.getElementById(id);
+  el.style.opacity = p; el.style.transform = `translateY(${14 * (1 - p)}px)`; }
+function start(s) { scene = s; t0 = performance.now();
+  win.innerHTML = '<div class="lights"><i></i><i></i><i></i></div>' + scenes[s].build();
+  document.querySelectorAll('#bar button[data-s]').forEach(b => b.classList.toggle('on', b.dataset.s === s)); }
+document.querySelectorAll('#bar button[data-s]').forEach(b => b.onclick = () => start(b.dataset.s));
+document.getElementById('replay').onclick = () => start(scene);
+function tick(now) { const sc = scenes[scene]; let t = (now - t0) / 1000;
+  t = sc.loop ? t % sc.len : Math.min(t, sc.len);
+  sc.frame(t); clock.textContent = t.toFixed(2) + ' s'; requestAnimationFrame(tick); }
+start('intro'); requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -116,10 +116,13 @@ pub fn file_icon(theme: &Theme, kind: FileKind, name: &str, edge: f32) -> AnyEle
 /// All file cells share one raster and atlas entry, independent of extension.
 fn file_image() -> Option<Arc<RenderImage>> {
     static IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::new(|| {
-        match render_icon_svg(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/assets/icons/file.svg"
-        ))) {
+        match render_icon_svg(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/icons/file.svg"
+            )),
+            256,
+        ) {
             Ok(image) => Some(image),
             Err(err) => {
                 tracing::warn!("could not render file artwork: {err:#}");
@@ -179,7 +182,7 @@ fn folder_image(accent: Rgba) -> Option<Arc<RenderImage>> {
         return Some(image.clone());
     }
     let svg = recolored_folder_svg(accent);
-    match render_icon_svg(&svg) {
+    match render_icon_svg(&svg, 256) {
         Ok(image) => {
             *cached = Some((accent, image.clone()));
             Some(image)
@@ -191,21 +194,22 @@ fn folder_image(accent: Rgba) -> Option<Arc<RenderImage>> {
     }
 }
 
-fn render_icon_svg(svg: &str) -> anyhow::Result<Arc<RenderImage>> {
+fn render_icon_svg(svg: &str, edge: u32) -> anyhow::Result<Arc<RenderImage>> {
     let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default())?;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(256, 256)
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(edge, edge)
         .ok_or_else(|| anyhow::anyhow!("could not allocate icon image"))?;
     // Fit both the square folder and the portrait document into the same
     // square cell, preserving their proportions and transparent margins.
     let size = tree.size();
-    let scale = 256. / size.width().max(size.height());
+    let side = edge as f32;
+    let scale = side / size.width().max(size.height());
     let transform = resvg::tiny_skia::Transform::from_row(
         scale,
         0.,
         0.,
         scale,
-        (256. - size.width() * scale) / 2.,
-        (256. - size.height() * scale) / 2.,
+        (side - size.width() * scale) / 2.,
+        (side - size.height() * scale) / 2.,
     );
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     // tiny-skia gives us premultiplied RGBA. GPUI's RenderImage expects
@@ -220,9 +224,50 @@ fn render_icon_svg(svg: &str) -> anyhow::Result<Arc<RenderImage>> {
             }
         }
     }
-    let pixels = image::RgbaImage::from_raw(256, 256, data)
+    let pixels = image::RgbaImage::from_raw(edge, edge, data)
         .ok_or_else(|| anyhow::anyhow!("invalid icon image dimensions"))?;
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
+}
+
+/// One layer of the Filex mark, split from `assets/branding/filex.svg` so
+/// onboarding can assemble the logo piece by piece. Every layer keeps the
+/// full canvas, so stacked at the same size they reproduce the mark exactly.
+#[derive(Clone, Copy)]
+pub enum LogoLayer {
+    /// The rear folder with its tab.
+    Back,
+    /// The front panel.
+    Front,
+    /// The "fx" monogram.
+    Mark,
+}
+
+/// Width over height of the logo canvas (700×601).
+pub const LOGO_ASPECT: f32 = 700. / 601.;
+
+/// A logo layer, rasterized once at 512 px (sharp up to ~250 pt on 2× screens).
+pub fn logo_layer(layer: LogoLayer) -> Option<Arc<RenderImage>> {
+    macro_rules! layer {
+        ($name:literal) => {{
+            static IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::new(|| {
+                let svg = include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/assets/branding/layers/",
+                    $name,
+                    ".svg"
+                ));
+                render_icon_svg(svg, 512)
+                    .inspect_err(|err| tracing::warn!("could not render logo layer: {err:#}"))
+                    .ok()
+            });
+            IMAGE.clone()
+        }};
+    }
+    match layer {
+        LogoLayer::Back => layer!("back"),
+        LogoLayer::Front => layer!("front"),
+        LogoLayer::Mark => layer!("mark"),
+    }
 }
 
 fn color_hex(color: Rgba) -> u32 {
@@ -340,6 +385,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_logo_layer_renders() {
+        for layer in [LogoLayer::Back, LogoLayer::Front, LogoLayer::Mark] {
+            assert!(logo_layer(layer).is_some());
+        }
+    }
+
+    #[test]
     fn common_folder_names_get_symbols_without_content_scans() {
         assert_eq!(
             automatic_folder_icon(Path::new("/tmp/Photos")),
@@ -374,8 +426,8 @@ mod tests {
 
     #[test]
     fn recolored_vector_renders_with_transparency() {
-        let blue = render_icon_svg(&recolored_folder_svg(0x3b82f6)).unwrap();
-        let orange = render_icon_svg(&recolored_folder_svg(0xf97316)).unwrap();
+        let blue = render_icon_svg(&recolored_folder_svg(0x3b82f6), 256).unwrap();
+        let orange = render_icon_svg(&recolored_folder_svg(0xf97316), 256).unwrap();
         assert_eq!(blue.size(0).width.0, 256);
         assert_eq!(&blue.as_bytes(0).unwrap()[0..4], &[0, 0, 0, 0]);
         assert_ne!(blue.as_bytes(0), orange.as_bytes(0));

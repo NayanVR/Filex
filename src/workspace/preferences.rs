@@ -292,6 +292,24 @@ impl Workspace {
                         "Density",
                         "Give files more room or fit more on screen",
                         self.render_density_selector(&theme, settings.density, cx),
+                    ))
+                    .child(ui::settings_pane::action_row(
+                        &theme,
+                        "Welcome tour",
+                        "Replay the first-run welcome and import pinned folders",
+                        ui::button::button(
+                            &theme,
+                            "replay-welcome",
+                            "Replay",
+                            ui::button::Variant::Secondary,
+                            ui::button::Size::Small,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.start_onboarding(cx);
+                                window.focus(&this.focus_handle, cx);
+                            },
+                        )),
                     )),
             );
         } else if section == SettingsSection::Keyboard {
