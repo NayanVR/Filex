@@ -156,7 +156,12 @@ impl FileKind {
         else {
             return Self::Other;
         };
-        match ext.as_str() {
+        Self::of_extension(&ext)
+    }
+
+    /// The kind a lowercase extension (no dot) implies.
+    pub fn of_extension(ext: &str) -> Self {
+        match ext {
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" => Self::Image,
             "mp4" | "mkv" | "mov" | "avi" | "webm" | "m4v" => Self::Video,
             "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => Self::Audio,

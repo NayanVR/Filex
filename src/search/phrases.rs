@@ -106,12 +106,47 @@ fn kind_word(kind: FileKind) -> &'static str {
 
 /// Words that glue phrases together but carry no meaning alone. Dropped
 /// only when adjacent to something that matched, so a file named `my` or
-/// `all` stays findable. The tail is the verbs that introduce a date
-/// ("photos *modified* last week"), which is why `modified config` keeps
-/// both words.
+/// `all` stays findable. The verbs introduce a date or describe what the
+/// user did ("photos *modified* last week", "pics I *took* yesterday"),
+/// which is why `modified config` keeps both words. `files` reads as
+/// noise next to a match ("rust *files*") and as a name on its own.
 const FILLER: &[&str] = &[
-    "from", "my", "the", "of", "on", "at", "a", "an", "some", "any", "modified", "created",
+    "from",
+    "in",
+    "my",
+    "the",
+    "of",
+    "on",
+    "at",
+    "a",
+    "an",
+    "some",
+    "any",
+    "all",
+    "that",
+    "those",
+    "these",
+    "for",
+    "i",
+    "files",
+    "file",
+    "really",
+    "very",
+    "super",
+    "modified",
+    "created",
     "changed",
+    "edited",
+    "saved",
+    "updated",
+    "downloaded",
+    "took",
+    "taken",
+    "made",
+    "signed",
+    "sent",
+    "received",
+    "shared",
 ];
 
 const MONTHS: [&str; 12] = [
@@ -127,6 +162,23 @@ const MONTHS: [&str; 12] = [
     "october",
     "november",
     "december",
+];
+
+/// Three-letter month abbreviations, plus `sept`. Only ever read after a
+/// preposition, like full month names.
+const MONTH_ABBREVIATIONS: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+/// Sunday first, matching [`weekday_of`].
+const WEEKDAYS: [&str; 7] = [
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
 ];
 
 /// Read `raw` as natural language, returning the residual filename text
@@ -231,21 +283,20 @@ fn is_filler(word: &str) -> bool {
     FILLER.contains(&word.to_ascii_lowercase().as_str())
 }
 
-/// Words that open a comparative phrase — see [`comparative`]. Kept in
-/// sync with the match arms there; a lead listed here but not handled
-/// there just means a failed comparative stays text, which is the safe
-/// direction.
+/// Words that open a comparative phrase — see [`comparative`] and
+/// [`size_threshold`]. A lead listed here but not handled there just
+/// means a failed comparative stays text, which is the safe direction.
 const COMPARATIVE_LEADS: &[&str] = &["older", "newer", "bigger", "larger", "smaller"];
 
 fn is_comparative_lead(word: &str) -> bool {
     COMPARATIVE_LEADS.contains(&word.to_ascii_lowercase().as_str())
 }
 
-/// The most words one phrase can span. Four is what the longest
-/// supported form needs (`older than 30 days`); the cost is a fixed
+/// The most words one phrase can span. Five is what the longest
+/// supported form needs (`a couple of days ago`); the cost is a fixed
 /// handful of table probes per word of a short query string, nowhere
 /// near the index scan.
-const MAX_PHRASE_WORDS: usize = 4;
+const MAX_PHRASE_WORDS: usize = 5;
 
 /// Try to match a phrase at the start of `words`, longest first.
 /// Returns how many words it consumed and what they mean.
@@ -261,31 +312,11 @@ fn match_at(words: &[&str], now: i64) -> Option<(usize, Vec<Filter>)> {
 
 /// The phrase table. One place to add vocabulary.
 fn lookup(phrase: &str, now: i64) -> Option<Vec<Filter>> {
-    // Kinds.
-    let kind = match phrase {
-        "photos" | "pictures" | "images" | "photo" | "picture" | "image" => Some(FileKind::Image),
-        "videos" | "movies" | "video" | "movie" => Some(FileKind::Video),
-        "music" | "songs" | "audio" | "song" => Some(FileKind::Audio),
-        "documents" | "document" | "docs" => Some(FileKind::Document),
-        "folders" | "directories" | "folder" => Some(FileKind::Directory),
-        "code" | "source code" => Some(FileKind::Code),
-        "archives" | "zips" | "archive" => Some(FileKind::Archive),
-        _ => None,
-    };
-    if let Some(kind) = kind {
+    if let Some(kind) = kind_of(phrase) {
         return Some(vec![Filter::Kind(kind)]);
     }
-
-    // Extensions that read as words.
-    match phrase {
-        "pdfs" | "pdf" => return Some(vec![Filter::Ext("pdf".into())]),
-        // A screenshot is an image *named* like one; the index has no
-        // screenshot bit, so this is deliberately two filters and the
-        // caller sees both.
-        "screenshots" | "screenshot" => {
-            return Some(vec![Filter::Kind(FileKind::Image)]);
-        }
-        _ => {}
+    if let Some(ext) = ext_of(phrase) {
+        return Some(vec![Filter::Ext(ext)]);
     }
 
     // Sizes. Thresholds are round numbers a person would recognize, not
@@ -295,118 +326,402 @@ fn lookup(phrase: &str, now: i64) -> Option<Vec<Filter>> {
             return Some(vec![Filter::Size(Bound::Gt(100 * 1024 * 1024))]);
         }
         "small" | "tiny" => return Some(vec![Filter::Size(Bound::Lt(1024 * 1024))]),
-        "empty" => return Some(vec![Filter::Size(Bound::Eq(0))]),
+        "empty" | "zero byte" | "zero bytes" | "zero-byte" | "0 bytes" => {
+            return Some(vec![Filter::Size(Bound::Eq(0))]);
+        }
         _ => {}
     }
 
-    if let Some(filters) = comparative(phrase, now) {
-        return Some(filters);
+    if let Some(filter) = size_threshold(phrase).or_else(|| comparative(phrase, now)) {
+        return Some(vec![filter]);
     }
 
     time_phrase(phrase, now).map(|bound| vec![Filter::Modified(bound)])
 }
 
-/// Comparative phrases carrying an open-ended operand: `older than 30
-/// days`, `bigger than 10mb` — parsed rather than looked up in the table
-/// above. The literal `than` is required: nobody types `older 30 days`,
-/// and matching loosely would start claiming words out of filenames.
-fn comparative(phrase: &str, now: i64) -> Option<Vec<Filter>> {
-    let (word, operand) = phrase.split_once(" than ")?;
-    let filter = match word {
-        // Older = modified *before* the threshold, so the comparator
-        // flips relative to the word — same inversion `modified:>30d`
-        // makes in the `key:value` grammar.
-        "older" => Filter::Modified(Bound::Lt(now.saturating_sub(duration_secs(operand)?))),
-        "newer" => Filter::Modified(Bound::Gt(now.saturating_sub(duration_secs(operand)?))),
-        "bigger" | "larger" => Filter::Size(Bound::Gt(parse_bytes(operand)?)),
-        "smaller" => Filter::Size(Bound::Lt(parse_bytes(operand)?)),
+/// Words naming a broad kind of file, singular and plural. A screenshot
+/// is an image *named* like one; the index has no screenshot bit.
+fn kind_of(phrase: &str) -> Option<FileKind> {
+    Some(match phrase {
+        "photos" | "pictures" | "images" | "photo" | "picture" | "image" | "pics" | "pic"
+        | "snaps" | "screenshots" | "screenshot" | "wallpapers" => FileKind::Image,
+        "videos" | "movies" | "video" | "movie" | "clips" | "films" | "footage" => FileKind::Video,
+        "music" | "songs" | "audio" | "song" | "tracks" | "podcasts" => FileKind::Audio,
+        "documents" | "document" | "docs" | "spreadsheets" | "spreadsheet" | "sheets" | "excel"
+        | "slides" | "presentations" => FileKind::Document,
+        "folders" | "directories" | "folder" | "dirs" => FileKind::Directory,
+        "code" | "source code" | "scripts" | "source files" => FileKind::Code,
+        "archives" | "zips" | "archive" | "zip" => FileKind::Archive,
         _ => return None,
-    };
-    Some(vec![filter])
+    })
 }
 
-/// A spoken duration — `30 days`, `2 weeks`, `1 year` — or the compact
-/// `30d` the `modified:` grammar accepts, in seconds. Months and years are
-/// the same rounded 30/365 days used throughout; nobody typing "older than
-/// 6 months" means a calendar-exact boundary.
+/// Languages people name instead of their extension ("rust files").
+const LANGUAGE_EXTENSIONS: &[(&str, &str)] = &[
+    ("rust", "rs"),
+    ("python", "py"),
+    ("javascript", "js"),
+    ("typescript", "ts"),
+    ("golang", "go"),
+    ("ruby", "rb"),
+    ("kotlin", "kt"),
+];
+
+/// Known extensions that are also everyday words; as a query word they
+/// are far likelier to be part of a name.
+const EXTENSION_HOMONYMS: &[&str] = &["opus", "swift"];
+
+/// An extension spoken as a word — `pdfs`, `mp3s`, `docx`, `python` —
+/// for any extension [`FileKind::of`] already classifies. Two-letter
+/// extensions (`rs`, `go`, `md`) are too short to tell from ordinary
+/// words, so they only arrive via [`LANGUAGE_EXTENSIONS`].
+fn ext_of(phrase: &str) -> Option<String> {
+    if let Some((_, ext)) = LANGUAGE_EXTENSIONS.iter().find(|(word, _)| *word == phrase) {
+        return Some((*ext).to_string());
+    }
+    [Some(phrase), phrase.strip_suffix('s')]
+        .into_iter()
+        .flatten()
+        .find(|ext| {
+            ext.len() >= 3
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && !EXTENSION_HOMONYMS.contains(ext)
+                && FileKind::of_extension(ext) != FileKind::Other
+        })
+        .map(str::to_string)
+}
+
+/// Comparative age phrases carrying an open-ended operand: `older than
+/// 30 days`, `newer than a week` — parsed rather than looked up in the
+/// table above. The literal `than` is required: nobody types `older 30
+/// days`, and matching loosely would start claiming words out of
+/// filenames.
+fn comparative(phrase: &str, now: i64) -> Option<Filter> {
+    let (word, operand) = phrase.split_once(" than ")?;
+    // Older = modified *before* the threshold, so the comparator flips
+    // relative to the word — same inversion `modified:>30d` makes in the
+    // `key:value` grammar.
+    let threshold = now.saturating_sub(duration_secs(operand)?);
+    match word {
+        "older" => Some(Filter::Modified(Bound::Lt(threshold))),
+        "newer" => Some(Filter::Modified(Bound::Gt(threshold))),
+        _ => None,
+    }
+}
+
+/// Builds a size bound from its operand: `Bound::Gt`, `Bound::Lt`, ….
+type SizeBound = fn(u64) -> Bound<u64>;
+
+/// Size comparisons and the comparator each lead implies.
+const SIZE_LEADS: &[(&str, SizeBound)] = &[
+    ("bigger than", Bound::Gt),
+    ("larger than", Bound::Gt),
+    ("more than", Bound::Gt),
+    ("over", Bound::Gt),
+    ("above", Bound::Gt),
+    ("smaller than", Bound::Lt),
+    ("less than", Bound::Lt),
+    ("under", Bound::Lt),
+    ("below", Bound::Lt),
+    ("at least", Bound::Ge),
+    ("at most", Bound::Le),
+];
+
+/// `over 20 megabytes`, `smaller than 500kb`, `at least a gigabyte`. The
+/// operand must carry a unit — "kids under 5" is a name, not a size.
+fn size_threshold(phrase: &str) -> Option<Filter> {
+    SIZE_LEADS.iter().find_map(|(lead, bound)| {
+        let operand = phrase.strip_prefix(lead)?.strip_prefix(' ')?;
+        Some(Filter::Size(bound(spoken_bytes(operand)?)))
+    })
+}
+
+/// A size with a unit: compact (`10mb`, `1.5gb`) or spoken (`20
+/// megabytes`, `a gigabyte`, `2 gigs`).
+fn spoken_bytes(text: &str) -> Option<u64> {
+    match *text.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [compact] if compact.contains(|c: char| c.is_ascii_alphabetic()) => parse_bytes(compact),
+        [count, unit] => {
+            let count = match count_word(count) {
+                Some(n) => n.to_string(),
+                None => count.to_string(),
+            };
+            parse_bytes(&format!("{count}{}", byte_unit(unit)?))
+        }
+        _ => None,
+    }
+}
+
+fn byte_unit(word: &str) -> Option<&'static str> {
+    Some(match word.strip_suffix('s').unwrap_or(word) {
+        "byte" | "b" => "b",
+        "kilobyte" | "kb" | "k" => "kb",
+        "megabyte" | "meg" | "mb" => "mb",
+        "gigabyte" | "gig" | "gb" => "gb",
+        "terabyte" | "tb" => "tb",
+        _ => return None,
+    })
+}
+
+/// Quantities people spell out. `couple` and `few` are deliberately
+/// round: nobody typing "a few days ago" means exactly three.
+fn count_word(word: &str) -> Option<i64> {
+    Some(match word {
+        "a" | "an" | "one" => 1,
+        "two" | "couple" => 2,
+        "three" | "few" | "several" => 3,
+        "four" => 4,
+        "five" => 5,
+        "six" => 6,
+        "seven" => 7,
+        "eight" => 8,
+        "nine" => 9,
+        "ten" => 10,
+        "eleven" => 11,
+        "twelve" => 12,
+        _ => return None,
+    })
+}
+
+/// A spoken duration — `30 days`, `a couple of weeks`, `1 year` — or the
+/// compact `30d` the `modified:` grammar accepts, in seconds.
 fn duration_secs(text: &str) -> Option<i64> {
-    let (number, unit) = match text.split_once(' ') {
-        Some(split) => split,
-        None => text.split_at(text.find(|c: char| c.is_ascii_alphabetic())?),
+    let (count, unit) = count_and_unit(text)?;
+    count.checked_mul(unit)
+}
+
+/// A duration split into its count and its unit in seconds. Months and
+/// years are the same rounded 30/365 days used throughout; nobody typing
+/// "older than 6 months" means a calendar-exact boundary.
+fn count_and_unit(text: &str) -> Option<(i64, i64)> {
+    let mut words: Vec<&str> = text.split_whitespace().filter(|w| *w != "of").collect();
+    let (count, unit) = match words.as_slice() {
+        [compact] => compact.split_at(compact.find(|c: char| c.is_ascii_alphabetic())?),
+        [.., _] => {
+            let unit = words.pop()?;
+            // "a couple", "a few": the article belongs to the quantity.
+            if words.len() == 2 && matches!(words[0], "a" | "an") {
+                words.remove(0);
+            }
+            let [count] = words.as_slice() else {
+                return None;
+            };
+            (*count, unit)
+        }
+        [] => return None,
     };
-    let count: i64 = number.trim().parse().ok()?;
+    let count = count_word(count).or_else(|| count.parse().ok())?;
     if count < 0 {
         return None;
     }
-    let unit = unit.trim();
     let secs = match unit.strip_suffix('s').unwrap_or(unit) {
-        "hour" | "h" => 3_600,
+        "hour" | "hr" | "h" => 3_600,
         "day" | "d" => DAY,
-        "week" | "w" => 7 * DAY,
+        "week" | "wk" | "w" => 7 * DAY,
         "month" => 30 * DAY,
-        "year" => 365 * DAY,
+        "year" | "yr" => 365 * DAY,
         _ => return None,
     };
-    count.checked_mul(secs)
+    Some((count, secs))
 }
 
 /// Date phrases → an mtime bound. "week"/"month"/"year" are **rolling
 /// windows**, matching the existing `modified:week` keyword rather than
-/// giving the same word a second meaning. Named months and years are true
-/// calendar ranges, which is unambiguously what "in June" means.
+/// giving the same word a second meaning. Named months, days and years
+/// are true calendar ranges, which is unambiguously what "in June" means.
 fn time_phrase(phrase: &str, now: i64) -> Option<Bound<i64>> {
-    let today = start_of_day(now);
-    match phrase {
-        "today" => return Some(Bound::Ge(today)),
-        "yesterday" => return Some(Bound::Range(today - DAY, today - 1)),
-        "this week" | "recently" | "lately" | "recent" => {
-            return Some(Bound::Ge(now - 7 * DAY));
-        }
-        "last week" => return Some(Bound::Range(now - 14 * DAY, now - 7 * DAY)),
-        "this month" => return Some(Bound::Ge(now - 30 * DAY)),
-        "last month" => return Some(Bound::Range(now - 60 * DAY, now - 30 * DAY)),
-        "this year" => return Some(Bound::Ge(now - 365 * DAY)),
-        "last year" => return Some(Bound::Range(now - 730 * DAY, now - 365 * DAY)),
-        _ => {}
+    if let Some(bound) = relative_keyword(phrase, now) {
+        return Some(bound);
+    }
+    if let Some(bound) = rolling_window(phrase, now) {
+        return Some(bound);
+    }
+    if let Some(day) = phrase.strip_prefix("last ").and_then(weekday_index) {
+        let start = previous_weekday(start_of_day(now), day);
+        return Some(Bound::Range(start, start + DAY - 1));
+    }
+    if let Some(rest) = phrase.strip_prefix("since ") {
+        return date_span(rest, now).map(|(lo, _)| Bound::Ge(lo));
+    }
+    if let Some(rest) = phrase.strip_prefix("before ") {
+        return date_span(rest, now).map(|(lo, _)| Bound::Lt(lo));
+    }
+    if let Some(rest) = phrase.strip_prefix("after ") {
+        return date_span(rest, now).map(|(_, hi)| Bound::Gt(hi));
     }
 
-    // Named months and years require a preposition: "in june" / "from
-    // 2025". A bare "june" or "2025" is far more likely to be part of a
-    // filename ("june-plan.txt", "budget 2025"), and silently turning it
-    // into an mtime filter would hide exactly the file being looked for.
-    let dated = phrase
-        .strip_prefix("in ")
-        .or_else(|| phrase.strip_prefix("from "))?;
-
-    if let Some(month) = MONTHS.iter().position(|m| *m == dated) {
-        let month = month as i64 + 1;
-        let (year, current_month, _) = civil_from_days(today.div_euclid(DAY));
-        // If that month hasn't arrived yet this year, they mean last year.
-        let year = if month > current_month {
-            year - 1
-        } else {
-            year
-        };
-        return Some(month_range(year, month));
+    // Named months, days and years require a preposition: "in june" /
+    // "from 2025". A bare "june" or "2025" is far more likely to be part
+    // of a filename ("june-plan.txt", "budget 2025"), and silently turning
+    // it into an mtime filter would hide exactly the file being looked for.
+    let dated = ["in ", "from ", "during ", "on "]
+        .iter()
+        .find_map(|p| phrase.strip_prefix(p))?;
+    if let Some(day) = weekday_index(dated) {
+        let start = previous_weekday(start_of_day(now), day);
+        return Some(Bound::Range(start, start + DAY - 1));
     }
-
-    if let Ok(year) = dated.parse::<i64>()
-        && (1970..=2200).contains(&year)
-    {
-        return Some(Bound::Range(
-            days_from_civil(year, 1, 1) * DAY,
-            days_from_civil(year + 1, 1, 1) * DAY - 1,
-        ));
-    }
-
-    None
+    calendar(dated, start_of_day(now)).map(|(lo, hi)| Bound::Range(lo, hi))
 }
 
-/// An inclusive unix-second range covering all of calendar month `m`.
-fn month_range(y: i64, m: i64) -> Bound<i64> {
+/// Fixed relative phrases.
+fn relative_keyword(phrase: &str, now: i64) -> Option<Bound<i64>> {
+    let today = start_of_day(now);
+    Some(match phrase {
+        "today" | "this morning" | "this afternoon" | "earlier today" | "tonight" => {
+            Bound::Ge(today)
+        }
+        "yesterday" => Bound::Range(today - DAY, today - 1),
+        "this week" | "recently" | "lately" | "recent" | "past week" | "earlier this week" => {
+            Bound::Ge(now - 7 * DAY)
+        }
+        "last week" => Bound::Range(now - 14 * DAY, now - 7 * DAY),
+        "this month" | "past month" | "earlier this month" => Bound::Ge(now - 30 * DAY),
+        "last month" => Bound::Range(now - 60 * DAY, now - 30 * DAY),
+        "this year" | "past year" | "earlier this year" => Bound::Ge(now - 365 * DAY),
+        "last year" => Bound::Range(now - 730 * DAY, now - 365 * DAY),
+        "last weekend" => {
+            let saturday = last_weekend(today);
+            Bound::Range(saturday, saturday + 2 * DAY - 1)
+        }
+        _ => return None,
+    })
+}
+
+/// `past 3 days`, `last 2 weeks`, `within a month` — everything since —
+/// and `two weeks ago` — a window one unit either side, since "two weeks
+/// ago" is a rough point in time, not a boundary.
+fn rolling_window(phrase: &str, now: i64) -> Option<Bound<i64>> {
+    if let Some(span) = phrase.strip_suffix(" ago") {
+        let (count, unit) = count_and_unit(span)?;
+        let lo = now.saturating_sub(count.checked_add(1)?.checked_mul(unit)?);
+        let hi = now.saturating_sub((count - 1).max(0).checked_mul(unit)?);
+        return Some(Bound::Range(lo, hi));
+    }
+    let span = ["past ", "last ", "within "]
+        .iter()
+        .find_map(|lead| phrase.strip_prefix(lead))?;
+    Some(Bound::Ge(now.saturating_sub(duration_secs(span)?)))
+}
+
+/// The inclusive unix-second span a date names, for `since`/`before`/
+/// `after`: anything [`relative_keyword`] knows, a weekday, or a
+/// calendar date.
+fn date_span(text: &str, now: i64) -> Option<(i64, i64)> {
+    let today = start_of_day(now);
+    if let Some(bound) = relative_keyword(text, now) {
+        return match bound {
+            Bound::Range(lo, hi) => Some((lo, hi)),
+            Bound::Ge(lo) => Some((lo, now)),
+            _ => None,
+        };
+    }
+    let weekday = text.strip_prefix("last ").unwrap_or(text);
+    if let Some(day) = weekday_index(weekday) {
+        let start = previous_weekday(today, day);
+        return Some((start, start + DAY - 1));
+    }
+    calendar(text, today)
+}
+
+/// A calendar month, year, month + year, or month + day, as an
+/// inclusive unix-second span. A month or day with no year means the
+/// most recent one that has started.
+fn calendar(text: &str, today: i64) -> Option<(i64, i64)> {
+    let (year, month, _) = civil_from_days(today.div_euclid(DAY));
+    let words: Vec<&str> = text.split_whitespace().collect();
+    match words.as_slice() {
+        [word] => {
+            if let Some(m) = month_index(word) {
+                let y = if m > month { year - 1 } else { year };
+                return Some(month_range(y, m));
+            }
+            let y = plausible_year(word)?;
+            Some((
+                days_from_civil(y, 1, 1) * DAY,
+                days_from_civil(y + 1, 1, 1) * DAY - 1,
+            ))
+        }
+        [first, second] => {
+            if let (Some(m), Some(y)) = (month_index(first), plausible_year(second)) {
+                return Some(month_range(y, m));
+            }
+            let (m, d) = match (month_index(first), month_index(second)) {
+                (Some(m), _) => (m, day_of_month(second)?),
+                (_, Some(m)) => (m, day_of_month(first)?),
+                _ => return None,
+            };
+            let mut start = days_from_civil(year, m, d) * DAY;
+            if start > today {
+                start = days_from_civil(year - 1, m, d) * DAY;
+            }
+            // Reject the 31st of a 30-day month rather than rolling over.
+            let (_, real_month, _) = civil_from_days(start.div_euclid(DAY));
+            (real_month == m).then_some((start, start + DAY - 1))
+        }
+        _ => None,
+    }
+}
+
+fn month_index(word: &str) -> Option<i64> {
+    let found = MONTHS
+        .iter()
+        .position(|m| *m == word)
+        .or_else(|| MONTH_ABBREVIATIONS.iter().position(|m| *m == word))
+        .or_else(|| (word == "sept").then_some(8))?;
+    Some(found as i64 + 1)
+}
+
+fn plausible_year(word: &str) -> Option<i64> {
+    word.parse()
+        .ok()
+        .filter(|year| (1970..=2200).contains(year))
+}
+
+/// `3`, `3rd`, `21st` → a day of the month.
+fn day_of_month(word: &str) -> Option<i64> {
+    let digits = word.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &word[digits.len()..];
+    if !matches!(suffix, "" | "st" | "nd" | "rd" | "th") {
+        return None;
+    }
+    digits.parse().ok().filter(|d| (1..=31).contains(d))
+}
+
+fn weekday_index(word: &str) -> Option<i64> {
+    WEEKDAYS.iter().position(|d| *d == word).map(|d| d as i64)
+}
+
+/// Day of the week for a UTC midnight, Sunday = 0. 1970-01-01 was a
+/// Thursday.
+fn weekday_of(day_start: i64) -> i64 {
+    (day_start.div_euclid(DAY) + 4).rem_euclid(7)
+}
+
+/// The most recent `weekday` strictly before `today` — "last tuesday"
+/// said on a Tuesday means a week ago, not today.
+fn previous_weekday(today: i64, weekday: i64) -> i64 {
+    let back = (weekday_of(today) - weekday).rem_euclid(7);
+    let back = if back == 0 { 7 } else { back };
+    today - back * DAY
+}
+
+/// The Saturday starting the most recent weekend that is over. On a
+/// Sunday the current weekend is still running, so it means the one
+/// before.
+fn last_weekend(today: i64) -> i64 {
+    if weekday_of(today) == 0 {
+        today - 8 * DAY
+    } else {
+        previous_weekday(today, 6)
+    }
+}
+
+/// An inclusive unix-second span covering all of calendar month `m`.
+fn month_range(y: i64, m: i64) -> (i64, i64) {
     let start = days_from_civil(y, m, 1) * DAY;
     let (next_y, next_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-    Bound::Range(start, days_from_civil(next_y, next_m, 1) * DAY - 1)
+    (start, days_from_civil(next_y, next_m, 1) * DAY - 1)
 }
 
 #[cfg(test)]
@@ -839,5 +1154,190 @@ mod tests {
         }
         assert!(expand(&query, NOW).is_empty(), "left over: {query:?}");
         assert!(query.contains("invoice"), "the real search text survives");
+    }
+
+    #[test]
+    fn now_is_a_sunday() {
+        // The weekday tests below lean on this.
+        assert_eq!(weekday_of(start_of_day(NOW)), 0);
+    }
+
+    #[test]
+    fn everyday_kind_words_expand() {
+        assert_eq!(
+            filters("pics from last week")[0],
+            Filter::Kind(FileKind::Image)
+        );
+        assert_eq!(filters("holiday snaps")[0], Filter::Kind(FileKind::Image));
+        assert_eq!(
+            filters("spreadsheets today")[0],
+            Filter::Kind(FileKind::Document)
+        );
+        assert_eq!(filters("phone clips")[0], Filter::Kind(FileKind::Video));
+    }
+
+    #[test]
+    fn spoken_extensions_become_ext_filters() {
+        let expansion = expand_at("resume docx");
+        assert_eq!(expansion.text, "resume");
+        assert_eq!(expansion.filters(), vec![Filter::Ext("docx".into())]);
+        assert_eq!(filters("mp3s today")[0], Filter::Ext("mp3".into()));
+        assert_eq!(filters("rust files today")[0], Filter::Ext("rs".into()));
+        assert_eq!(filters("python scripts")[0], Filter::Ext("py".into()));
+    }
+
+    #[test]
+    fn short_or_homonym_extensions_stay_text() {
+        // `go`, `md`, `swift` are words long before they are extensions.
+        for query in ["go home", "md notes", "swift notes"] {
+            assert!(expand_at(query).is_empty(), "{query:?} should not expand");
+        }
+    }
+
+    #[test]
+    fn ago_is_a_window_around_the_point() {
+        assert_eq!(
+            modified("photos two weeks ago"),
+            Bound::Range(NOW - 21 * DAY, NOW - 7 * DAY)
+        );
+        assert_eq!(
+            modified("zip from a couple of days ago"),
+            Bound::Range(NOW - 3 * DAY, NOW - DAY)
+        );
+    }
+
+    #[test]
+    fn past_and_last_n_units_are_rolling() {
+        assert_eq!(modified("logs past 3 days"), Bound::Ge(NOW - 3 * DAY));
+        let expansion = expand_at("logs in the last 2 weeks");
+        assert_eq!(expansion.text, "logs");
+        assert_eq!(
+            expansion.filters(),
+            vec![Filter::Modified(Bound::Ge(NOW - 14 * DAY))]
+        );
+        assert_eq!(
+            modified("notes from the past few days"),
+            Bound::Ge(NOW - 3 * DAY)
+        );
+    }
+
+    #[test]
+    fn last_weekday_is_the_most_recent_one_before_today() {
+        assert_eq!(
+            range_days(modified("contract last tuesday")),
+            ((2026, 7, 21), (2026, 7, 21))
+        );
+        // NOW is a Sunday: "last sunday" is a week ago, not today.
+        assert_eq!(
+            range_days(modified("notes last sunday")),
+            ((2026, 7, 19), (2026, 7, 19))
+        );
+        assert_eq!(
+            range_days(modified("notes on friday")),
+            ((2026, 7, 24), (2026, 7, 24))
+        );
+    }
+
+    #[test]
+    fn last_weekend_on_a_sunday_means_the_previous_one() {
+        assert_eq!(
+            range_days(modified("pics I took last weekend")),
+            ((2026, 7, 18), (2026, 7, 19))
+        );
+        let weekday_now = days_from_civil(2026, 7, 22) * DAY; // Wednesday
+        let Some(Bound::Range(lo, hi)) = time_phrase("last weekend", weekday_now) else {
+            panic!("expected a range");
+        };
+        assert_eq!(
+            range_days(Bound::Range(lo, hi)),
+            ((2026, 7, 18), (2026, 7, 19))
+        );
+    }
+
+    #[test]
+    fn since_before_and_after_bound_one_side() {
+        assert_eq!(
+            modified("acme sheets since march 3"),
+            Bound::Ge(days_from_civil(2026, 3, 3) * DAY)
+        );
+        assert_eq!(
+            modified("backups before 2020"),
+            Bound::Lt(days_from_civil(2020, 1, 1) * DAY)
+        );
+        assert_eq!(
+            modified("photos after june"),
+            Bound::Gt(days_from_civil(2026, 7, 1) * DAY - 1)
+        );
+        assert_eq!(
+            modified("logs since yesterday"),
+            Bound::Ge(start_of_day(NOW) - DAY)
+        );
+    }
+
+    #[test]
+    fn calendar_dates_with_a_preposition() {
+        assert_eq!(
+            range_days(modified("holiday snaps from december 2023")),
+            ((2023, 12, 1), (2023, 12, 31))
+        );
+        assert_eq!(
+            range_days(modified("receipts on 3rd march")),
+            ((2026, 3, 3), (2026, 3, 3))
+        );
+        // August 15 hasn't come yet at NOW, so it means last year's.
+        assert_eq!(
+            range_days(modified("photos from aug 15")),
+            ((2025, 8, 15), (2025, 8, 15))
+        );
+    }
+
+    #[test]
+    fn impossible_days_do_not_roll_over() {
+        assert!(time_phrase("in february 30", NOW).is_none());
+        assert!(time_phrase("in june 31", NOW).is_none());
+    }
+
+    #[test]
+    fn bare_weekdays_and_dates_stay_filename_text() {
+        for query in ["monday notes", "march 3 minutes", "before after photos"] {
+            let expansion = expand_at(query);
+            assert!(
+                !expansion
+                    .filters()
+                    .iter()
+                    .any(|f| matches!(f, Filter::Modified(_))),
+                "{query:?} should not get a date"
+            );
+        }
+    }
+
+    #[test]
+    fn spoken_size_thresholds() {
+        assert_eq!(
+            filters("mp3s over 20 megabytes")[1],
+            Filter::Size(Bound::Gt(20 << 20))
+        );
+        let expansion = expand_at("files over a gigabyte");
+        assert_eq!(expansion.text, "");
+        assert_eq!(expansion.filters(), vec![Filter::Size(Bound::Gt(1 << 30))]);
+        assert_eq!(
+            filters("videos at least 2 gigs")[1],
+            Filter::Size(Bound::Ge(2 << 30))
+        );
+        assert_eq!(filters("zero byte files"), vec![Filter::Size(Bound::Eq(0))]);
+    }
+
+    #[test]
+    fn a_size_threshold_needs_a_unit() {
+        // "under 5" is an age group in a filename, not five bytes.
+        assert!(expand_at("kids under 5").is_empty());
+    }
+
+    #[test]
+    fn what_the_user_did_is_filler_next_to_a_match() {
+        assert_eq!(expand_at("contract I signed last tuesday").text, "contract");
+        assert_eq!(expand_at("folders I made yesterday").text, "");
+        // ...but stays searchable on its own.
+        assert_eq!(expand_at("signed contract").text, "signed contract");
     }
 }

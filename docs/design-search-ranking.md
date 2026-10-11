@@ -321,6 +321,43 @@ meaning. Named months and years are true calendar ranges, which needed
 `civil_from_days` — the inverse of the `days_from_civil` the grammar
 already had, added beside it.
 
+### Wider vocabulary and the filename check (2026-10)
+
+A one-off eval of 60 hand-labelled queries (20 in the rules' own
+phrasing, 20 paraphrases, 20 plain filenames) compared these rules with
+GLiNER2, a 74–208M-parameter schema-extraction model, run on CPU. The
+best model got kind, time and size right on 60% of paraphrases, against
+5% for the rules. It was also worse on plain filenames (45% left alone,
+against 60%) and cost ~100 ms and ~1.5 GB per query. Both gaps have
+model-free fixes:
+
+- **Paraphrases were vocabulary, not grammar.** The table now covers
+  everyday kind words (`pics`, `clips`, `spreadsheets`, `scripts`), any
+  extension `FileKind` already classifies spoken as a word (`mp3s`,
+  `docx`; at least three letters, minus homonyms like `swift`),
+  language names (`rust` → `ext:rs`), `N units ago` (a ±1 unit window),
+  `past/last/within N units`, `last <weekday>`, `last weekend`,
+  `since/before/after <date>`, `month day` and `month year`, and spoken
+  sizes (`over 20 megabytes`, `at least a gigabyte`, which must have a
+  unit, so `kids under 5` stays text). Paraphrases went from 5% to 65%
+  (several remaining "misses" are better than the label, e.g. `rust
+  files` → `ext:rs`).
+- **Filename or description is a question about the disk, not the
+  words.** When a query expands, the workspace first sends a one-hit,
+  literal-only probe for the text as typed (`prefer_literal` in
+  `workspace/search.rs`). If a name contains it (`the music man` next to
+  `The Music Man.mp4`), the search runs as a plain filename search and
+  the phrases show as `+` suggestion chips; clicking one applies them for
+  that exact query. No name match means the filters cannot hide the file
+  the user meant. **Latency:** one extra daemon round trip, only for
+  queries that expanded. The probe matches exactly as filename search
+  does, so `today show transcript` won't find `today_show_transcript.txt`
+  any more than the normal search would.
+
+`expand` went from ~1.2 µs to ~1.6–2.1 µs per call (`magic_bench`
+`phrases/*`). Paraphrases like `pics I took a couple of days ago` take
+~4.4 µs, against a 50 ms keystroke debounce.
+
 ## Perf budget & benchmarks (gate the merge)
 
 Budget from `docs/indexing-architecture.md` §3: a full scan stays well

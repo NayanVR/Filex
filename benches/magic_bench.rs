@@ -9,7 +9,8 @@
 //! assumed, and two changes qualify:
 //!
 //! - `phrases::expand`'s window grew from 3 words to 4 to fit `older
-//!   than 30 days`, so every query word now costs one more table probe.
+//!   than 30 days`, then to 5 for `a couple of days ago`, so every query
+//!   word costs one table probe per extra word.
 //!   `expand_plain` is the guard: a query that matches no phrase at all
 //!   walks the full window at every position, which is the worst case,
 //!   and it is the case ordinary filename search hits on every keystroke.
@@ -27,7 +28,7 @@ fn bench_phrases(c: &mut Criterion) {
     let mut group = c.benchmark_group("phrases");
 
     // Worst case, and the common one: nothing matches, so every position
-    // probes the full 4-word window before falling through to text.
+    // probes the full 5-word window before falling through to text.
     group.bench_function("expand_plain", |b| {
         b.iter(|| {
             black_box(filex::search::phrases::expand(
@@ -51,6 +52,17 @@ fn bench_phrases(c: &mut Criterion) {
         b.iter(|| {
             black_box(filex::search::phrases::expand(
                 black_box("screenshots older than 30 days"),
+                NOW,
+            ))
+        })
+    });
+
+    // The five-word window's reason to exist, plus filler and a
+    // spelled-out count.
+    group.bench_function("expand_paraphrase", |b| {
+        b.iter(|| {
+            black_box(filex::search::phrases::expand(
+                black_box("pics I took a couple of days ago"),
                 NOW,
             ))
         })
