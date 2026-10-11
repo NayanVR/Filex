@@ -37,18 +37,47 @@ pub fn overlay(id: impl Into<ElementId>) -> Stateful<Div> {
 /// already clamped by the caller; `items` come from [`item`] /
 /// [`separator`].
 pub fn panel(theme: &Theme, position: Point<Pixels>, items: Vec<AnyElement>) -> impl IntoElement {
+    fade_in(
+        "context-menu-open",
+        anchored_card(theme, position).children(items),
+    )
+}
+
+/// A [`panel`] that scrolls once its items pass `max_height`.
+pub fn scroll_panel(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    position: Point<Pixels>,
+    max_height: Pixels,
+    items: Vec<AnyElement>,
+) -> impl IntoElement {
+    fade_in(
+        "scroll-menu-open",
+        anchored_card(theme, position)
+            .id(id)
+            .max_h(max_height)
+            .overflow_y_scroll()
+            .children(items),
+    )
+}
+
+fn anchored_card(theme: &Theme, position: Point<Pixels>) -> Div {
     super::card(theme)
         .absolute()
         .left(position.x)
         .top(position.y)
         .w(px(MENU_WIDTH))
         .py_1()
-        .children(items)
-        .with_animation(
-            "context-menu-open",
-            Animation::new(Duration::from_millis(120)).with_easing(ease_out_quint()),
-            |panel, delta| panel.opacity(delta),
-        )
+}
+
+/// `id` must differ between panels shown together, or they share one
+/// animation's state.
+fn fade_in<E: IntoElement + Styled + 'static>(id: &'static str, panel: E) -> impl IntoElement {
+    panel.with_animation(
+        id,
+        Animation::new(Duration::from_millis(120)).with_easing(ease_out_quint()),
+        |panel, delta| panel.opacity(delta),
+    )
 }
 
 /// One menu entry; callers chain `.on_click`. `danger` marks

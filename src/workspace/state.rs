@@ -80,6 +80,17 @@ pub(super) enum MenuTarget {
 pub(super) struct ContextMenu {
     pub(super) position: Point<Pixels>,
     pub(super) target: MenuTarget,
+    /// The "Open With" app list beside the menu (macOS; elsewhere the OS
+    /// dialog is used).
+    pub(super) submenu: Option<OpenWithSubmenu>,
+}
+
+pub(super) struct OpenWithSubmenu {
+    pub(super) position: Point<Pixels>,
+    /// Capped to the window; the list scrolls past it.
+    pub(super) max_height: Pixels,
+    pub(super) path: PathBuf,
+    pub(super) apps: Vec<AppChoice>,
 }
 
 /// One background file-operation job with live progress; shown in the
@@ -107,6 +118,15 @@ pub(super) enum MagicMode {
     /// search even for a command-shaped query, until the toggle or a
     /// cleared query returns it to [`Auto`](Self::Auto).
     Off,
+}
+
+/// What the rows on screen are the answer to. A search with the same key
+/// is a refresh of those rows rather than a new search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResultsKey {
+    pub query: String,
+    pub scope: Option<PathBuf>,
+    pub phrases_forced: bool,
 }
 
 /// Where a query (normal or magic) looks: across every indexed root, or

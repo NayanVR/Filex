@@ -116,6 +116,34 @@ pub fn filter_chip(
     )
 }
 
+/// An offered filter the search is *not* applying: an outlined pill with
+/// a leading `+` instead of a fill and ✕, so it reads as "add this", not
+/// "remove this". Used when names matched the query literally and its
+/// phrases became suggestions. Callers chain `.on_click` to apply it.
+pub fn suggestion_chip(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    let (accent, dim) = (theme.accent, theme.text_dim);
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .h(px(22.))
+        .px_2()
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .text_xs()
+        .text_color(dim)
+        .hover(move |s| s.border_color(accent).text_color(accent))
+        .child("+")
+        .child(label.into())
+}
+
 /// The magic-mode toggle that lives at the trailing edge of the search
 /// box. `active` lights it in the accent colour and gives it a filled
 /// background so the mode reads at a glance. The whole pill is the click

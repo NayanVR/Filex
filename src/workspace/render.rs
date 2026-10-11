@@ -420,23 +420,6 @@ impl Workspace {
             .min_h_0()
             .px_3()
             .child(self.render_search_results(cx))
-            .children(self.search_more.then(|| {
-                ui::modal::button(
-                    &theme,
-                    "load-more-search",
-                    if self.search_paging {
-                        "Loading…"
-                    } else {
-                        "Load more results"
-                    },
-                    false,
-                )
-                .flex_none()
-                .mx_3()
-                .my_2()
-                .text_xs()
-                .on_click(cx.listener(|this, _, _, cx| this.load_more_results(cx)))
-            }))
             .into_any_element()
     }
 

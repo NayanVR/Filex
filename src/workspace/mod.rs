@@ -29,7 +29,10 @@ use crate::ui::search_input::{self, SearchInput, SearchInputEvent};
 use crate::ui::theme::{ActiveTheme as _, Theme};
 pub use app::run;
 use filex::listing::FileKind;
-use platform::{open_with_default_app, open_with_dialog, open_with_supported};
+use platform::{
+    AppChoice, OPEN_WITH_LABEL, open_with_app, open_with_choices, open_with_default_app,
+    open_with_dialog,
+};
 use state::*;
 
 actions!(
@@ -140,6 +143,9 @@ fn fetch_preview_meta(path: &Path) -> PreviewMeta {
 }
 
 const SEARCH_RESULT_LIMIT: usize = 100;
+/// How close to the end of the loaded results the visible rows get before
+/// the next page is fetched — about a screen's worth.
+const RESULTS_PREFETCH_ROWS: usize = 30;
 
 /// How long the query must hold still before a scan starts. Sized against
 /// typing, not the scan: ~50 ms falls below a fast typist's inter-key gap
@@ -275,6 +281,13 @@ struct Workspace {
     daemon_status: filex::daemon::ipc::Status,
     search_hits: std::collections::HashMap<PathBuf, filex::daemon::ipc::Hit>,
     search_more: bool,
+    /// The query whose results came from its plain-filename reading
+    /// because names matched it, so its phrases show as suggestions.
+    phrases_literal: Option<String>,
+    /// The query the user told to use its phrases as filters anyway.
+    phrases_forced: Option<String>,
+    /// What `results` currently answers; see [`ResultsKey`].
+    results_key: Option<ResultsKey>,
     search_page_query: Option<filex::daemon::ipc::Query>,
     search_paging: bool,
     search_client_id: u64,
@@ -539,6 +552,9 @@ impl Workspace {
             daemon_status: filex::daemon::ipc::Status::default(),
             search_hits: Default::default(),
             search_more: false,
+            phrases_literal: None,
+            phrases_forced: None,
+            results_key: None,
             search_page_query: None,
             search_paging: false,
             search_client_id: std::time::SystemTime::now()

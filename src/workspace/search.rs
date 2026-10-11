@@ -31,6 +31,14 @@ impl Workspace {
             .update(cx, |input, cx| input.set_text(rewritten, cx));
     }
 
+    /// Apply the current query's phrases as filters even though file
+    /// names matched it as typed — the suggestion chips' action. Holds
+    /// for this exact query only; editing it starts fresh.
+    pub(super) fn use_phrases_as_filters(&mut self, cx: &mut Context<Self>) {
+        self.phrases_forced = Some(self.query.clone());
+        self.update_search(cx);
+    }
+
     /// Remove an inferred natural-language phrase (clicking its chip) by
     /// stripping the words that produced it.
     pub(super) fn remove_phrase(&mut self, source: &str, cx: &mut Context<Self>) {
@@ -348,7 +356,7 @@ impl Workspace {
             })
             .detach();
         }
-        let (text, all_filters, limit) = match &command {
+        let (text, all_filters, limit, literal) = match &command {
             Some(command) => (
                 command.selection.text.clone(),
                 command.selection.filters.clone(),
@@ -358,6 +366,7 @@ impl Workspace {
                 // too-many-to-review guard would never fire on the
                 // truncated count. One past the cap is what arms it.
                 filex::magic::MAX_PLAN_OPS + 1,
+                None,
             ),
             None => {
                 // Forced-on magic with no command yet: show nothing rather
@@ -384,12 +393,26 @@ impl Workspace {
                     cx.notify();
                     return;
                 }
+                // The words read as a plain filename, tried first unless
+                // the user already chose the filters for this query. Tags
+                // are the same either way: phrases never add one.
+                let literal = (!expansion.is_empty()
+                    && self.phrases_forced.as_deref() != Some(self.query.as_str()))
+                .then(|| {
+                    let filters = parsed
+                        .filters
+                        .iter()
+                        .filter(|f| !matches!(f, Filter::Tag(_)))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    (parsed.text.clone(), filters)
+                });
                 let filters = parsed
                     .filters
                     .into_iter()
                     .chain(expansion.filters())
                     .collect::<Vec<_>>();
-                (text, filters, SEARCH_RESULT_LIMIT)
+                (text, filters, SEARCH_RESULT_LIMIT, literal)
             }
         };
 
@@ -424,6 +447,21 @@ impl Workspace {
             SearchScope::Anywhere => None,
             SearchScope::CurrentDir => Some(self.cwd.clone()),
         };
+        // Same query, scope and phrase choice as the rows on screen means
+        // this is a background refresh (index epoch moved, a file op
+        // landed), not a new search: refetch every loaded row and leave
+        // the scroll position and selection where the user put them.
+        let key = ResultsKey {
+            query: self.query.clone(),
+            scope: scope.clone(),
+            phrases_forced: self.phrases_forced.as_deref() == Some(self.query.as_str()),
+        };
+        let refresh = !command_query && self.results_key.as_ref() == Some(&key);
+        let limit = if refresh {
+            limit.max(self.results.len())
+        } else {
+            limit
+        };
         let client_id = self.search_client_id;
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -434,7 +472,7 @@ impl Workspace {
                     } else {
                         Some(store.paths_with_all_tags(&tags_required))
                     };
-                    let query = filex::daemon::ipc::Query {
+                    let mut query = filex::daemon::ipc::Query {
                         text,
                         filters: index_filters,
                         scope,
@@ -474,8 +512,12 @@ impl Workspace {
                                 },
                             )
                         });
-                        Ok::<_, anyhow::Error>((hits, epoch, false, None, false, plan))
+                        Ok::<_, anyhow::Error>((hits, epoch, false, None, false, plan, false))
                     } else {
+                        let literal_won = match literal {
+                            Some(literal) => prefer_literal(&client, &mut query, literal, &cancel)?,
+                            None => false,
+                        };
                         let page = client.search(query.clone(), &cancel)?;
                         Ok((
                             page.hits,
@@ -484,6 +526,7 @@ impl Workspace {
                             Some(query),
                             page.partial,
                             None,
+                            literal_won,
                         ))
                     }
                 })
@@ -493,7 +536,10 @@ impl Workspace {
                     return;
                 }
                 match result {
-                    Ok((hits, epoch, more, query, partial, plan)) => {
+                    Ok((hits, epoch, more, query, partial, plan, literal_won)) => {
+                        this.phrases_literal = literal_won.then(|| this.query.clone());
+                        let kept = refresh.then(|| this.selected_result_paths());
+                        this.results_key = Some(key);
                         this.search_page_query = query.map(|mut q| {
                             q.epoch_hint = Some(epoch);
                             q
@@ -514,6 +560,8 @@ impl Workspace {
                             .collect();
                         if let (Some(state), Some(plan)) = (&mut this.magic, plan) {
                             state.install_plan(plan);
+                        } else if let Some((selected, lead)) = kept {
+                            this.reselect_results(selected, lead);
                         } else {
                             this.select_first_result();
                             this.refresh_preview(cx);
@@ -546,6 +594,9 @@ impl Workspace {
             return;
         };
         query.offset = self.results.len();
+        // A refresh may have refetched every loaded row in one request;
+        // pages after it go back to the normal size.
+        query.limit = SEARCH_RESULT_LIMIT;
         let generation = self.search_generation;
         let cancel = self.search_cancel.clone();
         self.search_paging = true;
@@ -616,6 +667,18 @@ impl Workspace {
 
     /// New results select the first hit (Spotlight-style), so Enter
     /// immediately opens the top match.
+    /// The selected result rows' paths, and the lead's — what survives a
+    /// background refresh, since indices don't.
+    fn selected_result_paths(&self) -> (Vec<PathBuf>, Option<PathBuf>) {
+        let path = |ix: usize| self.results.get(ix).map(|row| row.target.clone());
+        let selected = self.search_selection.iter().filter_map(path).collect();
+        (selected, self.search_selection.lead().and_then(path))
+    }
+
+    fn reselect_results(&mut self, selected: Vec<PathBuf>, lead: Option<PathBuf>) {
+        self.search_selection = selection_for_paths(&self.results, &selected, lead.as_ref());
+    }
+
     pub(super) fn select_first_result(&mut self) {
         if self.results.is_empty() {
             self.search_selection.clear();
@@ -651,5 +714,95 @@ impl Workspace {
             }
         )
         .into()
+    }
+}
+
+/// When a query both expanded into filters and appears as typed inside a
+/// real file name, trust the name: "the music man" with a `The Music Man.mp4` on
+/// disk is that file, not "audio files named 'the man'". A one-hit,
+/// literal-only probe decides; on a hit `query` becomes the plain filename
+/// search and the phrases are offered as chips instead. Costs one extra
+/// daemon round trip, and only for queries that expanded.
+fn prefer_literal(
+    client: &filex::daemon::ipc::Client,
+    query: &mut filex::daemon::ipc::Query,
+    (text, filters): (String, Vec<Filter>),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<bool> {
+    let probe = filex::daemon::ipc::Query {
+        text: text.clone(),
+        filters: filters.clone(),
+        limit: 1,
+        fuzzy: false,
+        ..query.clone()
+    };
+    if client.search(probe, cancel)?.hits.is_empty() {
+        return Ok(false);
+    }
+    query.text = text;
+    query.filters = filters;
+    Ok(true)
+}
+
+/// Point a selection back at the same files after a refresh replaced the
+/// rows. Files no longer in the results drop out; the lead is toggled last
+/// so it stays the keyboard cursor.
+fn selection_for_paths(
+    rows: &[SearchRow],
+    selected: &[PathBuf],
+    lead: Option<&PathBuf>,
+) -> Selection {
+    let index: std::collections::HashMap<&PathBuf, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(ix, row)| (&row.target, ix))
+        .collect();
+    let mut kept = Selection::default();
+    for path in selected.iter().filter(|p| Some(*p) != lead) {
+        if let Some(&ix) = index.get(path) {
+            kept.toggle(ix);
+        }
+    }
+    if let Some(&ix) = lead.and_then(|p| index.get(p)) {
+        kept.toggle(ix);
+    }
+    kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(names: &[&str]) -> Vec<SearchRow> {
+        names
+            .iter()
+            .map(|name| SearchRow {
+                name: (*name).to_string().into(),
+                path_label: format!("/t/{name}").into(),
+                is_dir: false,
+                target: PathBuf::from(format!("/t/{name}")),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selection_on_the_same_files() {
+        // Regression: every index epoch change re-ran the search and
+        // reselected row 0, which also scrolled the list to the top.
+        let before = rows(&["a", "b", "c", "d"]);
+        let after = rows(&["new", "a", "b", "c", "d"]);
+        let selected = vec![before[1].target.clone(), before[3].target.clone()];
+        let kept = selection_for_paths(&after, &selected, Some(&before[3].target));
+        assert_eq!(kept.iter().collect::<Vec<_>>(), [2, 4]);
+        assert_eq!(kept.lead(), Some(4));
+    }
+
+    #[test]
+    fn files_gone_from_the_results_drop_out_of_the_selection() {
+        let before = rows(&["a", "b"]);
+        let after = rows(&["a"]);
+        let selected = vec![before[0].target.clone(), before[1].target.clone()];
+        let kept = selection_for_paths(&after, &selected, Some(&before[1].target));
+        assert_eq!(kept.iter().collect::<Vec<_>>(), [0]);
     }
 }

@@ -604,8 +604,17 @@ impl Workspace {
         uniform_list(
             "results",
             self.results.len(),
-            cx.processor(|this, range: Range<usize>, _window, cx| {
+            cx.processor(|this, range: Range<usize>, window, cx| {
                 let theme = *cx.theme();
+                // Fetch the next page while the user is still a screen away
+                // from the end, so scrolling never hits a wall. Deferred: the
+                // list is mid-render here.
+                if this.search_more
+                    && !this.search_paging
+                    && range.end + RESULTS_PREFETCH_ROWS >= this.results.len()
+                {
+                    cx.defer_in(window, |this, _window, cx| this.load_more_results(cx));
+                }
                 range
                     .filter_map(|ix| {
                         let row = this.results.get(ix)?;

@@ -286,6 +286,30 @@ pub fn page_heading(theme: &Theme, title: &'static str, description: &'static st
         )
 }
 
+/// A titled part of a page: a heading and one line of explanation above
+/// the caller's groups and notes.
+pub fn section(theme: &Theme, title: &'static str, description: &'static str) -> Div {
+    div().flex().flex_col().flex_none().gap_2().child(
+        div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_dim)
+                    .child(description),
+            ),
+    )
+}
+
 pub fn group(theme: &Theme) -> Div {
     div()
         .flex()

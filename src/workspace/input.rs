@@ -98,6 +98,7 @@ impl Workspace {
         self.context_menu = Some(ContextMenu {
             position: Self::clamped_menu_position(position, 320., window),
             target,
+            submenu: None,
         });
         cx.notify();
     }
@@ -112,6 +113,7 @@ impl Workspace {
         self.context_menu = Some(ContextMenu {
             position: Self::clamped_menu_position(position, 150., window),
             target: MenuTarget::Favorite { path },
+            submenu: None,
         });
         cx.notify();
     }
@@ -125,6 +127,7 @@ impl Workspace {
         if let Some(menu) = self.context_menu.as_mut() {
             menu.position = Self::clamped_menu_position(menu.position, 350., window);
             menu.target = MenuTarget::FolderIcon { path };
+            menu.submenu = None;
             cx.notify();
         }
     }

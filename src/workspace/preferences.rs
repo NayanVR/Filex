@@ -41,7 +41,7 @@ impl SettingsSection {
         match self {
             Self::Appearance => "Make filex feel at home on your desktop.",
             Self::Browsing => "Choose how your files are displayed and handled.",
-            Self::Search => "Control which locations appear in search.",
+            Self::Search => "Choose which folders search covers, and what it skips inside them.",
             Self::Keyboard => "Click a shortcut, then press your preferred combination.",
             Self::Privacy => "Choose what you share with filex.",
         }
@@ -71,6 +71,15 @@ type SettingToggle = (
     fn(&Workspace, &mut Context<Workspace>),
 );
 
+/// Why an external drive never shows up under a whole-disk location — the
+/// one exclusion with no setting (`ingest::platform::OTHER_VOLUME_DIRS`).
+#[cfg(target_os = "macos")]
+const OTHER_VOLUMES_NOTE: Option<&str> = Some(
+    "Other drives and network volumes are always skipped. Add one under Included to search it.",
+);
+#[cfg(not(target_os = "macos"))]
+const OTHER_VOLUMES_NOTE: Option<&str> = None;
+
 /// Nothing to do after flipping — the case for every toggle but one.
 fn no_follow_up(_: &Workspace, _: &mut Context<Workspace>) {}
 
@@ -83,18 +92,19 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
         |s| s.show_hidden_files = !s.show_hidden_files,
         no_follow_up,
     ),
+    // Worded as exclusions: they sit under "Excluded", where on = skipped.
     (
         "index-system-files",
-        "Index system folders",
-        "Include operating system and application folders in search. Uses more memory and applies after rebuilding the index.",
-        |s| s.index_system_files,
+        "Skip system folders",
+        "Operating system and program folders. Including them uses more memory.",
+        |s| !s.index_system_files,
         |s| s.index_system_files = !s.index_system_files,
         no_follow_up,
     ),
     (
         "exclude-dev-folders",
-        "Exclude developer folders",
-        "Skip the folder names listed below, at any depth. Applies after rebuilding the index.",
+        "Skip developer folders",
+        "Folders with the names below, at any depth.",
         |s| s.exclude_dev_folders,
         |s| s.exclude_dev_folders = !s.exclude_dev_folders,
         no_follow_up,
@@ -286,25 +296,12 @@ impl Workspace {
             );
         } else if section == SettingsSection::Keyboard {
             page = page.child(self.render_keyboard_preferences(&theme, cx));
+        } else if section == SettingsSection::Search {
+            page = page
+                .child(self.render_search_locations(&theme, cx))
+                .child(self.render_search_exclusions(&theme, &settings, cx));
         } else {
-            let mut group = ui::settings_pane::group(&theme);
-            for &(id, label, description, read, toggle, follow_up) in
-                SETTING_TOGGLES.iter().filter(|s| section.contains(s.0))
-            {
-                group = group.child(
-                    ui::settings_pane::toggle_row(&theme, id, label, description, read(&settings))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.settings
-                                .update(cx, |store, cx| store.update(cx, toggle));
-                            follow_up(this, cx);
-                        })),
-                );
-            }
-            page = page.child(group);
-            if section == SettingsSection::Search {
-                page = page.child(self.render_excluded_folders(&theme, &settings, cx));
-                page = page.child(self.render_search_locations(&theme, cx));
-            }
+            page = page.child(self.render_toggles(&theme, &settings, section, cx));
         }
         let card = ui::settings_pane::settings_card(&theme, "settings-panel")
             .h((window.viewport_size().height - px(64.)).min(px(650.)))
@@ -332,6 +329,48 @@ impl Workspace {
                 .child(card)
                 .into_any_element(),
         )
+    }
+
+    /// The section's plain on/off settings, as one group.
+    fn render_toggles(
+        &self,
+        theme: &Theme,
+        settings: &Settings,
+        section: SettingsSection,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut group = ui::settings_pane::group(theme);
+        for &(id, label, description, read, toggle, follow_up) in
+            SETTING_TOGGLES.iter().filter(|s| section.contains(s.0))
+        {
+            group = group.child(
+                ui::settings_pane::toggle_row(theme, id, label, description, read(settings))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings
+                            .update(cx, |store, cx| store.update(cx, toggle));
+                        follow_up(this, cx);
+                    })),
+            );
+        }
+        group
+    }
+
+    /// "Excluded": what search skips *inside* the included folders — the
+    /// system and developer-folder toggles, then the editable name list.
+    fn render_search_exclusions(
+        &self,
+        theme: &Theme,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        ui::settings_pane::section(
+            theme,
+            "Excluded",
+            "Skipped inside the included folders. The index rebuilds itself after a change.",
+        )
+        .child(self.render_toggles(theme, settings, SettingsSection::Search, cx))
+        .child(self.render_excluded_folders(theme, settings, cx))
+        .children(OTHER_VOLUMES_NOTE.map(|note| ui::settings_pane::note(theme, note)))
     }
 
     /// Add the add-field's text to the exclude list, clearing the field on
@@ -426,7 +465,7 @@ impl Workspace {
                 .p_2()
                 .child(ui::settings_pane::note(
                     theme,
-                    "Excluded folder names. Exact names only, no paths or wildcards.",
+                    "Developer folder names. Exact names only, no paths or wildcards.",
                 ))
                 .child(chips)
                 .child(div().flex().gap_2().child(add_box).child(add).child(reset)),
@@ -697,20 +736,15 @@ impl Workspace {
                 .text_xs()
                 .on_click(cx.listener(|this, _, _, cx| this.add_current_folder(cx))),
         ));
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.text)
-                    .child("Search locations"),
-            )
-            .child(group)
-            .child(ui::settings_pane::note(
-                theme,
-                "You can also right-click a folder and choose “Index This Folder”.",
-            ))
+        ui::settings_pane::section(
+            theme,
+            "Included",
+            "Folders search covers, with everything inside them.",
+        )
+        .child(group)
+        .child(ui::settings_pane::note(
+            theme,
+            "You can also right-click a folder and choose “Index This Folder”.",
+        ))
     }
 }

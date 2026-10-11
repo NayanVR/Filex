@@ -102,17 +102,28 @@ impl Workspace {
         }
         // Inferred phrase chips, after the explicit ones. Each is labelled
         // with what it became (`kind:image`) or, for sizes and dates, the
-        // words the user typed — and clicking removes those words.
+        // words the user typed — and clicking removes those words. When
+        // file names matched the query as typed, the search ran as a plain
+        // filename search instead, and the chips offer the filters.
+        let suggested = self.magic.is_none() && self.phrases_literal.as_ref() == Some(&self.query);
         for (i, phrase) in phrases.into_iter().enumerate() {
             for (j, filter) in phrase.filters.iter().enumerate() {
                 let label = filex::search::phrases::label_for(filter, &phrase.source);
+                let id = ("phrase-chip", i * 8 + j);
+                if suggested {
+                    strip = strip.child(ui::top_bar::suggestion_chip(&theme, id, label).on_click(
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.use_phrases_as_filters(cx);
+                        }),
+                    ));
+                    continue;
+                }
                 let source = phrase.source.clone();
-                strip = strip.child(
-                    ui::top_bar::filter_chip(&theme, ("phrase-chip", i * 8 + j), label, None)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.remove_phrase(&source, cx);
-                        })),
-                );
+                strip = strip.child(ui::top_bar::filter_chip(&theme, id, label, None).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.remove_phrase(&source, cx);
+                    }),
+                ));
             }
         }
         Some(strip.into_any_element())
@@ -220,16 +231,15 @@ impl Workspace {
                             }))
                             .into_any_element(),
                     );
-                    // "Open With…" only applies to files, and only where the
-                    // platform can actually show a chooser (see
-                    // `open_with_supported`).
-                    if !is_dir && open_with_supported() {
+                    // "Open With" only applies to files. The menu stays open:
+                    // macOS shows an app-list submenu beside it.
+                    if !is_dir {
                         let p = path.clone();
                         items.push(
-                            ui::menu::item(&theme, "menu-open-with", "Open With…", false)
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                    this.close_menu(cx);
-                                    this.open_with(p.clone(), cx);
+                            ui::menu::item(&theme, "menu-open-with", OPEN_WITH_LABEL, false)
+                                .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_with(p.clone(), e.position().y, window, cx);
                                 }))
                                 .into_any_element(),
                         );
@@ -427,6 +437,29 @@ impl Workspace {
                 }
             }
         }
+        let submenu = menu.submenu.as_ref().map(|sub| {
+            let items = sub
+                .apps
+                .iter()
+                .enumerate()
+                .map(|(ix, app)| {
+                    let (p, app_path) = (sub.path.clone(), app.path.clone());
+                    ui::menu::item(&theme, ("open-with-app", ix), app.name.clone(), false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.close_menu(cx);
+                            this.open_in_app(p.clone(), &app_path, cx);
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            ui::menu::scroll_panel(
+                &theme,
+                "open-with-submenu",
+                sub.position,
+                sub.max_height,
+                items,
+            )
+        });
         Some(
             ui::menu::overlay("context-menu-overlay")
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -439,6 +472,7 @@ impl Workspace {
                     }),
                 )
                 .child(ui::menu::panel(&theme, menu.position, items))
+                .children(submenu)
                 .into_any_element(),
         )
     }
