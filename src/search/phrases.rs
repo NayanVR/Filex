@@ -230,10 +230,11 @@ fn expand_inner(raw: &str, now: i64, lone_word_is_filename: bool) -> Expansion {
                 while text.last().is_some_and(|w| is_filler(w)) {
                     text.pop();
                 }
-                phrases.push(Phrase {
-                    source: words[i..i + len].join(" "),
-                    filters,
-                });
+                let source = words[i..i + len].join(" ");
+                if let Some(name) = implied_name(&source) {
+                    text.push(name);
+                }
+                phrases.push(Phrase { source, filters });
                 i += len;
                 // ...and filler immediately after it ("photos *from*
                 // meeting") — adjacency is what makes a word noise rather
@@ -339,8 +340,21 @@ fn lookup(phrase: &str, now: i64) -> Option<Vec<Filter>> {
     time_phrase(phrase, now).map(|bound| vec![Filter::Modified(bound)])
 }
 
-/// Words naming a broad kind of file, singular and plural. A screenshot
-/// is an image *named* like one; the index has no screenshot bit.
+/// A kind word that is also a naming convention. The index has no
+/// screenshot bit, so `screenshots` means an image *named* like one; the
+/// filename text keeps the singular, which every OS's default name
+/// contains ("Screenshot 2026-…", "Screenshot from …").
+// ponytail: misses macOS's pre-Mojave "Screen Shot …"; add a second name
+// once the query can OR filename texts.
+fn implied_name(phrase: &str) -> Option<&'static str> {
+    matches!(
+        phrase.to_ascii_lowercase().as_str(),
+        "screenshots" | "screenshot"
+    )
+    .then_some("screenshot")
+}
+
+/// Words naming a broad kind of file, singular and plural.
 fn kind_of(phrase: &str) -> Option<FileKind> {
     Some(match phrase {
         "photos" | "pictures" | "images" | "photo" | "picture" | "image" | "pics" | "pic"
@@ -1033,6 +1047,15 @@ mod tests {
             query = without_phrase(&query, &phrase.source);
         }
         assert_eq!(query, "");
+    }
+
+    #[test]
+    fn screenshots_are_images_named_like_one() {
+        // Regression: kind:image alone matched every old image on disk.
+        let expansion = expand_at("screenshots older than 30 days");
+        assert_eq!(expansion.text, "screenshot");
+        assert!(expansion.filters().contains(&Filter::Kind(FileKind::Image)));
+        assert_eq!(expand_as_description("Screenshot", NOW).text, "screenshot");
     }
 
     #[test]

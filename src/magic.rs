@@ -710,7 +710,8 @@ mod tests {
         assert_eq!(command.verb, Verb::Delete);
         assert_eq!(command.action, Action::Delete);
         assert_eq!(command.selection.source, "screenshots older than 30 days");
-        assert_eq!(command.selection.text, "");
+        // A screenshot is an image *named* like one, not every image.
+        assert_eq!(command.selection.text, "screenshot");
         assert_eq!(
             command.selection.filters,
             vec![
@@ -799,7 +800,7 @@ mod tests {
     fn leading_quantifiers_are_dropped_from_target_and_destination() {
         let command = cmd("delete all screenshots older than 30 days").unwrap();
         // "all" must not survive as filename text to match against.
-        assert_eq!(command.selection.text, "");
+        assert_eq!(command.selection.text, "screenshot");
 
         let command = cmd("move screenshots to the Archive folder").unwrap();
         assert_eq!(
@@ -870,8 +871,7 @@ mod tests {
     fn a_single_word_target_is_a_description_not_a_filename() {
         // Regression: `phrases::expand`'s rule 2 reads a lone word as a
         // filename, which is right for the search bar and wrong here —
-        // it made `delete screenshots` mean "delete files *named*
-        // screenshots" rather than "delete images".
+        // the plural "screenshots" is in no default screenshot name.
         for query in ["delete screenshots", "delete all screenshots"] {
             let command = cmd(query).unwrap();
             assert_eq!(
@@ -880,8 +880,8 @@ mod tests {
                 "{query:?} should describe a set"
             );
             assert_eq!(
-                command.selection.text, "",
-                "{query:?} should leave no name to match"
+                command.selection.text, "screenshot",
+                "{query:?} should match the singular every OS names them by"
             );
         }
     }
