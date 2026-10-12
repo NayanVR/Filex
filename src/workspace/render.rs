@@ -125,7 +125,7 @@ impl Workspace {
         // `flex_none` parent would otherwise shrink-wrap to nothing); the
         // box's own `max_w` still caps it. The nav controls to the left
         // take the remaining space and shrink first on a narrow window.
-        let search = div().flex_none().w(px(340.)).flex().justify_end().child(
+        let search = div().flex_none().w(px(460.)).flex().justify_end().child(
             ui::top_bar::search_box(&theme, !self.query.is_empty() || self.in_magic_view())
                 .child(
                     ui::top_bar::scope_selector(

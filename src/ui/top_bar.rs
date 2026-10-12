@@ -205,7 +205,7 @@ pub fn search_box(theme: &Theme, active: bool) -> Div {
         // stays usable when the window is narrow.
         .w_full()
         .min_w(px(160.))
-        .max_w(px(420.))
+        .max_w(px(480.))
         .px_3()
         .h(px(36.))
         .rounded_lg()
