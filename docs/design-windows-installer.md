@@ -202,6 +202,14 @@ hash-verified against the manifest. Submit to `microsoft/winget-pkgs` with
 bumps with `wingetcreate update` in the release workflow (needs a PAT +
 fork, same shape as the existing `TAP_DEPLOY_KEY` step).
 
+**Built 2026-10-12, ahead of the Burn bundle:** the first manifest is
+`packaging/winget/` (`NayanVR.Filex`, `InstallerType: wix` against the MSI,
+matched across versions by the MSI `UpgradeCode`). The release workflow's
+`winget` job runs `wingetcreate update --submit` once `WINGET_TOKEN` is set.
+When the bundle ships, switch the manifest to `burn` and the bundle URL.
+Silent winget installs skip the Privacy page, so they take the default
+(crash reports on); the README points at `--interactive`.
+
 **To verify before we promise it in docs:** whether an unsigned Burn bundle
 installed via winget genuinely avoids the SmartScreen wall on a clean
 Windows VM. It should — winget doesn't attach MotW — but that claim goes in

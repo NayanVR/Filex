@@ -13,6 +13,10 @@
 #   FILEX_SIGNING_KEY  — hex Ed25519 private key from `filex-sign keygen`.
 #   TAP_DEPLOY_KEY     — private half of a write-enabled SSH deploy key on the
 #                        Homebrew tap repo (never expires, scoped to that repo).
+#   WINGET_TOKEN       — classic GitHub PAT (public_repo) for the account that
+#                        opens PRs on microsoft/winget-pkgs. Until it is set,
+#                        the winget job skips (the first submission is manual,
+#                        from packaging/winget/).
 # Optional secrets:
 #   FILEX_SENTRY_DSN   — Sentry DSN (a public client key) compiled into the
 #                        UI app for opt-in observability. When unset, Sentry
@@ -90,6 +94,25 @@ jobs:
           files: |
             Filex-*-x64.msi
             filex-windows.json
+
+  # --- Open a winget-pkgs PR for this version --------------------------
+  # `wingetcreate update` needs NayanVR.Filex to already be in winget-pkgs;
+  # it re-hashes the MSI and fills in its ProductCode.
+  winget:
+    name: bump winget manifest
+    needs: windows
+    runs-on: windows-latest
+    steps:
+      - name: Submit update
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if (-not $env:WINGET_TOKEN) { Write-Output "WINGET_TOKEN unset; skipping"; exit 0 }
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $url = "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Filex-$version-x64.msi"
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe update NayanVR.Filex --version $version --urls $url --submit --token $env:WINGET_TOKEN
 
   # --- Linux: tarball of the binary, signed -----------------------------
   linux:

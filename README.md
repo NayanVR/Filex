@@ -14,8 +14,11 @@ filename search. Filex is written in Rust and renders on the GPU through
 Download the latest build from
 [Releases](https://github.com/NayanVR/Filex/releases/latest).
 
-- **Windows:** run `Filex-<version>-x64.msi`. The installer asks whether to send
-  crash reports (see [Privacy](#privacy)).
+- **Windows:** `winget install NayanVR.Filex`, or run `Filex-<version>-x64.msi`.
+  Filex isn't code-signed, so a direct download shows a SmartScreen warning
+  (*More info → Run anyway*). The installer asks whether to send crash reports
+  (see [Privacy](#privacy)); winget installs silently with them on, so add
+  `--interactive` to see that choice.
 - **macOS (Apple Silicon):** `brew install --cask NayanVR/filex/filex`. Builds
   are not notarized, so the first launch shows a Gatekeeper prompt.
 - **Linux (x86_64):** extract `filex-<version>-linux-x86_64.tar.gz`, put `filex` and

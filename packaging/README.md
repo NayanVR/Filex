@@ -48,3 +48,12 @@ The endpoint capability stays in the private user database directory. The daemon
 performs no privileged file operations. Initial enumeration and restart recovery
 can take time; notification overflow requests reconciliation. Full journal-only
 recovery and elevated machine-wide search are not part of this version.
+
+## winget
+
+`winget/` holds the manifest for the first submission of `NayanVR.Filex` to
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). Submit it
+once with `wingetcreate submit packaging/winget` (or a PR adding it under
+`manifests/n/NayanVR/Filex/<version>/`). After it is accepted, set the
+`WINGET_TOKEN` secret and the release workflow opens the PR for each new
+version. Don't edit these files per release; they record the first submission.
