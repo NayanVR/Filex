@@ -1,9 +1,10 @@
 //! Read-only filesystem inspection. Notification adapters never mutate catalogs.
 mod platform;
+mod walk;
 #[cfg_attr(not(windows), cfg(test))]
 mod windows;
 
-use crate::catalog::segment::{Identity, Record, Root, raw_name};
+use crate::catalog::segment::{Identity, Record, raw_name};
 use anyhow::Result;
 pub use platform::identity;
 use platform::{CASE_INSENSITIVE_NAMES, OTHER_VOLUME_DIRS, SYSTEM_DIRS};
@@ -15,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
+pub use walk::walk;
 
 pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
     Ok(record(path, stat(path)?, id, parent, root))
@@ -98,78 +100,6 @@ fn list(dir: &Path) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<L
     }
 }
 
-/// Iterative walk: bounded directory stack, no full descendant path arena and no
-/// symlink traversal. Permission loss is reported rather than silently claiming
-/// a complete generation.
-///
-/// `allocate` receives each entry's path, the ID already allocated to its
-/// parent directory (0 for the root) and its native identity. `cancel` is
-/// checked before every entry, so a stop lands within one `stat`, not one
-/// directory (FIL-27).
-pub fn walk(
-    root: &Root,
-    excluded: &Path,
-    filter: &IndexFilter,
-    mut allocate: impl FnMut(&Path, u64, &Identity) -> u64,
-    mut emit: impl FnMut(Record) -> Result<()>,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> Result<usize> {
-    let mut skipped = 0;
-    let root_stat = stat(&root.path)?;
-    let root_id = allocate(&root.path, 0, &root_stat.identity);
-    emit(record(&root.path, root_stat, root_id, 0, root.id))?;
-    let mut stack = vec![(root.path.clone(), root_id)];
-    let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
-    while let Some((path, parent)) = stack.pop() {
-        anyhow::ensure!(!cancelled(), "enumeration cancelled");
-        let entries = match list(&path) {
-            Ok(e) => e,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-        for entry in entries {
-            anyhow::ensure!(!cancelled(), "enumeration cancelled");
-            let Listed {
-                path,
-                is_dir,
-                stat: listed,
-            } = match entry {
-                Ok(e) => e,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let pruned = !filter.excluded_names.is_empty()
-                && is_dir
-                && path
-                    .file_name()
-                    .is_some_and(|name| filter.excluded_name(name));
-            if pruned || path.starts_with(excluded) || filter.excludes_top_level(&root.path, &path)
-            {
-                continue;
-            }
-            let entry_stat = match listed.map_or_else(|| stat(&path), Ok) {
-                Ok(s) => s,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let id = allocate(&path, parent, &entry_stat.identity);
-            let record = record(&path, entry_stat, id, parent, root.id);
-            let dir = record.is_dir();
-            emit(record)?;
-            if dir {
-                stack.push((path, id));
-            }
-        }
-        std::thread::yield_now();
-    }
-    Ok(skipped)
-}
 pub fn validate_new_root(existing: &[PathBuf], path: &Path) -> Result<PathBuf> {
     let canonical = path.canonicalize()?;
     anyhow::ensure!(canonical.is_dir(), "root is not a directory");
@@ -324,7 +254,8 @@ mod tests {
     /// pruned while the setting is off.
     #[test]
     fn walk_prunes_excluded_folder_names_at_any_depth() {
-        use super::{Root, walk};
+        use super::walk;
+        use crate::catalog::segment::Root;
         use std::{fs, sync::atomic::AtomicBool};
 
         let tree = tempfile::tempdir().unwrap();
@@ -415,7 +346,8 @@ mod tests {
     /// daemon still inspected the rest of a large directory first.
     #[test]
     fn walk_stops_within_a_directory_once_cancelled() {
-        use super::{Root, walk};
+        use super::walk;
+        use crate::catalog::segment::Root;
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let tree = tempfile::tempdir().unwrap();
@@ -460,7 +392,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn walk_skips_an_unreadable_directory_until_the_grant_returns() {
-        use super::{Root, walk};
+        use super::walk;
+        use crate::catalog::segment::Root;
         use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
 
         let tree = tempfile::tempdir().unwrap();
@@ -530,7 +463,8 @@ mod tests {
     /// entry; its records must match a fresh per-path `inspect`.
     #[test]
     fn walk_records_match_inspect() {
-        use super::{Root, inspect, walk};
+        use super::{inspect, walk};
+        use crate::catalog::segment::Root;
         use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
 
         let tree = tempfile::tempdir().unwrap();
