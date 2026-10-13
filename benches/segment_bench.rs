@@ -202,5 +202,23 @@ fn search_with_overlay(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench, enumerate_lookup, search_with_overlay);
+/// A first index's segment build at home-directory scale (~820k records):
+/// the step onboarding waits on after the walk.
+fn build_home_tree(c: &mut Criterion) {
+    let records = home_tree();
+    let mut group = c.benchmark_group("build_home_tree");
+    group.sample_size(10);
+    group.bench_function("segment", |b| {
+        b.iter(|| Segment::build(records.iter().cloned(), root(), 0).unwrap())
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench,
+    build_home_tree,
+    enumerate_lookup,
+    search_with_overlay
+);
 criterion_main!(benches);

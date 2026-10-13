@@ -118,7 +118,7 @@ impl BytePool {
         let mut data = Vec::new();
         let mut offsets = vec![0u32];
         for page in bytes.chunks(PAGE) {
-            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(4));
             encoder.write_all(page)?;
             data.extend(encoder.finish()?);
             offsets.push(u32::try_from(data.len())?);

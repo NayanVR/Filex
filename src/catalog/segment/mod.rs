@@ -115,13 +115,11 @@ impl Segment {
         let mut dictionary = HashMap::<Vec<u8>, u32>::new();
         let mut raw = Vec::new();
         let mut raw_offsets = vec![0u32];
-        let mut metadata = BTreeMap::<String, Vec<u32>>::new();
         for record in records {
             ensure!(
                 record.id > ids.last().copied().unwrap_or(0),
                 "catalog IDs must increase"
             );
-            let ordinal = ids.len() as u32;
             let raw_id = if let Some(&id) = dictionary.get(&record.name) {
                 id
             } else {
@@ -135,19 +133,6 @@ impl Segment {
                 dictionary.insert(record.name.clone(), id);
                 id
             };
-            let native = os_name(&record.name);
-            let display = native.to_string_lossy();
-            if record.parent != 0 {
-                for key in meta_keys(
-                    &display,
-                    record.is_dir(),
-                    record.size,
-                    record.mtime,
-                    record.root,
-                ) {
-                    metadata.entry(key).or_default().push(ordinal);
-                }
-            }
             ids.push(record.id);
             parents.push(record.parent);
             root_ids.push(record.root);
@@ -176,27 +161,60 @@ impl Segment {
         devices.shrink_to_fit();
         raw.shrink_to_fit();
         raw_offsets.shrink_to_fit();
-        let (meta_keys, lists): (Vec<_>, Vec<_>) = metadata.into_iter().unzip();
-        let meta_postings = Postings::build_runs(lists)?;
         ensure!(ids.len() < u32::MAX as usize, "too many catalog files");
         super::storage::release_builder_memory();
-        let mut children: Vec<u32> = (0..ids.len() as u32).collect();
-        children.sort_unstable_by(|&a, &b| {
-            parents[a as usize].cmp(&parents[b as usize]).then_with(|| {
-                let (a, b) = (names[a as usize] as usize, names[b as usize] as usize);
-                raw[raw_offsets[a] as usize..raw_offsets[a + 1] as usize]
-                    .cmp(&raw[raw_offsets[b] as usize..raw_offsets[b + 1] as usize])
-            })
-        });
-        let mut native_order: Vec<u32> = (0..ids.len() as u32).collect();
-        native_order.sort_unstable_by_key(|&i| {
-            (
-                root_ids[i as usize],
-                devices[i as usize],
-                keys[i as usize],
-                births[i as usize],
-            )
-        });
+        let raw_name =
+            |n: u32| &raw[raw_offsets[n as usize] as usize..raw_offsets[n as usize + 1] as usize];
+        // Three independent passes over the finished columns: metadata
+        // postings, the two sort orders, and the name search index (the
+        // longest) on this thread.
+        let (meta, (children, native_order), search) = std::thread::scope(|scope| {
+            let meta = scope.spawn(|| {
+                metadata_postings((0..ids.len()).filter(|&i| parents[i] != 0).map(|i| {
+                    (
+                        i as u32,
+                        os_name(raw_name(names[i])),
+                        flags[i] & Record::DIRECTORY != 0,
+                        (flags[i] & HAS_SIZE != 0).then_some(sizes[i]),
+                        (flags[i] & HAS_MTIME != 0).then_some(mtimes[i]),
+                        root_ids[i],
+                    )
+                }))
+            });
+            let orders = scope.spawn(|| {
+                let mut children: Vec<u32> = (0..ids.len() as u32).collect();
+                children.sort_unstable_by(|&a, &b| {
+                    parents[a as usize]
+                        .cmp(&parents[b as usize])
+                        .then_with(|| raw_name(names[a as usize]).cmp(raw_name(names[b as usize])))
+                });
+                let mut native_order: Vec<u32> = (0..ids.len() as u32).collect();
+                native_order.sort_unstable_by_key(|&i| {
+                    (
+                        root_ids[i as usize],
+                        devices[i as usize],
+                        keys[i as usize],
+                        births[i as usize],
+                    )
+                });
+                (children, native_order)
+            });
+            let search = LiteralIndex::build(names.iter().zip(&parents).map(|(&n, &parent)| {
+                if parent == 0 {
+                    ""
+                } else {
+                    std::str::from_utf8(raw_name(n)).unwrap_or("")
+                }
+            }));
+            let join = |what| move |_| anyhow::anyhow!("{what} build panicked");
+            anyhow::Ok((
+                meta.join().map_err(join("metadata"))?,
+                orders.join().map_err(join("sort order"))?,
+                search,
+            ))
+        })?;
+        let (meta_keys, meta_postings) = meta?;
+        let search = search?;
         let root_files = parents
             .iter()
             .enumerate()
@@ -221,16 +239,6 @@ impl Segment {
         let mtimes: Column<_> = mtimes.into();
         let children: Column<_> = children.into();
         super::storage::release_builder_memory();
-        let search = LiteralIndex::build(names.iter().enumerate().map(|(i, n)| {
-            if parents.get(i) == 0 {
-                ""
-            } else {
-                std::str::from_utf8(
-                    &raw[raw_offsets[n as usize] as usize..raw_offsets[n as usize + 1] as usize],
-                )
-                .unwrap_or("")
-            }
-        }))?;
         Ok(Self {
             root_counts,
             root_files,
@@ -488,6 +496,29 @@ impl Segment {
                     .eq(other.meta_postings.get(id as u32))
             })
     }
+}
+/// Coarse filter postings (`meta_keys` per entry, ordinals ascending) and
+/// their sorted keys.
+fn metadata_postings(
+    entries: impl Iterator<Item = (u32, std::ffi::OsString, bool, Option<u64>, Option<i64>, u32)>,
+) -> Result<(Vec<String>, Postings)> {
+    let mut metadata = HashMap::<String, Vec<u32>>::new();
+    for (ordinal, name, dir, size, mtime, root) in entries {
+        for key in meta_keys(&name.to_string_lossy(), dir, size, mtime, root) {
+            // Few distinct keys, probed once per entry each: look up before
+            // allocating an owned key.
+            match metadata.get_mut(key.as_str()) {
+                Some(list) => list.push(ordinal),
+                None => {
+                    metadata.insert(key, vec![ordinal]);
+                }
+            }
+        }
+    }
+    let mut metadata: Vec<_> = metadata.into_iter().collect();
+    metadata.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    let (keys, lists): (Vec<_>, Vec<_>) = metadata.into_iter().unzip();
+    Ok((keys, Postings::build_runs(lists)?))
 }
 fn meta_keys(
     name: &str,

@@ -12,7 +12,7 @@ use crate::catalog::{
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::{cmp::Ordering, collections::BTreeMap, ops::Range};
+use std::{cmp::Ordering, collections::HashMap, ops::Range};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Tier {
@@ -38,6 +38,50 @@ pub struct LiteralIndex {
     boundaries: RankBits,
 }
 
+/// Inputs smaller than this fold on one thread: spawning costs more than
+/// it saves on a delta-sized segment.
+const PARALLEL_FOLD_MIN: usize = 64 * 1024;
+const MAX_FOLD_THREADS: usize = 4;
+
+/// Each distinct folded name in `names` (ordinals from `first`) with the
+/// folded byte positions of its original spellings' boundaries, unique in
+/// first-seen order, and its ascending file ordinals.
+type Folded = HashMap<String, (Vec<usize>, Vec<u32>)>;
+fn fold_names(names: &[&str], first: usize) -> Result<Folded> {
+    let mut dictionary = Folded::new();
+    for (i, name) in names.iter().enumerate() {
+        let file = first + i;
+        ensure!(
+            !name.contains('\0'),
+            "NUL is reserved as the name separator"
+        );
+        let folded = nfc_fold(name);
+        if folded.is_empty() {
+            continue;
+        }
+        ensure!(file < u32::MAX as usize, "file count exceeds ordinal range");
+        let (positions, postings) = dictionary.entry(folded).or_default();
+        postings.push(file as u32);
+        // ASCII folding keeps byte offsets, so only a prefix reaching past
+        // the first non-ASCII byte pays for folding.
+        let ascii = name
+            .bytes()
+            .position(|b| !b.is_ascii())
+            .unwrap_or(name.len());
+        for boundary in boundaries(name) {
+            let position = if boundary <= ascii {
+                boundary
+            } else {
+                nfc_fold(&name[..boundary]).len()
+            };
+            if !positions.contains(&position) {
+                positions.push(position);
+            }
+        }
+    }
+    Ok(dictionary)
+}
+
 impl LiteralIndex {
     pub(crate) fn remap(&mut self, reader: &Reader) -> Result<()> {
         self.text.remap(reader)?;
@@ -53,23 +97,52 @@ impl LiteralIndex {
     }
 
     pub fn build<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self> {
-        let mut dictionary = BTreeMap::<String, (Vec<usize>, Vec<u32>)>::new();
-        for (file, name) in names.into_iter().enumerate() {
-            ensure!(
-                !name.contains('\0'),
-                "NUL is reserved as the name separator"
-            );
-            let folded = nfc_fold(name);
-            if folded.is_empty() {
-                continue;
-            }
-            ensure!(file < u32::MAX as usize, "file count exceeds ordinal range");
-            let (positions, postings) = dictionary.entry(folded).or_default();
-            postings.push(file as u32);
-            for boundary in boundaries(name) {
-                let position = nfc_fold(&name[..boundary]).len();
-                if !positions.contains(&position) {
-                    positions.push(position);
+        let names: Vec<&str> = names.into_iter().collect();
+        let threads = if names.len() < PARALLEL_FOLD_MIN {
+            1
+        } else {
+            std::thread::available_parallelism().map_or(1, |n| n.get().min(MAX_FOLD_THREADS))
+        };
+        Self::build_folding_on(&names, threads)
+    }
+
+    /// Folding is the costliest per-name step, so large inputs fold in
+    /// contiguous ordinal chunks on `threads` threads. Merging the chunks in
+    /// order keeps every posting list ascending, as one pass would, so the
+    /// index is the same for any thread count.
+    fn build_folding_on(names: &[&str], threads: usize) -> Result<Self> {
+        let chunk = names.len().div_ceil(threads).max(1);
+        let parts = std::thread::scope(|scope| {
+            let handles: Vec<_> = names
+                .chunks(chunk)
+                .enumerate()
+                .map(|(k, part)| scope.spawn(move || fold_names(part, k * chunk)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .map_err(|_| anyhow::anyhow!("name folding panicked"))?
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        let mut parts = parts.into_iter();
+        let mut dictionary = parts.next().unwrap_or_default();
+        for part in parts {
+            for (folded, (positions, files)) in part {
+                match dictionary.entry(folded) {
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        let (known, list) = entry.into_mut();
+                        for position in positions {
+                            if !known.contains(&position) {
+                                known.push(position);
+                            }
+                        }
+                        list.extend(files);
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert((positions, files));
+                    }
                 }
             }
         }
@@ -78,10 +151,35 @@ impl LiteralIndex {
         for (_, (positions, _)) in &mut names {
             positions.sort_unstable();
         }
-        let fuzzy =
-            super::fuzzy::FuzzyIndex::build(names.iter().enumerate().map(
-                |(id, (name, (positions, _)))| (id as u32, name.as_str(), positions.as_slice()),
-            ))?;
+        let lists: Vec<Vec<u32>> = names
+            .iter_mut()
+            .map(|(_, (_, list))| std::mem::take(list))
+            .collect();
+        // Positions are already unique (deduplicated on insert) and sorted.
+        let names: Vec<(String, Vec<usize>)> = names
+            .into_iter()
+            .map(|(name, (positions, _))| (name, positions))
+            .collect();
+        // The fuzzy dictionary reads only the sorted names, so it builds on
+        // its own thread while this one lays out the text and its indexes.
+        std::thread::scope(|scope| {
+            let fuzzy = scope.spawn(|| {
+                super::fuzzy::FuzzyIndex::build(names.iter().enumerate().map(
+                    |(id, (name, positions))| (id as u32, name.as_str(), positions.as_slice()),
+                ))
+            });
+            Self::build_text(&names, lists, fuzzy)
+        })
+    }
+
+    /// Everything but the fuzzy dictionary, which `fuzzy` is building, from
+    /// names sorted by (length, bytes) with their unique, sorted boundary
+    /// positions.
+    fn build_text(
+        names: &[(String, Vec<usize>)],
+        lists: Vec<Vec<u32>>,
+        fuzzy: std::thread::ScopedJoinHandle<'_, Result<super::fuzzy::FuzzyIndex>>,
+    ) -> Result<Self> {
         let bytes = names
             .iter()
             .try_fold(0usize, |sum, (name, _)| sum.checked_add(name.len() + 1))
@@ -93,16 +191,13 @@ impl LiteralIndex {
         let mut text = Vec::with_capacity(bytes);
         let mut offsets = Vec::with_capacity(names.len() + 1);
         let mut boundary_positions = Vec::new();
-        let postings =
-            Postings::build(names.iter_mut().map(|(_, (_, list))| std::mem::take(list)))?;
-        for (name, (mut positions, _)) in names {
+        let postings = Postings::build(lists)?;
+        for (name, positions) in names {
             offsets.push(text.len() as u32);
-            positions.sort_unstable();
-            positions.dedup();
             boundary_positions.extend(
                 positions
-                    .into_iter()
-                    .filter(|p| *p < name.len())
+                    .iter()
+                    .filter(|p| **p < name.len())
                     .map(|p| (text.len() + p) as u32),
             );
             text.extend_from_slice(name.as_bytes());
@@ -110,9 +205,11 @@ impl LiteralIndex {
         }
         offsets.push(text.len() as u32);
         crate::catalog::storage::release_builder_memory();
-        let boundaries = RankBits::new(
-            (0..text.len()).map(|p| boundary_positions.binary_search(&(p as u32)).is_ok()),
-        );
+        // Ascending and unique: names are laid out in order, each with its
+        // sorted, deduplicated positions.
+        let mut marked = boundary_positions.iter().copied().peekable();
+        let boundaries =
+            RankBits::new((0..text.len() as u32).map(|p| marked.next_if_eq(&p).is_some()));
         drop(boundary_positions);
         let names = || {
             (0..offsets.len() as u32 - 1)
@@ -126,7 +223,10 @@ impl LiteralIndex {
         let mut sorted: Vec<_> = (0..offsets.len() as u32 - 1).collect();
         sorted.sort_unstable_by(|&a, &b| name(&text, &offsets, a).cmp(name(&text, &offsets, b)));
         let prefix_docs = WaveletMatrix::new(sorted.clone());
-        let built = Self {
+        let fuzzy = fuzzy
+            .join()
+            .map_err(|_| anyhow::anyhow!("fuzzy index build panicked"))??;
+        Ok(Self {
             postings,
             text: BytePool::build_search(text)?,
             offsets: offsets.into(),
@@ -136,8 +236,7 @@ impl LiteralIndex {
             sorted: sorted.into(),
             prefix_docs,
             boundaries,
-        };
-        Ok(built)
+        })
     }
     fn name_range(&self, id: u32) -> Range<usize> {
         self.offsets.get(id as usize) as usize..self.offsets.get(id as usize + 1) as usize - 1
@@ -384,6 +483,54 @@ fn prefix_cmp(text: &[u8], query: &[u8]) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parallel fold must build the same index as one thread: chunks
+    /// split repeated names (and their spellings) across threads, and the
+    /// merge has to keep postings ascending and boundaries complete.
+    #[test]
+    fn folding_on_several_threads_matches_one() {
+        let spellings = [
+            "XMLHttpRequest.rs",
+            "xmlhttprequest.RS",
+            "Straße",
+            "STRASSE",
+        ];
+        let names: Vec<String> = (0..9_000)
+            .map(|i| match i % 4 {
+                0 => spellings[i % spellings.len()].to_owned(),
+                1 => format!("Résumé {i}.pdf"),
+                2 => format!("projectNotes-{}.md", i % 500),
+                _ => format!("IMG_{i:05}.JPG"),
+            })
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let one = LiteralIndex::build_folding_on(&names, 1).unwrap();
+        let four = LiteralIndex::build_folding_on(&names, 4).unwrap();
+        assert_eq!(one.name_count(), four.name_count());
+        for id in 0..one.name_count() as u32 {
+            assert_eq!(one.name(id), four.name(id));
+            assert_eq!(
+                one.files(id).collect::<Vec<_>>(),
+                four.files(id).collect::<Vec<_>>()
+            );
+        }
+        for query in [
+            "xmlhttp",
+            "hr",
+            "strasse",
+            "résumé 4",
+            "notes",
+            "img_0",
+            "projct",
+            "pn",
+        ] {
+            assert_eq!(
+                one.search_files(query, 500),
+                four.search_files(query, 500),
+                "{query}"
+            );
+        }
+    }
     #[test]
     fn blocks_match_the_oracle_across_groups() {
         let mut names: Vec<_> = (0..1400)

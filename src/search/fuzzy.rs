@@ -5,7 +5,7 @@ use crate::catalog::{
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 const MAX_KEYS: usize = 100_000;
 const MAX_NAMES_PER_KEY: usize = 64;
 const MAX_CANDIDATES: usize = 256;
@@ -26,37 +26,61 @@ impl FuzzyIndex {
     }
 
     pub fn build<'a>(names: impl Iterator<Item = (u32, &'a str, &'a [usize])>) -> Result<Self> {
-        let mut dict = BTreeMap::<String, Vec<u32>>::new();
+        // Keys are admitted in first-seen order until MAX_KEYS, so the
+        // order below (acronym, then per word: the word and its deletes in
+        // sorted order) decides which keys a large disk keeps. Lookups go
+        // through one reused buffer: allocating a String per probe made this
+        // the costliest step of a first index (~3 s of 11 for 642k names).
+        let mut dict = HashMap::<String, Vec<u32>>::new();
+        let mut key = String::new();
+        let mut deleted = Vec::<String>::new();
         for (id, name, boundaries) in names {
-            let mut add = |key: String| {
-                if dict.len() < MAX_KEYS || dict.contains_key(&key) {
-                    let list = dict.entry(key).or_default();
+            let mut add = |key: &str| {
+                if let Some(list) = dict.get_mut(key) {
                     if list.len() < MAX_NAMES_PER_KEY && list.last() != Some(&id) {
                         list.push(id);
                     }
+                } else if dict.len() < MAX_KEYS {
+                    dict.insert(key.to_owned(), vec![id]);
                 }
             };
-            let acronym: String = boundaries
-                .iter()
-                .filter(|&&p| p < name.rfind('.').unwrap_or(name.len()))
-                .filter_map(|&p| name.get(p..)?.chars().next())
-                .filter(|c| c.is_alphanumeric())
-                .take(12)
-                .collect();
-            if acronym.chars().count() >= 2 {
-                add(format!("a:{acronym}"));
+            let stem = name.rfind('.').unwrap_or(name.len());
+            key.clear();
+            key.push_str("a:");
+            key.extend(
+                boundaries
+                    .iter()
+                    .filter(|&&p| p < stem)
+                    .filter_map(|&p| name.get(p..)?.chars().next())
+                    .filter(|c| c.is_alphanumeric())
+                    .take(12),
+            );
+            if key.chars().count() >= 4 {
+                add(&key);
             }
             for word in name.split(|c: char| !c.is_alphanumeric()) {
                 if !(3..=24).contains(&word.chars().count()) {
                     continue;
                 }
-                add(format!("d:{word}"));
-                for removed in deletes(word) {
-                    add(format!("d:{removed}"));
+                key.clear();
+                key.push_str("d:");
+                key.push_str(word);
+                add(&key);
+                let count = deletes_into(word, &mut deleted);
+                for (i, removed) in deleted[..count].iter().enumerate() {
+                    if i > 0 && *removed == deleted[i - 1] {
+                        continue;
+                    }
+                    key.clear();
+                    key.push_str("d:");
+                    key.push_str(removed);
+                    add(&key);
                 }
             }
         }
-        let (keys, lists) = dict.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
+        let mut entries: Vec<_> = dict.into_iter().collect();
+        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        let (keys, lists) = entries.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
         Ok(Self {
             keys,
             postings: Postings::build(lists)?,
@@ -115,6 +139,25 @@ impl FuzzyIndex {
             + self.keys.iter().map(|s| s.capacity()).sum::<usize>()
             + self.postings.bytes()
     }
+}
+/// Every one-char deletion of `s`, sorted (duplicates adjacent), written
+/// into `out`'s first entries so their buffers are reused across words.
+/// Returns how many entries are filled.
+fn deletes_into(s: &str, out: &mut Vec<String>) -> usize {
+    let count = s.chars().count();
+    while out.len() < count {
+        out.push(String::new());
+    }
+    for (remove, slot) in out[..count].iter_mut().enumerate() {
+        slot.clear();
+        slot.extend(
+            s.chars()
+                .enumerate()
+                .filter_map(|(i, c)| (i != remove).then_some(c)),
+        );
+    }
+    out[..count].sort_unstable();
+    count
 }
 fn deletes(s: &str) -> BTreeSet<String> {
     let chars: Vec<char> = s.chars().collect();
