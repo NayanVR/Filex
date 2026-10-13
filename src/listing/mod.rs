@@ -207,6 +207,75 @@ impl FileKind {
     }
 }
 
+/// A path as the user should see it. On Windows, `canonicalize` returns
+/// verbatim paths (`\\?\C:\…`, `\\?\UNC\server\share\…`); this drops the
+/// prefix when the plain form names the same file. Display only — keep
+/// the `PathBuf` itself verbatim, since `starts_with` treats the two
+/// prefix kinds as different.
+pub fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    if let Some(plain) = strip_verbatim(&text) {
+        return plain;
+    }
+    text.into_owned()
+}
+
+/// The plain Win32 spelling of a verbatim path, or `None` when there is
+/// none that means the same thing. Assumes Win32 path normalization:
+/// without `\\?\`, paths of `MAX_PATH` (260) or more fail, trailing dots
+/// and spaces on a component are trimmed, and DOS device names (`CON`,
+/// `NUL.txt`, …) resolve to devices. Volume-GUID and other non-drive
+/// verbatim paths are left alone. Pure string logic so it's tested on
+/// every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn strip_verbatim(text: &str) -> Option<String> {
+    const MAX_PATH: usize = 260;
+    let rest = text.strip_prefix(r"\\?\")?;
+    let plain = if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        let bytes = rest.as_bytes();
+        let is_drive = bytes.len() >= 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes.len() == 2 || bytes[2] == b'\\');
+        if !is_drive {
+            return None;
+        }
+        rest.to_string()
+    };
+    // Room for the terminating NUL, as MAX_PATH counts it.
+    if plain.encode_utf16().count() >= MAX_PATH {
+        return None;
+    }
+    let names = plain.trim_start_matches('\\').split('\\').skip(1);
+    if names
+        .clone()
+        .any(|n| n.contains('/') || n.ends_with(['.', ' ']))
+        || names.clone().any(is_dos_device)
+    {
+        return None;
+    }
+    Some(plain)
+}
+
+/// Whether Win32 would resolve this file name to a legacy DOS device.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_dos_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        _ => {
+            let b = upper.as_bytes();
+            b.len() == 4
+                && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                && b[3].is_ascii_digit()
+        }
+    }
+}
+
 /// Split a path into breadcrumb segments: each is the label to show
 /// and the full path clicking it navigates to. The filesystem root
 /// comes out as "/" on Unix; on Windows the drive prefix and root fold
@@ -221,7 +290,7 @@ pub fn path_segments(path: &Path) -> Vec<(String, PathBuf)> {
         match comp {
             Component::Prefix(_) => {}
             Component::RootDir => {
-                segments.push((acc.to_string_lossy().into_owned(), acc.clone()));
+                segments.push((display_path(&acc), acc.clone()));
             }
             _ => segments.push((comp.as_os_str().to_string_lossy().into_owned(), acc.clone())),
         }
@@ -278,6 +347,72 @@ pub fn format_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn verbatim_drive_and_unc_paths_lose_their_prefix() {
+        let strip = |s: &str| strip_verbatim(s);
+        assert_eq!(
+            strip(r"\\?\C:\Users\yrvir").as_deref(),
+            Some(r"C:\Users\yrvir")
+        );
+        assert_eq!(strip(r"\\?\D:\").as_deref(), Some(r"D:\"));
+        assert_eq!(
+            strip(r"\\?\UNC\nas\share\docs").as_deref(),
+            Some(r"\\nas\share\docs")
+        );
+        assert_eq!(
+            strip(r"\\?\C:\a.b\c d.txt").as_deref(),
+            Some(r"C:\a.b\c d.txt")
+        );
+    }
+
+    #[test]
+    fn verbatim_paths_whose_plain_form_differs_are_kept() {
+        let long = format!(r"\\?\C:\{}", "a".repeat(260));
+        let unchanged = [
+            long.as_str(),
+            r"\\?\C:\dir.\file",
+            r"\\?\C:\dir \file",
+            r"\\?\C:\docs\NUL",
+            r"\\?\C:\docs\com1.txt",
+            r"\\?\C:\docs\Con .log",
+            r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\x",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"\\?\C:foo",
+        ];
+        for path in unchanged {
+            assert_eq!(strip_verbatim(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn plain_paths_are_shown_as_is() {
+        assert_eq!(strip_verbatim(r"C:\Users"), None);
+        assert_eq!(display_path(Path::new("/home/me")), "/home/me");
+    }
+
+    #[test]
+    fn dos_device_names_are_recognized() {
+        for name in ["CON", "nul", "Aux.txt", "COM1", "lpt9.tar.gz", "CONIN$"] {
+            assert!(is_dos_device(name), "{name}");
+        }
+        for name in ["CONSOLE", "com", "COM10", "nullable.txt", "Resume.pdf"] {
+            assert!(!is_dos_device(name), "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_paths_display_without_the_verbatim_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+        let shown = display_path(&canonical);
+        assert!(!shown.starts_with(r"\\?\"), "{shown}");
+        assert_eq!(Path::new(&shown).canonicalize().unwrap(), canonical);
+        // Breadcrumb root reads "C:\", not "\\?\C:\".
+        assert_eq!(path_segments(&canonical)[0].0, shown[..3]);
+    }
 
     fn entry(name: &str, is_dir: bool) -> Entry {
         Entry {

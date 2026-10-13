@@ -351,9 +351,9 @@ impl Workspace {
                     let label = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.display().to_string());
+                        .unwrap_or_else(|| display_path(&path));
                     let (nav, menu) = (path.clone(), path.clone());
-                    let tip = path.display().to_string();
+                    let tip = display_path(&path);
                     ui::sidebar::sidebar_row(&theme, ("favorite", ix))
                         .when(self.query.is_empty() && self.cwd == path, |s| {
                             s.bg(theme.selected).text_color(theme.accent)
@@ -385,8 +385,8 @@ impl Workspace {
                         let label = path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.display().to_string());
-                        let tip = path.display().to_string();
+                            .unwrap_or_else(|| display_path(&path));
+                        let tip = display_path(&path);
                         ui::sidebar::sidebar_row(&theme, ("recent", ix))
                             .when(self.query.is_empty() && self.cwd == path, |s| {
                                 s.bg(theme.selected).text_color(theme.accent)

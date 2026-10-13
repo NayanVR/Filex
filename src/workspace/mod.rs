@@ -14,7 +14,7 @@ use gpui::{
 };
 
 use filex::drives::Drive;
-use filex::listing::{Entry, format_modified, format_size, read_dir_sorted};
+use filex::listing::{Entry, display_path, format_modified, format_size, read_dir_sorted};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
 use filex::search::filter::Filter;
@@ -184,17 +184,13 @@ fn describe_op(op: &FileOp) -> PlanRow {
             .to_string_lossy()
             .into_owned()
     };
-    let parent = |path: &Path| -> String {
-        path.parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default()
-    };
+    let parent = |path: &Path| -> String { path.parent().map(display_path).unwrap_or_default() };
     match op {
         FileOp::Delete { path } => PlanRow {
             name: file_name(path).into(),
             location: parent(path).into(),
             dest: None,
-            tooltip: format!("{} → Trash", path.display()).into(),
+            tooltip: format!("{} → Trash", display_path(path)).into(),
         },
         FileOp::Move { from, to } | FileOp::Copy { from, to } => {
             // Full destination path when the plan retargeted to dodge a
@@ -205,15 +201,15 @@ fn describe_op(op: &FileOp) -> PlanRow {
             // every row's destination.
             let renamed = to.file_name() != from.file_name();
             let dest = if renamed {
-                to.display().to_string()
+                display_path(to)
             } else {
-                to.parent().unwrap_or(to.as_path()).display().to_string()
+                display_path(to.parent().unwrap_or(to.as_path()))
             };
             PlanRow {
                 name: file_name(from).into(),
                 location: parent(from).into(),
                 dest: Some(dest.into()),
-                tooltip: format!("{} → {}", from.display(), to.display()).into(),
+                tooltip: format!("{} → {}", display_path(from), display_path(to)).into(),
             }
         }
         FileOp::Rename { path, new_name } => PlanRow {
@@ -221,7 +217,7 @@ fn describe_op(op: &FileOp) -> PlanRow {
             location: parent(path).into(),
             // Bare, for the same reason as Move/Copy above.
             dest: Some(SharedString::from(new_name.clone())),
-            tooltip: format!("{} → {new_name}", path.display()).into(),
+            tooltip: format!("{} → {new_name}", display_path(path)).into(),
         },
     }
 }
@@ -479,7 +475,7 @@ impl Workspace {
         path_input.update(cx, |input, cx| {
             input.set_propagate_empty(false);
             input.set_placeholder("Enter a folder path", cx);
-            input.set_text(cwd.to_string_lossy().into_owned(), cx);
+            input.set_text(display_path(&cwd), cx);
         });
         let path_subscription = cx.subscribe(&path_input, |this, _, event, cx| {
             if matches!(event, SearchInputEvent::Changed(_)) {

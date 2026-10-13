@@ -90,7 +90,7 @@ impl Workspace {
         let paths: Vec<String> = self
             .selected_paths()
             .iter()
-            .map(|(path, _)| path.display().to_string())
+            .map(|(path, _)| display_path(path))
             .collect();
         if paths.is_empty() {
             return;

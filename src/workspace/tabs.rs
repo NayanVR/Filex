@@ -144,7 +144,7 @@ impl Workspace {
         };
         cwd.file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| cwd.display().to_string())
+            .unwrap_or_else(|| display_path(cwd))
             .into()
     }
 }

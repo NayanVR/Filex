@@ -43,7 +43,7 @@ fn read_location(
 
 impl Workspace {
     pub(super) fn sync_path(&mut self, cx: &mut Context<Self>) {
-        let path = self.cwd.to_string_lossy().into_owned();
+        let path = display_path(&self.cwd);
         if self.path_input.read(cx).text() != path {
             self.path_input
                 .update(cx, |input, cx| input.set_text(path, cx));

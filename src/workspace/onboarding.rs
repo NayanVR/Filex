@@ -757,12 +757,12 @@ impl Workspace {
                         let name = path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.display().to_string());
+                            .unwrap_or_else(|| display_path(&path));
                         ui::onboarding::check_row(
                             theme,
                             ("import", ix),
                             name,
-                            path.display().to_string(),
+                            display_path(&path),
                             on,
                         )
                         .on_click(cx.listener(

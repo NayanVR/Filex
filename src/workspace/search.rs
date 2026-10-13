@@ -564,7 +564,7 @@ impl Workspace {
                             .into_iter()
                             .map(|hit| SearchRow {
                                 name: hit.name.into(),
-                                path_label: hit.path.display().to_string().into(),
+                                path_label: display_path(&hit.path).into(),
                                 is_dir: hit.is_dir,
                                 target: hit.path,
                             })
@@ -630,7 +630,7 @@ impl Workspace {
                             }
                             this.results.push(SearchRow {
                                 name: hit.name.clone().into(),
-                                path_label: hit.path.display().to_string().into(),
+                                path_label: display_path(&hit.path).into(),
                                 is_dir: hit.is_dir,
                                 target: hit.path.clone(),
                             });

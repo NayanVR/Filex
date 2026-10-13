@@ -20,7 +20,7 @@ impl IndexedRoot {
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.path.display().to_string());
+            .unwrap_or_else(|| display_path(&root.path));
         let state = if root.state == "Building index" {
             IndexState::Building
         } else if root.state == "Ready" {

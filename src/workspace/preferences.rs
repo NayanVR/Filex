@@ -738,7 +738,7 @@ impl Workspace {
             group = group.child(ui::settings_pane::action_row(
                 theme,
                 slot.label.clone(),
-                format!("{} · {status}", slot.path.display()),
+                format!("{} · {status}", display_path(&slot.path)),
                 ui::modal::button(theme, ("remove-root", ix), "Remove", false)
                     .flex_none()
                     .text_xs()
@@ -748,7 +748,7 @@ impl Workspace {
         group = group.child(ui::settings_pane::action_row(
             theme,
             "Add current folder",
-            self.cwd.display().to_string(),
+            display_path(&self.cwd),
             ui::modal::button(theme, "add-root", "Add", false)
                 .flex_none()
                 .text_xs()

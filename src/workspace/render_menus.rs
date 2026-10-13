@@ -577,11 +577,7 @@ impl Workspace {
             Some(m) => format_modified(m.created, now).into(),
             None => "…".into(),
         };
-        let where_value: SharedString = path
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default()
-            .into();
+        let where_value: SharedString = path.parent().map(display_path).unwrap_or_default().into();
 
         let mut panel = ui::details::panel(&theme, width)
             .child(ui::details::preview_box(&theme).child(preview))
