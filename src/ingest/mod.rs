@@ -1,5 +1,7 @@
 //! Read-only filesystem inspection. Notification adapters never mutate catalogs.
 mod platform;
+#[cfg_attr(not(windows), cfg(test))]
+mod windows;
 
 use crate::catalog::segment::{Identity, Record, Root, raw_name};
 use anyhow::Result;
@@ -15,40 +17,87 @@ use std::{
 };
 
 pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
-    let meta = std::fs::symlink_metadata(path)?;
-    let identity = identity(path, &meta);
-    Ok(record(path, &meta, identity, id, parent, root))
+    Ok(record(path, stat(path)?, id, parent, root))
 }
-/// The record for `path` from metadata and identity the caller already holds,
-/// so a walk opens each entry once rather than once per lookup.
-fn record(
-    path: &Path,
-    meta: &std::fs::Metadata,
-    identity: Identity,
-    id: u64,
-    parent: u64,
-    root: u32,
-) -> Record {
-    Record {
-        id,
-        parent,
-        root,
-        name: raw_name(path.file_name().unwrap_or(path.as_os_str())),
-        flags: if meta.is_dir() { Record::DIRECTORY } else { 0 }
-            | if meta.file_type().is_symlink() {
-                Record::SYMLINK
-            } else {
-                0
-            },
-        identity,
-        size: Some(meta.len()),
+
+/// What a record needs from the filesystem about one entry, symlinks not
+/// followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stat {
+    pub identity: Identity,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+    pub mtime: Option<i64>,
+}
+
+/// The [`Stat`] of one path: `lstat` plus its native identity.
+fn stat(path: &Path) -> std::io::Result<Stat> {
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok(Stat {
+        identity: identity(path, &meta),
+        is_dir: meta.is_dir(),
+        is_symlink: meta.file_type().is_symlink(),
+        size: meta.len(),
         mtime: meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64),
+    })
+}
+
+fn record(path: &Path, stat: Stat, id: u64, parent: u64, root: u32) -> Record {
+    Record {
+        id,
+        parent,
+        root,
+        name: raw_name(path.file_name().unwrap_or(path.as_os_str())),
+        flags: if stat.is_dir { Record::DIRECTORY } else { 0 }
+            | if stat.is_symlink { Record::SYMLINK } else { 0 },
+        identity: stat.identity,
+        size: Some(stat.size),
+        mtime: stat.mtime,
     }
 }
+
+/// One directory entry from [`list`]: its path, whether the directory entry
+/// itself says it's a directory (no extra syscall), and its [`Stat`] when
+/// the listing already carries it.
+struct Listed {
+    path: PathBuf,
+    is_dir: bool,
+    stat: Option<Stat>,
+}
+
+/// The entries of `dir`. Windows reads each entry's [`Stat`] from the
+/// directory handle in batches; elsewhere `readdir` plus a later `lstat`
+/// per kept entry is already cheap.
+fn list(dir: &Path) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<Listed>>>> {
+    #[cfg(windows)]
+    {
+        Ok(Box::new(windows::list(dir)?.map(|entry| {
+            entry.map(|(path, stat)| Listed {
+                path,
+                is_dir: stat.is_dir,
+                stat: Some(stat),
+            })
+        })))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Box::new(std::fs::read_dir(dir)?.map(|entry| {
+            entry.map(|entry| Listed {
+                path: entry.path(),
+                // `file_type` comes from the directory entry itself on most
+                // platforms, so the name check costs no extra stat.
+                is_dir: entry.file_type().is_ok_and(|t| t.is_dir()),
+                stat: None,
+            })
+        })))
+    }
+}
+
 /// Iterative walk: bounded directory stack, no full descendant path arena and no
 /// symlink traversal. Permission loss is reported rather than silently claiming
 /// a complete generation.
@@ -66,22 +115,14 @@ pub fn walk(
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<usize> {
     let mut skipped = 0;
-    let meta = std::fs::symlink_metadata(&root.path)?;
-    let root_identity = identity(&root.path, &meta);
-    let root_id = allocate(&root.path, 0, &root_identity);
-    emit(record(
-        &root.path,
-        &meta,
-        root_identity,
-        root_id,
-        0,
-        root.id,
-    ))?;
+    let root_stat = stat(&root.path)?;
+    let root_id = allocate(&root.path, 0, &root_stat.identity);
+    emit(record(&root.path, root_stat, root_id, 0, root.id))?;
     let mut stack = vec![(root.path.clone(), root_id)];
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
     while let Some((path, parent)) = stack.pop() {
         anyhow::ensure!(!cancelled(), "enumeration cancelled");
-        let entries = match std::fs::read_dir(path) {
+        let entries = match list(&path) {
             Ok(e) => e,
             Err(_) => {
                 skipped += 1;
@@ -90,33 +131,35 @@ pub fn walk(
         };
         for entry in entries {
             anyhow::ensure!(!cancelled(), "enumeration cancelled");
-            let entry = match entry {
+            let Listed {
+                path,
+                is_dir,
+                stat: listed,
+            } = match entry {
                 Ok(e) => e,
                 Err(_) => {
                     skipped += 1;
                     continue;
                 }
             };
-            let path = entry.path();
-            // `file_type` comes from the directory entry itself on most
-            // platforms, so the name check costs no extra stat.
             let pruned = !filter.excluded_names.is_empty()
-                && entry.file_type().is_ok_and(|t| t.is_dir())
-                && filter.excluded_name(&entry.file_name());
+                && is_dir
+                && path
+                    .file_name()
+                    .is_some_and(|name| filter.excluded_name(name));
             if pruned || path.starts_with(excluded) || filter.excludes_top_level(&root.path, &path)
             {
                 continue;
             }
-            let meta = match std::fs::symlink_metadata(&path) {
-                Ok(m) => m,
+            let entry_stat = match listed.map_or_else(|| stat(&path), Ok) {
+                Ok(s) => s,
                 Err(_) => {
                     skipped += 1;
                     continue;
                 }
             };
-            let key = identity(&path, &meta);
-            let id = allocate(&path, parent, &key);
-            let record = record(&path, &meta, key, id, parent, root.id);
+            let id = allocate(&path, parent, &entry_stat.identity);
+            let record = record(&path, entry_stat, id, parent, root.id);
             let dir = record.is_dir();
             emit(record)?;
             if dir {

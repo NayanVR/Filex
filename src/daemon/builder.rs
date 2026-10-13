@@ -206,6 +206,7 @@ pub(super) fn delta_changes(view: &View, merge_deltas: bool) -> (Vec<Record>, Ve
 }
 
 fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) -> Result<usize> {
+    let started = std::time::Instant::now();
     let mut allocated = HashSet::new();
     let mut skipped = 0;
     let filter = ingest::IndexFilter::load();
@@ -230,6 +231,14 @@ fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) 
             stop,
         )?;
     }
+    // The walk alone, so a slow rebuild shows whether the filesystem or the
+    // segment worker is to blame.
+    tracing::info!(
+        secs = started.elapsed().as_secs_f32(),
+        records = allocated.len(),
+        skipped,
+        "roots enumerated"
+    );
     Ok(skipped)
 }
 
