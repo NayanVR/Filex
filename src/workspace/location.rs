@@ -11,6 +11,12 @@ fn resolve(text: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, Strin
     if text.is_empty() {
         return Err("Enter a folder path.".into());
     }
+    if cfg!(windows)
+        && (text.eq_ignore_ascii_case(filex::drives::THIS_PC_LABEL)
+            || filex::drives::is_this_pc(Path::new(text)))
+    {
+        return Ok(filex::drives::this_pc());
+    }
     if text == "~" {
         return home
             .map(Path::to_path_buf)
@@ -22,11 +28,14 @@ fn resolve(text: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, Strin
             .ok_or_else(|| "Home folder is unavailable.".into());
     }
     let path = PathBuf::from(text);
-    Ok(if path.is_absolute() {
-        path
+    if path.is_absolute() {
+        Ok(path)
+    } else if filex::drives::is_this_pc(cwd) {
+        // This PC isn't a folder, so there is nothing to be relative to.
+        Err("Enter a full path, like C:\\Users.".into())
     } else {
-        cwd.join(path)
-    })
+        Ok(cwd.join(path))
+    }
 }
 
 /// Read and validate the destination before changing any active-tab state.
@@ -79,6 +88,12 @@ impl Workspace {
                 return;
             }
         };
+        if filex::drives::is_this_pc(&target) {
+            window.focus(&self.focus_handle, cx);
+            self.clear_search(cx);
+            self.navigate(target, cx);
+            return;
+        }
         self.path_request = self.path_request.wrapping_add(1);
         let request = self.path_request;
         let sort = self.settings.read(cx).settings().sort;
@@ -206,6 +221,28 @@ mod tests {
         );
         assert!(resolve("~/files", cwd, None).is_err());
     }
+    /// Regression guard: joining onto This PC would resolve against the
+    /// process's working directory.
+    #[test]
+    fn relative_paths_from_this_pc_are_refused() {
+        let this_pc = filex::drives::this_pc();
+        assert!(resolve("Users", &this_pc, None).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn this_pc_can_be_typed_by_name() {
+        let cwd = Path::new(r"C:\work");
+        let this_pc = filex::drives::this_pc();
+        assert_eq!(resolve("This PC", cwd, None).unwrap(), this_pc);
+        assert_eq!(resolve("this pc", cwd, None).unwrap(), this_pc);
+        assert_eq!(resolve(filex::drives::THIS_PC, cwd, None).unwrap(), this_pc);
+        assert_eq!(
+            resolve(r"D:\Data", &this_pc, None).unwrap(),
+            Path::new(r"D:\Data")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn absolute_paths_are_not_joined_to_cwd() {

@@ -16,11 +16,7 @@ pub(super) struct IndexedRoot {
 }
 impl IndexedRoot {
     pub(super) fn from_status(root: &filex::daemon::ipc::RootStatus) -> Self {
-        let label = root
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| display_path(&root.path));
+        let label = filex::listing::location_label(&root.path);
         let state = if root.state == "Building index" {
             IndexState::Building
         } else if root.state == "Ready" {

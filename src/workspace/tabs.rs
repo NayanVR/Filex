@@ -135,17 +135,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The folder name shown on tab `i` (the drive/root shows as "/").
+    /// The location name shown on tab `i` (a root shows its whole path).
     pub(super) fn tab_title(&self, i: usize) -> SharedString {
         let cwd = if i == self.active_tab {
             &self.cwd
         } else {
             &self.tabs[i].cwd
         };
-        cwd.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| display_path(cwd))
-            .into()
+        filex::listing::location_label(cwd).into()
     }
 }
 

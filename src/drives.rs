@@ -9,7 +9,52 @@
 //! Platform assumptions live next to each implementation; the pure
 //! parsing bits are factored out and unit-tested.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf, Prefix};
+
+/// The "This PC" location: every drive on one page, as in Explorer.
+/// Windows has no single filesystem root, so this stands in for `/`.
+/// It isn't a real path but a reserved spelling (Explorer's own shell
+/// name for the folder). `:` is illegal in a Windows file name, so a path
+/// accidentally joined onto it fails to resolve instead of landing in the
+/// process's working directory.
+pub const THIS_PC: &str = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+
+/// What [`THIS_PC`] is called on screen.
+pub const THIS_PC_LABEL: &str = "This PC";
+
+/// The [`THIS_PC`] location as a navigable path.
+pub fn this_pc() -> PathBuf {
+    PathBuf::from(THIS_PC)
+}
+
+/// Whether `path` is the [`THIS_PC`] location rather than a folder.
+pub fn is_this_pc(path: &Path) -> bool {
+    path.as_os_str() == THIS_PC
+}
+
+/// Where "up" goes from `path`: its parent folder, or This PC from a
+/// drive root on Windows (Explorer's behavior). `None` at the top.
+pub fn parent_location(path: &Path) -> Option<PathBuf> {
+    parent_or_this_pc(path, cfg!(windows))
+}
+
+/// [`parent_location`] with the platform choice passed in, so both
+/// behaviors are tested everywhere. Only drive-letter roots (`C:\`,
+/// `\\?\C:\`) step up to This PC; a UNC share root stays the top.
+fn parent_or_this_pc(path: &Path, has_this_pc: bool) -> Option<PathBuf> {
+    // `Path::parent` would hand back "" for the reserved spelling.
+    if is_this_pc(path) {
+        return None;
+    }
+    if let Some(parent) = path.parent() {
+        return Some(parent.to_path_buf());
+    }
+    let drive_root = matches!(
+        path.components().next(),
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    );
+    (has_this_pc && drive_root && path.has_root()).then(this_pc)
+}
 
 /// One mounted volume.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +221,7 @@ mod platform {
     use std::path::PathBuf;
 
     use windows::Win32::Storage::FileSystem::{
-        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
     };
     use windows::core::HSTRING;
 
@@ -231,7 +276,7 @@ mod platform {
             };
             if ok {
                 drives.push(Drive {
-                    name: format!("{letter}:"),
+                    name: super::drive_label(volume_label(&wide).as_deref(), letter),
                     path: PathBuf::from(&root),
                     total_bytes: total,
                     free_bytes: free,
@@ -240,6 +285,28 @@ mod platform {
         }
         drives
     }
+
+    /// The volume label for a drive root, `None` when it has none or the
+    /// call fails. Assumes `root` is a mounted drive root (`C:\`) that
+    /// `GetDiskFreeSpaceExW` has just accepted, so the query won't spin up
+    /// an empty optical drive.
+    fn volume_label(root: &HSTRING) -> Option<String> {
+        // MAX_PATH + 1 is the documented maximum for the label buffer.
+        let mut buf = [0u16; 261];
+        // SAFETY: valid NUL-terminated wide path; `buf` is a local the
+        // call writes a NUL-terminated label into.
+        unsafe { GetVolumeInformationW(root, Some(&mut buf), None, None, None, None) }.ok()?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+}
+
+/// Explorer's name for a Windows drive: "Data (D:)", or "Local Disk (C:)"
+/// when the volume has no label.
+#[cfg(any(windows, test))]
+fn drive_label(volume: Option<&str>, letter: char) -> String {
+    let volume = volume.map(str::trim).filter(|v| !v.is_empty());
+    format!("{} ({letter}:)", volume.unwrap_or("Local Disk"))
 }
 
 #[cfg(test)]
@@ -292,6 +359,59 @@ tmpfs /run tmpfs rw 0 0
                 PathBuf::from("/media/My Disk"),
             ]
         );
+    }
+
+    #[test]
+    fn this_pc_is_recognized_only_by_its_exact_spelling() {
+        assert!(is_this_pc(&this_pc()));
+        assert!(!is_this_pc(Path::new("")));
+        assert!(!is_this_pc(Path::new("This PC")));
+        assert!(!is_this_pc(&this_pc().join("x")));
+    }
+
+    #[test]
+    fn up_from_a_folder_is_its_parent_everywhere() {
+        let dir = Path::new("/home/me/docs");
+        assert_eq!(
+            parent_or_this_pc(dir, true),
+            Some(PathBuf::from("/home/me"))
+        );
+        assert_eq!(
+            parent_or_this_pc(dir, false),
+            Some(PathBuf::from("/home/me"))
+        );
+    }
+
+    #[test]
+    fn this_pc_has_nothing_above_it() {
+        assert_eq!(parent_or_this_pc(&this_pc(), true), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn up_from_a_drive_root_is_this_pc_on_windows() {
+        assert_eq!(parent_or_this_pc(Path::new(r"C:\"), true), Some(this_pc()));
+        assert_eq!(
+            parent_or_this_pc(Path::new(r"\\?\D:\"), true),
+            Some(this_pc())
+        );
+        // A drive-relative "C:" or a share root isn't a drive's top.
+        assert_eq!(parent_or_this_pc(Path::new("C:"), true), None);
+        assert_eq!(parent_or_this_pc(Path::new(r"\\server\share\"), true), None);
+        assert_eq!(parent_or_this_pc(Path::new(r"C:\"), false), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_root_has_nothing_above_it() {
+        assert_eq!(parent_location(Path::new("/")), None);
+    }
+
+    #[test]
+    fn drives_are_named_like_explorer() {
+        assert_eq!(drive_label(Some("Data"), 'D'), "Data (D:)");
+        assert_eq!(drive_label(Some("  "), 'C'), "Local Disk (C:)");
+        assert_eq!(drive_label(None, 'C'), "Local Disk (C:)");
     }
 
     #[test]

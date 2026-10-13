@@ -32,12 +32,7 @@ impl Workspace {
                     .spawn(async { filex::drives::list_drives() })
                     .await;
                 let updated = this
-                    .update(cx, |this, cx| {
-                        if this.drives != drives {
-                            this.drives = drives;
-                            cx.notify();
-                        }
-                    })
+                    .update(cx, |this, cx| this.set_drives(drives, cx))
                     .is_ok();
                 if !updated {
                     break; // workspace dropped

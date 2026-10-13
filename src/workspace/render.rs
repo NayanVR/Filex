@@ -184,7 +184,9 @@ impl Workspace {
     fn render_content_header(&self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = *cx.theme();
         let settings = self.settings.read(cx).settings();
-        let browsing = self.query.is_empty() && !self.in_magic_view();
+        let this_pc = self.query.is_empty() && !self.in_magic_view() && self.at_this_pc();
+        // This PC has its own tile layout, so no list/grid controls.
+        let browsing = self.query.is_empty() && !self.in_magic_view() && !this_pc;
         let title: SharedString = if self.in_magic_view() {
             "File actions".into()
         } else if !self.query.is_empty() {
@@ -198,6 +200,8 @@ impl Workspace {
                 self.search_scope.label()
             )
             .into()
+        } else if this_pc {
+            this_pc::drive_count(self.drives.len()).into()
         } else if browsing {
             format!("{} items", self.entries.len()).into()
         } else {
@@ -339,6 +343,10 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // No drop target: This PC isn't a folder anything can land in.
+        if self.at_this_pc() {
+            return self.render_this_pc(cx);
+        }
         let inner = if let Some(err) = &self.load_error {
             ui::pane::message_state(
                 cx.theme(),
@@ -449,6 +457,8 @@ impl Workspace {
             } else {
                 format!("{n} of {total} selected").into()
             }
+        } else if self.query.is_empty() && self.at_this_pc() {
+            this_pc::drive_count(self.drives.len()).into()
         } else if self.query.is_empty() {
             format!("{} items", self.entries.len()).into()
         } else {

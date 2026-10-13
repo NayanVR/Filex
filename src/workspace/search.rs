@@ -454,6 +454,8 @@ impl Workspace {
         let dirs = self.user_dirs.clone();
         let scope = match self.search_scope {
             SearchScope::Anywhere => None,
+            // This PC holds every drive, so its "current dir" is everywhere.
+            SearchScope::CurrentDir if self.at_this_pc() => None,
             SearchScope::CurrentDir => Some(self.cwd.clone()),
         };
         // Same query, scope and phrase choice as the rows on screen means

@@ -71,6 +71,10 @@ impl Workspace {
 
     /// Note `path` as recently opened and persist the log off-thread.
     pub(super) fn record_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // A page, not a file the index or the recents list can hold.
+        if filex::drives::is_this_pc(&path) {
+            return;
+        }
         if let Some(client) = self.service.clone() {
             let touched = path.clone();
             cx.background_executor()
@@ -316,13 +320,14 @@ impl Workspace {
         if !collapsed {
             // Reuse the startup cache: OS folder resolution can read XDG files.
             let place = |name: &str| self.user_dirs.get(name).map(Path::to_path_buf);
+            let (machine_icon, machine_label, machine) = platform::machine_place();
             let places: Vec<(&'static str, &str, PathBuf)> = [
                 ("icons/house.svg", "Home", place("home")),
                 ("icons/folder.svg", "Desktop", place("desktop")),
                 ("icons/file-text.svg", "Documents", place("documents")),
                 ("icons/download.svg", "Downloads", place("downloads")),
                 ("icons/image.svg", "Pictures", place("pictures")),
-                ("icons/hard-drive.svg", "Root", Some(PathBuf::from("/"))),
+                (machine_icon, machine_label, Some(machine)),
             ]
             .into_iter()
             .filter_map(|(icon, label, path)| Some((icon, label, path?)))
@@ -348,10 +353,7 @@ impl Workspace {
             content = content.child(header);
             if !collapsed {
                 content = content.children(favorites.into_iter().enumerate().map(|(ix, path)| {
-                    let label = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| display_path(&path));
+                    let label = filex::listing::location_label(&path);
                     let (nav, menu) = (path.clone(), path.clone());
                     let tip = display_path(&path);
                     ui::sidebar::sidebar_row(&theme, ("favorite", ix))
@@ -382,10 +384,7 @@ impl Workspace {
                 content =
                     content.children(self.recents.recent_paths().enumerate().map(|(ix, path)| {
                         let path = path.to_path_buf();
-                        let label = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| display_path(&path));
+                        let label = filex::listing::location_label(&path);
                         let tip = display_path(&path);
                         ui::sidebar::sidebar_row(&theme, ("recent", ix))
                             .when(self.query.is_empty() && self.cwd == path, |s| {

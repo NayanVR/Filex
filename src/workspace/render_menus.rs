@@ -347,10 +347,7 @@ impl Workspace {
                 );
             }
             MenuTarget::Favorite { path } => {
-                let label = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let label = filex::listing::location_label(path);
                 items.push(ui::menu::heading(&theme, label).into_any_element());
                 let p = path.clone();
                 items.push(

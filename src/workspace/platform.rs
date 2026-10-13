@@ -44,6 +44,21 @@ pub(super) fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     command.spawn().map(drop)
 }
 
+/// The sidebar's whole-machine place as (icon, label, location). Windows
+/// has no single root, so it opens the This PC drives page; macOS and
+/// Linux go to `/`.
+pub(super) fn machine_place() -> (&'static str, &'static str, PathBuf) {
+    if cfg!(windows) {
+        (
+            "icons/hard-drive.svg",
+            filex::drives::THIS_PC_LABEL,
+            filex::drives::this_pc(),
+        )
+    } else {
+        ("icons/hard-drive.svg", "Root", PathBuf::from("/"))
+    }
+}
+
 /// Context-menu label: a submenu on macOS, the OS dialog elsewhere.
 pub(super) const OPEN_WITH_LABEL: &str = if cfg!(target_os = "macos") {
     "Open With  ›"

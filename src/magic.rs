@@ -464,36 +464,46 @@ pub struct PlanContext<'a> {
 /// while resolving nothing on Linux — one command, a different
 /// destination per OS. Scanning yields the true on-disk name everywhere.
 pub fn resolve_destination(dest: &Destination, ctx: &PlanContext) -> Result<PathBuf, PlanError> {
-    let mut case_insensitive: Option<PathBuf> = None;
-    if let Ok(entries) = std::fs::read_dir(ctx.cwd) {
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            // Compare names before stat'ing — no metadata call per child.
-            let exact = name == dest.name;
-            if (!exact && !name.eq_ignore_ascii_case(&dest.name)) || !entry.path().is_dir() {
-                continue;
-            }
-            if exact {
-                return Ok(entry.path());
-            }
-            case_insensitive.get_or_insert_with(|| entry.path());
-        }
-    }
-    if let Some(path) = case_insensitive {
-        return Ok(path);
-    }
-    // A multi-segment destination isn't one directory entry.
-    let nested = ctx.cwd.join(&dest.name);
-    if nested.is_dir() {
-        return Ok(nested);
+    if let Some(dir) = destination_in(ctx.cwd, &dest.name) {
+        return Ok(dir);
     }
     ctx.dirs
         .get(&dest.name)
         .filter(|path| path.is_dir())
         .map(Path::to_path_buf)
         .ok_or_else(|| PlanError::UnknownDestination(dest.name.clone()))
+}
+
+/// The folder `name` inside `cwd`, exact case first. A relative `cwd`
+/// (the This PC page, which isn't a folder) has nothing inside it: a
+/// lookup would resolve against the process's working directory.
+fn destination_in(cwd: &Path, name: &str) -> Option<PathBuf> {
+    if !cwd.is_absolute() {
+        return None;
+    }
+    let mut case_insensitive: Option<PathBuf> = None;
+    if let Ok(entries) = std::fs::read_dir(cwd) {
+        for entry in entries.flatten() {
+            let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            // Compare names before stat'ing — no metadata call per child.
+            let exact = entry_name == name;
+            if (!exact && !entry_name.eq_ignore_ascii_case(name)) || !entry.path().is_dir() {
+                continue;
+            }
+            if exact {
+                return Some(entry.path());
+            }
+            case_insensitive.get_or_insert_with(|| entry.path());
+        }
+    }
+    if case_insensitive.is_some() {
+        return case_insensitive;
+    }
+    // A multi-segment destination isn't one directory entry.
+    let nested = cwd.join(name);
+    nested.is_dir().then_some(nested)
 }
 
 // ---------------------------------------------------------------------
@@ -1098,6 +1108,24 @@ mod tests {
                 &ctx(cwd.path(), &dirs)
             ),
             Err(PlanError::UnknownDestination("Nowhere".into()))
+        );
+    }
+
+    /// Regression: browsing This PC (not a real folder) made the cwd a
+    /// relative path, and destinations then resolved against the
+    /// process's working directory. Tests run from the crate root, where
+    /// `src/workspace` exists.
+    #[test]
+    fn a_relative_cwd_is_never_searched_for_destinations() {
+        let dirs = UserDirs::default();
+        let command = cmd("move pdfs to workspace").unwrap();
+        assert_eq!(
+            build(
+                &command,
+                &[PathBuf::from("/a.pdf")],
+                &ctx(Path::new("src"), &dirs)
+            ),
+            Err(PlanError::UnknownDestination("workspace".into()))
         );
     }
 

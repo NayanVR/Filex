@@ -2,6 +2,11 @@
 use super::*;
 impl Workspace {
     pub(super) fn add_current_folder(&mut self, cx: &mut Context<Self>) {
+        if self.at_this_pc() {
+            self.notice = Some("open a drive or folder to add it".into());
+            cx.notify();
+            return;
+        }
         self.add_root(self.cwd.clone(), cx);
     }
     pub(super) fn add_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {

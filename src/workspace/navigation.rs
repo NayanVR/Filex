@@ -19,6 +19,10 @@ impl Workspace {
         select: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if filex::drives::is_this_pc(path) {
+            self.show_this_pc(cx);
+            return;
+        }
         self.path_request = self.path_request.wrapping_add(1);
         let request = self.path_request;
         self.path_loading = false;
@@ -429,7 +433,7 @@ impl Workspace {
     }
 
     pub(super) fn go_up(&mut self, cx: &mut Context<Self>) {
-        if let Some(parent) = self.cwd.parent().map(Path::to_path_buf) {
+        if let Some(parent) = filex::drives::parent_location(&self.cwd) {
             self.navigate(parent, cx);
         }
     }

@@ -215,6 +215,11 @@ impl Workspace {
             }
             return;
         };
+        if self.at_this_pc() {
+            self.notice = Some("open a drive to paste into it".into());
+            cx.notify();
+            return;
+        }
         // One item keeps the interactive conflict dialog; a multi-paste
         // auto-resolves conflicts (keep-both) and lands as one undo.
         if let [source] = &sources[..] {
@@ -311,7 +316,7 @@ impl Workspace {
         mode: ClipMode,
         cx: &mut Context<Self>,
     ) {
-        if !dest_dir.is_dir() {
+        if filex::drives::is_this_pc(&dest_dir) || !dest_dir.is_dir() {
             return;
         }
         let sources: Vec<PathBuf> = sources

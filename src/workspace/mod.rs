@@ -444,6 +444,7 @@ mod sidebar;
 mod state;
 mod tabs;
 mod tags;
+mod this_pc;
 
 impl Workspace {
     /// Resolve the color theme from the `theme` setting + the OS

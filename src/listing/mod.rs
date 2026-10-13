@@ -213,12 +213,27 @@ impl FileKind {
 /// the `PathBuf` itself verbatim, since `starts_with` treats the two
 /// prefix kinds as different.
 pub fn display_path(path: &Path) -> String {
+    if crate::drives::is_this_pc(path) {
+        return crate::drives::THIS_PC_LABEL.to_string();
+    }
     let text = path.to_string_lossy();
     #[cfg(windows)]
     if let Some(plain) = strip_verbatim(&text) {
         return plain;
     }
     text.into_owned()
+}
+
+/// A location's short name for tabs, headings and sidebar rows: the
+/// folder's own name, or the whole path for a root ("C:\", "/"), which
+/// has none. This PC shows by name, not as its reserved spelling.
+pub fn location_label(path: &Path) -> String {
+    if crate::drives::is_this_pc(path) {
+        return display_path(path);
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| display_path(path))
 }
 
 /// The plain Win32 spelling of a verbatim path, or `None` when there is
@@ -412,6 +427,20 @@ mod tests {
         assert_eq!(Path::new(&shown).canonicalize().unwrap(), canonical);
         // Breadcrumb root reads "C:\", not "\\?\C:\".
         assert_eq!(path_segments(&canonical)[0].0, shown[..3]);
+    }
+
+    #[test]
+    fn this_pc_displays_by_name_not_its_shell_spelling() {
+        assert_eq!(display_path(&crate::drives::this_pc()), "This PC");
+    }
+
+    /// Regression: the tab and heading took the path's leaf, which for
+    /// This PC is the whole `::{20D04FE0-…}` shell spelling.
+    #[test]
+    fn location_labels_use_the_leaf_and_name_this_pc() {
+        assert_eq!(location_label(&crate::drives::this_pc()), "This PC");
+        assert_eq!(location_label(Path::new("/home/me/docs")), "docs");
+        assert_eq!(location_label(Path::new("/")), "/");
     }
 
     fn entry(name: &str, is_dir: bool) -> Entry {
