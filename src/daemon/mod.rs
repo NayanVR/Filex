@@ -7,5 +7,6 @@ pub mod view;
 
 mod changes;
 mod executable;
+mod progress;
 mod recovery;
 mod writer;

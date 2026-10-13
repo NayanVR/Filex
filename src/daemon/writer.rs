@@ -75,6 +75,7 @@ pub struct Shared {
     pub restart: AtomicBool,
     pub overflow: AtomicBool,
     pub coverage_error: RwLock<Option<String>>,
+    pub progress: Arc<super::progress::WalkProgress>,
 }
 pub struct Handle {
     pub shared: Arc<Shared>,
@@ -119,11 +120,13 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
             roots: Vec::new(),
             building: !roots.is_empty(),
             error: None,
+            progress: None,
         }),
         stop: Arc::new(AtomicBool::new(false)),
         restart: AtomicBool::new(false),
         overflow: AtomicBool::new(false),
         coverage_error: RwLock::new(None),
+        progress: Default::default(),
     });
     let (commands, rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (build_tx, build_rx) = mpsc::sync_channel::<BuildRequest>(1);
@@ -212,6 +215,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                             mode,
                             directory: directory.clone(),
                             next: next.clone(),
+                            progress: owner.progress.clone(),
                         })
                         .is_ok()
                     {

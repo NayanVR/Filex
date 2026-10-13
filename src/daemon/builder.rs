@@ -69,6 +69,7 @@ pub(super) struct BuildRequest {
     pub mode: Mode,
     pub directory: PathBuf,
     pub next: Arc<AtomicU64>,
+    pub progress: Arc<super::progress::WalkProgress>,
 }
 
 pub(super) struct Built {
@@ -130,6 +131,11 @@ pub(super) fn build(request: BuildRequest, stop: &AtomicBool) -> Result<Built> {
         },
     )?;
 
+    // A walk reports progress until this build ends, however it ends.
+    let walking = (request.mode == Mode::Reconcile).then(|| {
+        request.progress.start();
+        super::progress::Finish(&request.progress)
+    });
     let skipped = match (request.mode, delta) {
         (Mode::Reconcile, _) => enumerate(&request, &mut spool, stop)?,
         (_, Some((records, _))) => {
@@ -151,6 +157,9 @@ pub(super) fn build(request: BuildRequest, stop: &AtomicBool) -> Result<Built> {
     drop(spool);
     ensure!(!stop.load(Ordering::Relaxed), "segment build cancelled");
 
+    if walking.is_some() {
+        request.progress.indexing();
+    }
     run_process(&input, &output, &errors, stop)?;
     // SAFETY: the worker has exited. This output is immutable, and the writer
     // keeps the generation alive until all query views release their mappings.
@@ -227,7 +236,10 @@ fn enumerate(request: &BuildRequest, spool: &mut impl Write, stop: &AtomicBool) 
                 allocated.insert(id);
                 id
             },
-            |record| write_record(spool, &record),
+            |record| {
+                request.progress.note(&record.name);
+                write_record(spool, &record)
+            },
             stop,
         )?;
     }
@@ -485,6 +497,7 @@ pub fn compact_view_to(view: Arc<View>, output: &Path) -> Result<Segment> {
                 .context("output has no parent directory")?
                 .to_owned(),
             next: Arc::new(AtomicU64::new(0)),
+            progress: Default::default(),
         },
         &AtomicBool::new(false),
     )?;
@@ -654,9 +667,16 @@ mod tests {
             mode: Mode::Reconcile,
             directory: data.clone(),
             next: Arc::new(AtomicU64::new(1)),
+            progress: Default::default(),
         };
+        let progress = request.progress.clone();
         let error = build(request, &AtomicBool::new(true)).err().unwrap();
         assert!(error.to_string().contains("cancelled"), "{error}");
+        assert_eq!(
+            progress.snapshot(),
+            None,
+            "a cancelled walk stops reporting progress"
+        );
         assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
     }
 

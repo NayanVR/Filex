@@ -9,6 +9,9 @@ use super::*;
 /// One screen of the flow, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Step {
+    /// Before the welcome while the first index builds; not one of the
+    /// counted steps (`ALL`).
+    Loading,
     Welcome,
     Theme,
     Favorites,
@@ -62,7 +65,29 @@ pub(super) struct Onboarding {
     /// then is "indexed in N s" a true statement.
     saw_building: bool,
     indexed_in: Option<Duration>,
+    loading: Loading,
 }
+
+/// The first index as the loading step follows it.
+struct Loading {
+    /// Names the walk passed, kept in arrival order so a lane's name stays
+    /// put while it flies. Capped; the first ones are plenty to cycle.
+    names: Vec<SharedString>,
+    /// Entries found so far (or the finished index's size).
+    scanned: u64,
+    /// When the walk finished and the index started being written.
+    indexing_since: Option<Instant>,
+    /// When the index was first seen ready.
+    ready_at: Option<Instant>,
+    /// The count as drawn, easing toward `scanned`.
+    shown: f64,
+    shown_at: Instant,
+}
+
+/// Real names kept for the loading scene.
+const LOADING_NAMES: usize = 96;
+/// After this long the loading step offers to carry on without waiting.
+const OFFER_CONTINUE_AFTER: Duration = Duration::from_secs(20);
 
 /// The hand-off from onboarding into the app, while it plays.
 pub(super) struct Reveal {
@@ -72,16 +97,92 @@ pub(super) struct Reveal {
 }
 
 impl Onboarding {
-    fn new(now: Instant) -> Self {
+    /// Opens on the loading step unless the index is already `ready`.
+    fn new(now: Instant, ready: bool) -> Self {
         Self {
-            step: Step::Welcome,
+            step: if ready { Step::Welcome } else { Step::Loading },
             imports: Vec::new(),
             opened: now,
             step_started: now,
             magic_live: false,
             saw_building: false,
             indexed_in: None,
+            loading: Loading {
+                names: Vec::new(),
+                scanned: 0,
+                indexing_since: None,
+                ready_at: None,
+                shown: 0.,
+                shown_at: now,
+            },
         }
+    }
+
+    /// Fold one daemon status in for the loading step: the walk's count,
+    /// names and phase, and when the index came ready.
+    pub(super) fn observe_loading(&mut self, status: &filex::daemon::ipc::Status, now: Instant) {
+        let loading = &mut self.loading;
+        if let Some(progress) = &status.progress {
+            loading.scanned = loading.scanned.max(progress.scanned);
+            if progress.indexing && loading.indexing_since.is_none() {
+                loading.indexing_since = Some(now);
+            }
+            for name in &progress.recent {
+                if loading.names.len() < LOADING_NAMES
+                    && !loading.names.iter().any(|known| known == name)
+                {
+                    loading.names.push(name.clone().into());
+                }
+            }
+        }
+        if !status.building {
+            let files: u64 = status.roots.iter().map(|r| r.files).sum();
+            loading.scanned = loading.scanned.max(files);
+            loading.ready_at.get_or_insert(now);
+        }
+    }
+
+    /// When the loading step's completion beat starts: once the index is
+    /// ready, but not before the scene has had its minimum time.
+    fn outro_start(&self) -> Option<Instant> {
+        let ready = self.loading.ready_at?;
+        let earliest = self.step_started + Duration::from_secs_f32(ui::onboarding::LOADING_MIN);
+        Some(ready.max(earliest))
+    }
+
+    /// Whether the loading step is over at `now`. An index that was ready
+    /// before onboarding saw it build skips the scene outright.
+    fn loading_done(&self, now: Instant) -> bool {
+        if self.loading.ready_at.is_some() && !self.saw_building {
+            return true;
+        }
+        self.outro_start().is_some_and(|start| {
+            now >= start + Duration::from_secs_f32(ui::onboarding::LOADING_OUTRO)
+        })
+    }
+
+    /// Move from loading to the welcome once loading is over.
+    fn advance_loading(&mut self, now: Instant) {
+        if self.step == Step::Loading && self.loading_done(now) {
+            self.step = Step::Welcome;
+            self.step_started = now;
+        }
+    }
+
+    /// The count to draw at `now`, eased toward the latest one so it rolls
+    /// rather than jumps between status polls.
+    fn eased_count(&mut self, now: Instant) -> u64 {
+        let loading = &mut self.loading;
+        let dt = now
+            .saturating_duration_since(loading.shown_at)
+            .as_secs_f64();
+        loading.shown_at = now;
+        let target = loading.scanned as f64;
+        loading.shown += (target - loading.shown) * (1. - (-dt * 6.).exp());
+        if (target - loading.shown).abs() < 1. {
+            loading.shown = target;
+        }
+        loading.shown as u64
     }
 
     /// Fold one daemon status poll in: time the first build that
@@ -147,7 +248,8 @@ impl Workspace {
     /// look for the OS file manager's pinned folders in the background.
     pub(super) fn start_onboarding(&mut self, cx: &mut Context<Self>) {
         self.settings_open = false;
-        self.onboarding = Some(Onboarding::new(Instant::now()));
+        let ready = self.service.is_some() && !self.daemon_status.building;
+        self.onboarding = Some(Onboarding::new(Instant::now(), ready));
         let mut known: Vec<PathBuf> = ["home", "desktop", "documents", "downloads", "pictures"]
             .iter()
             .filter_map(|name| self.user_dirs.get(name).map(Path::to_path_buf))
@@ -175,6 +277,15 @@ impl Workspace {
         let Some(onboarding) = &mut self.onboarding else {
             return;
         };
+        if onboarding.step == Step::Loading {
+            // Only forward, and only once carrying on is offered.
+            if offset > 0 && onboarding.step_started.elapsed() >= OFFER_CONTINUE_AFTER {
+                onboarding.step = Step::Welcome;
+                onboarding.step_started = Instant::now();
+                cx.notify();
+            }
+            return;
+        }
         let has_imports = !onboarding.imports.is_empty();
         let Some(step) = onboarding.step.shifted(offset, has_imports) else {
             if offset > 0 {
@@ -331,10 +442,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = *cx.theme();
+        if let Some(onboarding) = &mut self.onboarding {
+            onboarding.advance_loading(Instant::now());
+        }
         let Some(onboarding) = &self.onboarding else {
             return div().into_any_element();
         };
         let step = onboarding.step;
+        if step == Step::Loading {
+            return self.render_loading_screen(&theme, window, cx);
+        }
         let settled = match step {
             Step::Welcome => ui::onboarding::INTRO_LEN,
             Step::Magic => ui::onboarding::MAGIC_STILL,
@@ -346,7 +463,7 @@ impl Workspace {
         }
         let viewport = window.viewport_size();
         let body = match step {
-            Step::Welcome => self.render_welcome(&theme, viewport, t),
+            Step::Loading | Step::Welcome => self.render_welcome(&theme, viewport, t),
             Step::Theme => self.render_theme_step(&theme, cx),
             Step::Favorites => self.render_favorites_step(&theme, cx),
             Step::Search => self.render_search_step(&theme),
@@ -438,12 +555,20 @@ impl Workspace {
         viewport: gpui::Size<gpui::Pixels>,
         t: f32,
     ) -> gpui::AnyElement {
+        // The intro's counter races to the real index size once known.
+        let files = self
+            .daemon_status
+            .roots
+            .iter()
+            .map(|r| r.files)
+            .sum::<u64>()
+            .max(self.onboarding.as_ref().map_or(0, |o| o.loading.scanned));
         div()
             .flex()
             .flex_col()
             .items_center()
             .gap_8()
-            .child(ui::onboarding::intro_mark(theme, viewport, t))
+            .child(ui::onboarding::intro_mark(theme, viewport, t, Some(files)))
             .child(
                 div()
                     .flex()
@@ -458,6 +583,111 @@ impl Workspace {
                         t,
                     )),
             )
+            .into_any_element()
+    }
+
+    /// The loading step: the whole screen, as it has no step dots or Back.
+    /// It hands over to the welcome by itself once the index is ready.
+    fn render_loading_screen(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let now = Instant::now();
+        let reduce_motion = cx.reduce_motion();
+        let connected = self.service.is_some();
+        let overrides = self.settings.read(cx).settings().keyboard_shortcuts.clone();
+        let Some(onboarding) = &mut self.onboarding else {
+            return div().into_any_element();
+        };
+        let count = onboarding.eased_count(now);
+        let open_for = now.saturating_duration_since(onboarding.step_started);
+        let since = |at: Instant| now.saturating_duration_since(at).as_secs_f32();
+        let outro_start = onboarding.outro_start().filter(|start| now >= *start);
+        let phase = if outro_start.is_some() {
+            ui::onboarding::LoadingPhase::Ready
+        } else if onboarding.loading.indexing_since.is_some() {
+            ui::onboarding::LoadingPhase::Indexing
+        } else if connected {
+            ui::onboarding::LoadingPhase::Scanning
+        } else {
+            ui::onboarding::LoadingPhase::Starting
+        };
+        let tips = [
+            (
+                Some(shortcuts::hint("search", &overrides)),
+                "Search every file name, from anywhere",
+            ),
+            (
+                Some(shortcuts::hint("quick_look", &overrides)),
+                "Peek at a file without opening it",
+            ),
+            (None, "Matches appear as you type, in milliseconds"),
+            (None, "Your index stays on this computer"),
+            (
+                Some(shortcuts::hint("keyboard", &overrides)),
+                "See every shortcut",
+            ),
+        ];
+        let offer_continue = open_for >= OFFER_CONTINUE_AFTER && outro_start.is_none();
+        let scene = ui::onboarding::LoadingScene {
+            t: if reduce_motion {
+                1.
+            } else {
+                open_for.as_secs_f32()
+            },
+            phase,
+            indexing_for: onboarding.loading.indexing_since.map(since),
+            outro: outro_start.map_or(0., |start| {
+                (since(start) / ui::onboarding::LOADING_OUTRO).min(1.)
+            }),
+            count,
+            names: &onboarding.loading.names,
+            tips: &tips,
+            offer_continue,
+        };
+        if !reduce_motion {
+            window.request_animation_frame();
+        }
+        let viewport = window.viewport_size();
+        let body = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_6()
+            .child(ui::onboarding::loading_core(theme, viewport, &scene))
+            .child(ui::onboarding::loading_status(theme, &scene))
+            .into_any_element();
+        let footer = ui::onboarding::footer(None)
+            .justify_center()
+            .h(px(32.))
+            .child(ui::onboarding::loading_tip(theme, &scene))
+            .children(scene.offer_continue.then(|| {
+                ui::onboarding::link(theme, "onboarding-continue", "Continue while it finishes →")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.onboarding_go(1, window, cx);
+                    }))
+            }));
+        ui::onboarding::screen(theme)
+            .track_focus(&self.focus_handle)
+            .key_context("Onboarding")
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "enter" {
+                    this.onboarding_go(1, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(ui::onboarding::backdrop())
+            .child(ui::onboarding::top_row().child(
+                ui::onboarding::link(theme, "onboarding-skip", "Skip").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.finish_onboarding(false, window, cx);
+                    },
+                )),
+            ))
+            .child(ui::onboarding::stage(body, scene.t.min(1.)))
+            .child(footer)
             .into_any_element()
     }
 
@@ -743,20 +973,109 @@ mod tests {
     #[test]
     fn index_time_is_only_claimed_for_a_build_we_watched() {
         let start = Instant::now();
-        let mut already_built = Onboarding::new(start);
+        let mut already_built = Onboarding::new(start, true);
         already_built.observe_index(false, start + Duration::from_millis(100));
         assert_eq!(already_built.indexed_in, None);
 
-        let mut fresh = Onboarding::new(start);
+        let mut fresh = Onboarding::new(start, true);
         fresh.observe_index(true, start + Duration::from_secs(1));
         fresh.observe_index(false, start + Duration::from_secs(4));
         fresh.observe_index(false, start + Duration::from_secs(9));
         assert_eq!(fresh.indexed_in, Some(Duration::from_secs(4)));
     }
 
+    fn status(
+        building: bool,
+        scanned: u64,
+        indexing: bool,
+        recent: &[&str],
+    ) -> filex::daemon::ipc::Status {
+        filex::daemon::ipc::Status {
+            building,
+            progress: building.then(|| filex::daemon::ipc::Progress {
+                scanned,
+                indexing,
+                recent: recent.iter().map(|n| n.to_string()).collect(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The welcome waits for the index, then for the scene's minimum time,
+    /// then for the completion beat.
+    #[test]
+    fn loading_hands_over_only_after_the_index_is_ready() {
+        let start = Instant::now();
+        let at = |secs: f32| start + Duration::from_secs_f32(secs);
+        let mut onboarding = Onboarding::new(start, false);
+        assert_eq!(onboarding.step, Step::Loading);
+        onboarding.observe_index(true, at(0.1));
+        onboarding.observe_loading(&status(true, 500, false, &["a.txt"]), at(0.1));
+        onboarding.advance_loading(at(30.));
+        assert_eq!(onboarding.step, Step::Loading, "never while building");
+
+        // Ready at 0.5 s: the scene still gets its minimum, then the outro.
+        onboarding.observe_index(false, at(0.5));
+        onboarding.observe_loading(&status(false, 0, false, &[]), at(0.5));
+        let handover = ui::onboarding::LOADING_MIN + ui::onboarding::LOADING_OUTRO;
+        onboarding.advance_loading(at(handover - 0.05));
+        assert_eq!(onboarding.step, Step::Loading);
+        onboarding.advance_loading(at(handover + 0.05));
+        assert_eq!(onboarding.step, Step::Welcome);
+    }
+
+    #[test]
+    fn a_slow_index_plays_its_outro_when_it_finishes() {
+        let start = Instant::now();
+        let at = |secs: f32| start + Duration::from_secs_f32(secs);
+        let mut onboarding = Onboarding::new(start, false);
+        onboarding.observe_index(true, at(0.1));
+        onboarding.observe_index(false, at(12.));
+        onboarding.observe_loading(&status(false, 0, false, &[]), at(12.));
+        assert_eq!(onboarding.outro_start(), Some(at(12.)));
+        onboarding.advance_loading(at(12. + ui::onboarding::LOADING_OUTRO + 0.05));
+        assert_eq!(onboarding.step, Step::Welcome);
+    }
+
+    /// An index that was already built (a reinstall) skips the scene: no
+    /// staged wait for work that isn't happening.
+    #[test]
+    fn an_index_ready_before_onboarding_skips_loading() {
+        let start = Instant::now();
+        let mut onboarding = Onboarding::new(start, false);
+        onboarding.observe_index(false, start);
+        onboarding.observe_loading(&status(false, 0, false, &[]), start);
+        onboarding.advance_loading(start);
+        assert_eq!(onboarding.step, Step::Welcome);
+        assert_eq!(Onboarding::new(start, true).step, Step::Welcome, "replay");
+    }
+
+    #[test]
+    fn loading_keeps_walk_names_in_order_without_repeats() {
+        let start = Instant::now();
+        let mut onboarding = Onboarding::new(start, false);
+        onboarding.observe_loading(&status(true, 10, false, &["a", "b"]), start);
+        onboarding.observe_loading(&status(true, 30, true, &["b", "c"]), start);
+        // A later walk restarting its count never rolls the number back.
+        onboarding.observe_loading(&status(true, 4, true, &[]), start);
+        let loading = &onboarding.loading;
+        assert_eq!(loading.names, ["a", "b", "c"].map(SharedString::from));
+        assert_eq!(loading.scanned, 30);
+        assert!(loading.indexing_since.is_some());
+
+        let many: Vec<String> = (0..LOADING_NAMES + 10).map(|i| format!("n{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        onboarding.observe_loading(&status(true, 40, true, &many), start);
+        assert_eq!(onboarding.loading.names.len(), LOADING_NAMES);
+        assert_eq!(
+            onboarding.loading.names[0], "a",
+            "earlier names keep their place"
+        );
+    }
+
     #[test]
     fn live_input_steps_stop_redrawing_once_settled() {
-        let mut onboarding = Onboarding::new(Instant::now());
+        let mut onboarding = Onboarding::new(Instant::now(), true);
         let settled = ui::onboarding::STEP_IN + 0.1;
         onboarding.step = Step::Search;
         assert!(!onboarding.animating(settled));
@@ -787,7 +1106,7 @@ mod tests {
 
     #[test]
     fn only_ticked_imports_are_pinned() {
-        let mut onboarding = Onboarding::new(Instant::now());
+        let mut onboarding = Onboarding::new(Instant::now(), true);
         onboarding.imports = vec![("/a".into(), true), ("/b".into(), false)];
         assert_eq!(onboarding.checked_imports(), vec![PathBuf::from("/a")]);
     }

@@ -16,7 +16,8 @@ screens. Few choices, all reversible, every step skippable.
 
 | Step | Content | Notes |
 |---|---|---|
-| Welcome | Cinematic intro (below): warp of file names, the real logo assembling, "Find anything. Instantly." | Indexing is already running in the background. |
+| Loading | Live first index (below): the user's own file names spiral into a glowing core, a rolling file count, "Reading your disk… → Building your index… → Ready.", rotating tips | Shown only while the first index builds; not a counted step. Hands over to Welcome by itself. |
+| Welcome | Cinematic intro (below): warp of file names, the real logo assembling, "Find anything. Instantly." | The counter races to the real index size. |
 | Make it yours | Theme / accent / density on a live sample list | Reuses the Settings controls; changes apply at once. |
 | Bring your favorites | Folders pinned in the OS file manager, ticked by default | Hidden when nothing new is found. |
 | Try it | Live file counter, then a real search box (placeholder "resume pdf") with top 6 hits and measured latency | Uses the real search pipeline and `search_latency`. |
@@ -42,6 +43,16 @@ first). "Skip" finishes without importing. Finishing writes
 - **No animation on the search path.** Demo results paint immediately; the
   motion budget is spent on the intro, step changes and the final cascade.
 
+- **Wait for the index before the welcome (2026-10-13).** Every later step
+  (the live search demo above all) needs a built index, so the flow opens
+  on a loading scene until the daemon reports it ready. It shows at least
+  `LOADING_MIN` (2.4 s), then plays a 1.15 s completion beat. An index that
+  was already built (reinstall, replay) skips it. After 20 s it offers
+  "Continue while it finishes" so a huge disk never traps the user. The
+  daemon reports the walk through `Status.progress` (`daemon::progress`):
+  entries reached, walk vs. writing, and every 61st name, skipping hidden
+  and system entries.
+
 ## Favorites import (`filex::favorites_import`)
 
 | OS | Source | Caveat |
@@ -65,6 +76,13 @@ moves — the same model as the prototype, so the port is line-for-line.
   (`assets/branding/layers/`: back folder drops, front panel rises, "fx"
   pops with overshoot); a shine sweeps across; the halo breathes and the
   logo floats.
+- **Loading (until the index is ready):** 22 lanes of real file names
+  spiral in from beyond the window edge and are absorbed into a pulsing
+  brand core, each landing with a ripple. Satellites circle three orbits
+  and speed up once the walk ends and the index is being written; names
+  stop arriving then. The count eases toward each status poll so it rolls
+  rather than jumps. On completion the core flares, three shockwaves roll
+  out and the scene clears for the welcome.
 - **Every step:** a soft brand-blue wash from the top. Buttons, borders
   and chips are solid colours: the only gradients are the wash, the
   intro's burst and the logo's shine (decided after review: more read as

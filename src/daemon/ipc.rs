@@ -66,6 +66,19 @@ pub struct Status {
     pub roots: Vec<RootStatus>,
     pub building: bool,
     pub error: Option<String>,
+    /// Set while a full walk runs. Absent from daemons before v0.3.4.
+    #[serde(default)]
+    pub progress: Option<Progress>,
+}
+/// How far a full walk (first index, reconcile) has got.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Progress {
+    /// Entries reached so far, across roots.
+    pub scanned: u64,
+    /// The walk is done and the index is being written.
+    pub indexing: bool,
+    /// A few names the walk passed, oldest first.
+    pub recent: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Page {

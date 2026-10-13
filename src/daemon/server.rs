@@ -249,6 +249,7 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
                 }
                 Command::Status => {
                     let mut status = shared.status.read().unwrap().clone();
+                    status.progress = shared.progress.snapshot();
                     if let Some(error) = shared.coverage_error.read().unwrap().clone() {
                         status.error = Some(error);
                         for root in &mut status.roots {
