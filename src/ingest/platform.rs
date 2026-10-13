@@ -8,6 +8,13 @@ use std::{path::Path, time::UNIX_EPOCH};
 /// Windows: volume serial + NTFS file index from
 /// `GetFileInformationByHandle`, opened without following reparse points;
 /// if the handle can't be opened, falls back to a zero device/key.
+///
+/// The Windows handle asks for `FILE_READ_ATTRIBUTES` only, the same kind of
+/// open `std::fs::symlink_metadata` makes. Assumes NTFS-like semantics: such
+/// an open is exempt from share modes, so files held open without sharing
+/// (registry hives, page file) still yield a key, and it requests no data
+/// access, so antivirus on-access scanning (Defender) skips it. A read open
+/// here made Defender scan every file a walk touched.
 /// `birth` is the creation time where the filesystem reports one, else 0.
 pub fn identity(path: &Path, metadata: &std::fs::Metadata) -> Identity {
     let birth = metadata
@@ -32,11 +39,11 @@ pub fn identity(path: &Path, metadata: &std::fs::Metadata) -> Identity {
             Foundation::HANDLE,
             Storage::FileSystem::{
                 BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-                FILE_FLAG_OPEN_REPARSE_POINT, GetFileInformationByHandle,
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, GetFileInformationByHandle,
             },
         };
         if let Ok(file) = std::fs::OpenOptions::new()
-            .read(true)
+            .access_mode(FILE_READ_ATTRIBUTES.0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
             .open(path)
         {
