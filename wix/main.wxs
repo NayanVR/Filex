@@ -122,6 +122,21 @@
         After="CostFinalize"
         Sequence="execute"><![CDATA[FILEX_CRASH_REPORTS <> "1"]]></SetProperty>
 
+    <!-- "Launch Filex" on the finish page, ticked by default. WixShellExec
+         runs from the UI (client) process, so Filex starts as the user who
+         ran setup, not as the elevated install service: the per-user
+         daemon it spawns must not run elevated. Silent installs (the
+         updater's /qn) show no finish page and launch nothing.
+         WixUtilExtension (WixCA) is linked by cargo-wix by default. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Filex" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#FilexExe]" />
+    <CustomAction
+        Id="LaunchFilex"
+        BinaryKey="WixCA"
+        DllEntry="WixShellExec"
+        Impersonate="yes" />
+
     <UI Id="FilexUI">
       <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
       <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
@@ -155,6 +170,7 @@
         </Control>
       </Dialog>
 
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchFilex" Order="998"><![CDATA[WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed]]></Publish>
       <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
 
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="PrivacyDlg">NOT Installed</Publish>

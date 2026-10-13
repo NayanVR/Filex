@@ -68,6 +68,9 @@ Steps 4–6 are ours to fix outright. Steps 2–3 are the loud ones and they are
    during install and offer an opt-out there. The choice lands in
    `HKLM\Software\Filex\CrashReports` and seeds `share_diagnostics` once, when
    the settings file is first created (`settings::installer`).
+   **2026-10-13:** the MSI's finish page now offers "Launch Filex", ticked
+   by default (`LaunchFilex` / `WixShellExec`, run unelevated from the UI
+   process). Shown on install and upgrade, not on repair or removal.
 
 ## Why the updater must switch (decision 3, the non-obvious part)
 
