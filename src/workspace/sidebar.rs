@@ -134,6 +134,95 @@ impl Workspace {
             self.open_target(path, false, false, cx);
         }
     }
+
+    /// Open the feedback dialog (the sidebar footer button), focusing the
+    /// message.
+    pub(super) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.is_some() {
+            return;
+        }
+        let message = cx.new(SearchInput::new);
+        let email = cx.new(SearchInput::new);
+        message.update(cx, |input, cx| {
+            input.set_placeholder("What's working, what's broken, what's missing?", cx)
+        });
+        email.update(cx, |input, cx| {
+            input.set_placeholder("Email, if you'd like a reply (optional)", cx)
+        });
+        let dismiss = |this: &mut Self,
+                       _: &gpui::Entity<SearchInput>,
+                       event: &SearchInputEvent,
+                       window: &mut Window,
+                       cx: &mut Context<Self>| {
+            if matches!(event, SearchInputEvent::Dismissed) {
+                this.cancel_feedback(window, cx);
+            }
+        };
+        let subscriptions = [
+            cx.subscribe_in(&message, window, dismiss),
+            cx.subscribe_in(&email, window, dismiss),
+        ];
+        window.focus(&message.focus_handle(cx), cx);
+        self.feedback = Some(FeedbackDraft {
+            message,
+            email,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn cancel_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.feedback.take().is_some() {
+            window.focus(&self.search_input.focus_handle(cx), cx);
+            cx.notify();
+        }
+    }
+
+    /// Send the draft to Sentry off-thread; the status-bar notice reports
+    /// the outcome. An empty message keeps the dialog open.
+    pub(super) fn submit_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = self.feedback.as_ref() else {
+            return;
+        };
+        let message = draft.message.read(cx).text().trim().to_string();
+        if message.is_empty() {
+            return;
+        }
+        let email = draft.email.read(cx).text().trim().to_string();
+        self.cancel_feedback(window, cx);
+        self.notice = Some("Sending feedback…".into());
+        cx.spawn(async move |this, cx| {
+            let sent = cx
+                .background_executor()
+                .spawn(async move { send_feedback(&message, &email) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.notice = Some(if sent {
+                    "Thanks — feedback sent".into()
+                } else {
+                    "Couldn't send feedback — check your connection and try again".into()
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+/// Deliver feedback via Sentry; blocking. Builds without the
+/// `observability` feature have no transport, so they report failure.
+fn send_feedback(message: &str, email: &str) -> bool {
+    #[cfg(feature = "observability")]
+    {
+        let email = (!email.is_empty()).then_some(email);
+        filex::diagnostics::observability::send_feedback(message, email, env!("CARGO_PKG_VERSION"))
+    }
+    #[cfg(not(feature = "observability"))]
+    {
+        let _ = (message, email);
+        false
+    }
 }
 
 impl Workspace {
@@ -153,6 +242,60 @@ impl Workspace {
             }),
         );
         (header, collapsed)
+    }
+
+    pub(super) fn render_feedback_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let draft = self.feedback.as_ref()?;
+        let theme = *cx.theme();
+        let field = |input: &gpui::Entity<SearchInput>| {
+            div()
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_sm()
+                .child(input.clone())
+        };
+        Some(
+            ui::modal::backdrop("feedback-backdrop")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.cancel_feedback(window, cx);
+                }))
+                .child(
+                    ui::modal::panel(&theme, "feedback-panel")
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(ui::modal::title(&theme, "Send feedback"))
+                        .child(ui::modal::message(
+                            &theme,
+                            "Report a bug or suggest an idea. Your message, the app \
+                             version and your OS are sent; file paths are removed.",
+                        ))
+                        .child(field(&draft.message))
+                        .child(field(&draft.email))
+                        .child(
+                            ui::modal::buttons()
+                                .child(
+                                    ui::modal::button(&theme, "feedback-cancel", "Cancel", false)
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                this.cancel_feedback(window, cx);
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    ui::modal::button(&theme, "feedback-send", "Send", true)
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                this.submit_feedback(window, cx);
+                                            },
+                                        )),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -366,6 +509,24 @@ impl Workspace {
             sidebar
         };
 
-        sidebar
+        // Feedback: opens the in-app dialog (sent to Sentry).
+        sidebar.child(
+            div().flex().flex_none().px_3().py_2().child(
+                ui::button::icon_button(
+                    &theme,
+                    "feedback",
+                    "icons/message-square.svg",
+                    theme.text_dim,
+                    ui::button::IconSize::Medium,
+                )
+                .tooltip(ui::tooltip::text_tooltip(
+                    "Send feedback or report an issue",
+                    theme,
+                ))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_feedback(window, cx);
+                })),
+            ),
+        )
     }
 }

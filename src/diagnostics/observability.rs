@@ -49,6 +49,30 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
         return None;
     }
     let dsn = dsn()?;
+    let mut options = base_options(version);
+    // Release health: a session per process run (application mode), closed
+    // on guard drop, so Sentry reports crash-free rates and per-release
+    // adoption — the headline number for a desktop app.
+    options.auto_session_tracking = true;
+    options.session_mode = sentry::SessionMode::Application;
+    // Attach a stack trace to error events raised via the tracing layer (not
+    // just panics), so a logged `error!` is actionable. Frame paths are
+    // redacted by `scrub_event` before send.
+    options.attach_stacktrace = true;
+    let guard = sentry::init((dsn, options));
+    // Coarse, non-identifying facets for filtering in the Sentry UI. `os` /
+    // `arch` are compile targets, not machine identity.
+    sentry::configure_scope(|scope| {
+        scope.set_tag("app", app);
+        scope.set_tag("os", std::env::consts::OS);
+        scope.set_tag("arch", std::env::consts::ARCH);
+    });
+    Some(guard)
+}
+
+/// Options every client shares: release, environment, no PII, and the
+/// path scrubber on both hooks.
+fn base_options(version: &'static str) -> ClientOptions {
     // `ClientOptions` is `#[non_exhaustive]`, so build from its default and
     // set fields.
     let mut options = ClientOptions::default();
@@ -60,15 +84,6 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
     } else {
         "release"
     }));
-    // Release health: a session per process run (application mode), closed
-    // on guard drop, so Sentry reports crash-free rates and per-release
-    // adoption — the headline number for a desktop app.
-    options.auto_session_tracking = true;
-    options.session_mode = sentry::SessionMode::Application;
-    // Attach a stack trace to error events raised via the tracing layer (not
-    // just panics), so a logged `error!` is actionable. Frame paths are
-    // redacted by `scrub_event` before send.
-    options.attach_stacktrace = true;
     // Never attach IP / username / host — the privacy invariant.
     options.send_default_pii = false;
     options.server_name = None;
@@ -81,15 +96,54 @@ pub fn init(app: &'static str, version: &'static str, consent: bool) -> Option<C
         scrub_value_map(&mut crumb.data);
         Some(crumb)
     }));
-    let guard = sentry::init((dsn, options));
-    // Coarse, non-identifying facets for filtering in the Sentry UI. `os` /
-    // `arch` are compile targets, not machine identity.
-    sentry::configure_scope(|scope| {
-        scope.set_tag("app", app);
-        scope.set_tag("os", std::env::consts::OS);
-        scope.set_tag("arch", std::env::consts::ARCH);
-    });
-    Some(guard)
+    options
+}
+
+// --- User feedback ---------------------------------------------------------
+//
+// The sentry 0.49 SDK has no user-feedback API, so feedback goes as an info
+// event tagged `feedback:true` (filter or alert on that in Sentry).
+
+/// Build a feedback event. The message is scrubbed like everything else;
+/// the email is the one identifying field, and only when the user typed it.
+fn feedback_event(message: &str, email: Option<&str>) -> Event<'static> {
+    let mut event = Event {
+        level: Level::Info,
+        message: Some(telemetry::scrub(message)),
+        logger: Some("feedback".into()),
+        user: email.map(|email| sentry::User {
+            email: Some(email.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    event.tags.insert("feedback".into(), "true".into());
+    event.tags.insert("os".into(), std::env::consts::OS.into());
+    event
+        .tags
+        .insert("arch".into(), std::env::consts::ARCH.into());
+    event
+}
+
+/// Send user-written feedback and wait (up to a few seconds) for it to
+/// leave. Pressing Send is explicit consent, so this works with
+/// `share_diagnostics` off: it uses the bound client if there is one, else a
+/// one-off client. Blocks — call it off the UI thread. `false` when there's
+/// no DSN or the transport didn't drain in time.
+pub fn send_feedback(message: &str, email: Option<&str>, version: &'static str) -> bool {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let event = feedback_event(message, email);
+    if let Some(client) = sentry::Hub::current().client() {
+        client.capture_event(event, None);
+        return client.flush(Some(TIMEOUT));
+    }
+    let Some(dsn) = dsn() else {
+        return false;
+    };
+    let options: ClientOptions = (dsn, base_options(version)).into();
+    let client = sentry::Client::from(sentry::apply_defaults(options));
+    client.capture_event(event, None);
+    client.close(Some(TIMEOUT))
 }
 
 /// Scrub every free-text field of an outgoing event. Queue-drained crashes
@@ -284,6 +338,19 @@ mod tests {
             std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123)
         );
         assert_eq!(event.release.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn feedback_event_is_tagged_scrubbed_and_carries_optional_email() {
+        let event = feedback_event("crashed opening /Volumes/Work/secret-project/a.txt", None);
+        assert_eq!(event.tags.get("feedback").map(String::as_str), Some("true"));
+        assert_eq!(event.level, Level::Info);
+        assert!(!event.message.as_deref().unwrap().contains("secret-project"));
+        assert!(event.user.is_none(), "no email typed → no user");
+
+        let event = feedback_event("love it", Some("a@b.c"));
+        assert_eq!(event.message.as_deref(), Some("love it"));
+        assert_eq!(event.user.and_then(|u| u.email).as_deref(), Some("a@b.c"));
     }
 
     #[test]

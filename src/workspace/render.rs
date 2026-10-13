@@ -589,6 +589,8 @@ impl Render for Workspace {
                     this.commit_rename(window, cx);
                 } else if this.tag_editor.is_some() {
                     this.commit_tag_editor(window, cx);
+                } else if this.feedback.is_some() {
+                    this.submit_feedback(window, cx);
                 } else {
                     this.activate_selected(cx);
                 }
@@ -736,6 +738,7 @@ impl Render for Workspace {
             .children(self.render_context_menu(cx))
             .children(self.render_settings_modal(window, cx))
             .children(self.render_conflict_modal(cx))
+            .children(self.render_feedback_modal(cx))
             .children(reveal.and_then(|t| self.render_reveal(t, cx)))
             .into_any_element()
     }

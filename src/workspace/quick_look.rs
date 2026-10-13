@@ -20,6 +20,7 @@ impl Workspace {
         if self.settings_open
             || self.renaming.is_some()
             || self.tag_editor.is_some()
+            || self.feedback.is_some()
             || self.conflict.is_some()
             || self.in_magic_view()
         {

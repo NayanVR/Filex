@@ -31,6 +31,13 @@ impl Workspace {
             }
             return;
         }
+        if self.feedback.is_some() {
+            // Escape cancels via the inputs' Dismissed; enter sends.
+            if keystroke.key.as_str() == "enter" {
+                self.submit_feedback(window, cx);
+            }
+            return;
+        }
         if self.tag_editor.is_some() {
             // Same as rename: the input handles escape (Dismissed → cancel);
             // enter commits the tag.

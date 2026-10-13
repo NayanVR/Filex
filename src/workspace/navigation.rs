@@ -188,6 +188,7 @@ impl Workspace {
         }
         if self.renaming.is_some()
             || self.tag_editor.is_some()
+            || self.feedback.is_some()
             || self.conflict.is_some()
             || self.settings_open
         {

@@ -389,6 +389,8 @@ struct Workspace {
     preview_tags: Vec<Tag>,
     /// Open tag editor in the details panel, if any.
     tag_editor: Option<TagEditor>,
+    /// Open feedback dialog (sidebar footer button), if any.
+    feedback: Option<FeedbackDraft>,
     /// Distinct tags across the store, for the sidebar TAGS section.
     /// Cached (rendering never scans the store) and refreshed off-thread
     /// whenever tags change.
@@ -620,6 +622,7 @@ impl Workspace {
             quick_look: None,
             preview_tags: Vec::new(),
             tag_editor: None,
+            feedback: None,
             sidebar_tags: Vec::new(),
             tabs: vec![TabSnapshot::placeholder()],
             active_tab: 0,

@@ -290,6 +290,15 @@ pub(super) struct TagEditor {
     pub(super) _subscription: gpui::Subscription,
 }
 
+/// The open feedback dialog: the message and (optional) reply-email
+/// inputs.
+pub(super) struct FeedbackDraft {
+    pub(super) message: gpui::Entity<SearchInput>,
+    pub(super) email: gpui::Entity<SearchInput>,
+    /// Watch both inputs for Dismissed (escape) to cancel.
+    pub(super) _subscriptions: [gpui::Subscription; 2],
+}
+
 /// One browse tab's saved state. The *active* tab lives directly on the
 /// [`Workspace`]; this holds the inactive ones, refreshed from the live
 /// fields on each switch. Search is global, not per-tab. Transient UI (an
