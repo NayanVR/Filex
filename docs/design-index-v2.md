@@ -772,7 +772,10 @@ rate limiter are deferred. The per-user daemon uses authenticated loopback IPC;
 it serves only that user's filesystem permissions. Windows MSI installs the
 sibling executable rather than registering an elevated SCM search service.
 Windows update discovery moves to the UI; installation opens the release page
-instead of silently invoking an elevated installer from a service.
+instead of silently invoking an elevated installer from a service. (Revised
+2026-10-14: a separate demand-start `filex-updater` service now installs
+updates silently, keeping the index daemon per-user — see
+[design-updater.md](design-updater.md).)
 
 Interactive requests default to 100 rows and use bounded, progressive retrieval.
 Pages carry an epoch and expose partial work limits; refining text or scope is

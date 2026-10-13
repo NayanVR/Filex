@@ -24,9 +24,17 @@ app = [
   "windows/Win32_UI_Shell_PropertiesSystem", "windows/Win32_UI_WindowsAndMessaging",
   "windows/Win32_UI_Input_KeyboardAndMouse",
 ]
-# Update downloader for the UI. The per-user daemon release is built
-# without default features and has no update or telemetry transport.
-updater = ["dep:ureq"]
+# Update downloader for the UI, and on Windows the `filex-updater` service
+# and its client (pipe, SCM, process and session plumbing). The per-user
+# daemon release is built without default features and has no update or
+# telemetry transport. See docs/design-updater.md.
+updater = [
+  "dep:ureq", "dep:windows-service",
+  "windows/Win32_Security_Authorization", "windows/Win32_System_Diagnostics_ToolHelp",
+  "windows/Win32_System_Environment", "windows/Win32_System_IO", "windows/Win32_System_Pipes",
+  "windows/Win32_System_RemoteDesktop", "windows/Win32_System_Services",
+  "windows/Win32_System_Threading",
+]
 # Observability: Sentry crash/error reporting + performance measurements +
 # release-health sessions, UI process only. This is the *only* telemetry
 # transport (the legacy FILEX_CRASH_ENDPOINT POST uploader was removed).
@@ -118,6 +126,14 @@ bytemuck = "1"
 notify = "8"
 fs2 = "0.4"
 
+# The Windows update service (LocalSystem, demand start). Prints an error and
+# exits elsewhere. Release builds it with `--no-default-features --features
+# updater`, so it never links GPUI or the telemetry SDK.
+[[bin]]
+name = "filex-updater"
+path = "src/bin/filex-updater.rs"
+required-features = ["updater"]
+
 [[bin]]
 name = "filex-index-lab"
 path = "src/bin/filex-index-lab.rs"
@@ -190,6 +206,8 @@ windows-core = { version = "0.62", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 # Recycle Bin with list/restore (undo) via os_limited.
 trash = "5.2.6"
+# SCM dispatcher/control for the `filex-updater` service (`updater` feature).
+windows-service = { version = "0.8", optional = true }
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Security",

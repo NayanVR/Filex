@@ -244,11 +244,11 @@ either succeeds or falls back visibly.
   from the theme — a blank "License" hyperlink is worse than none.
 - **Bundle `UpgradeCode`:** new GUID, minted once, then permanent. Getting
   this wrong later means users with two ARP entries.
-- **Per-user install:** not offered today. The original reason (an elevated
-  LocalSystem service made perMachine structural) is gone since v0.2.0 —
-  the daemon now runs as the user — so admin is only needed to write to
-  Program Files. A per-user MSI is possible but not planned; noted because
-  someone will ask.
+- **Per-user install:** rejected (2026-10-14). The LocalSystem
+  `filex-updater` service ([design-updater.md](design-updater.md)) and any
+  future privileged helper (e.g. MFT indexing) need a perMachine install,
+  and Windows Installer can't upgrade a per-user install into a per-machine
+  one in place.
 - **arm64 Windows:** the MSI and bundle are x64-only, matching CI. Same
   deferral as the macOS Intel build.
 - **Signing, still:** if it ever gets bought, it changes only CI (sign the

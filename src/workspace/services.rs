@@ -45,13 +45,120 @@ impl Workspace {
         .detach();
     }
 
-    /// Check the manifest once on launch (distribution decision 7: no
-    /// timer) and surface the banner if a newer version exists. Notice-
-    /// only — installation remains with the platform package workflow; this never
-    /// downloads or verifies an artifact. Off-thread; a failed check is
-    /// silent (retried next launch).
+    /// Check for an update once on launch (distribution decision 7: no
+    /// timer). Windows asks the `filex-updater` service, which downloads and
+    /// verifies in the background; elsewhere — or when the service isn't
+    /// installed — it's the notice-only manifest check.
     #[cfg(feature = "updater")]
     pub(super) fn spawn_update_check(&self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        self.drive_update_service(filex::updater::protocol::Command::Check, cx);
+        #[cfg(not(target_os = "windows"))]
+        self.spawn_notice_update_check(cx);
+    }
+
+    /// Send `command` to the Windows update service, then follow its phase
+    /// into the banner until it settles. `Applying` means the install has
+    /// started: stop the daemon and quit (the service reopens Filex).
+    #[cfg(all(target_os = "windows", feature = "updater"))]
+    fn drive_update_service(
+        &self,
+        command: filex::updater::protocol::Command,
+        cx: &mut Context<Self>,
+    ) {
+        use filex::updater::protocol::{Command, Phase};
+        use filex::updater::windows::client::{self, Unavailable};
+
+        let applying_requested = command == Command::Apply;
+        cx.spawn(async move |this, cx| {
+            let mut next = Some(command);
+            loop {
+                let command = next.take().unwrap_or(Command::Status);
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { client::phase(command) })
+                    .await;
+                let phase = match result {
+                    Ok(phase) => phase,
+                    Err(error) => {
+                        if matches!(error, Unavailable::NotInstalled) {
+                            tracing::info!("{error}; using the release-page notice");
+                        } else {
+                            tracing::warn!("{error}");
+                        }
+                        this.update(cx, |this, cx| {
+                            if applying_requested {
+                                this.update_status = filex::update::UpdateStatus::Failed;
+                                this.notice = Some("Couldn't reach the Filex updater".into());
+                                cx.notify();
+                            } else {
+                                // Dev builds, installs that predate the
+                                // service, or a service that won't start
+                                // still learn about new releases.
+                                this.spawn_notice_update_check(cx);
+                            }
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+                let applying = matches!(phase, Phase::Applying { .. });
+                let failed_apply = applying_requested && matches!(phase, Phase::Failed { .. });
+                let alive = this
+                    .update(cx, |this, cx| {
+                        this.update_status = filex::updater::ui_status(&phase);
+                        if failed_apply {
+                            this.notice = Some("The update couldn't be installed".into());
+                        }
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    return;
+                }
+                if applying {
+                    Self::exit_for_update(this, cx).await;
+                    return;
+                }
+                if !phase.is_busy() {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// The install has started: stop the per-user daemon cleanly (the
+    /// updater would otherwise terminate it) and quit.
+    #[cfg(all(target_os = "windows", feature = "updater"))]
+    async fn exit_for_update(this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp) {
+        let Ok(service) = this.update(cx, |this, _| {
+            this.exiting_for_update = true;
+            this.service.take()
+        }) else {
+            return;
+        };
+        if let Some(service) = service {
+            let stopped = cx
+                .background_executor()
+                .spawn(async move { service.shutdown(std::time::Duration::from_secs(5)) })
+                .await;
+            if let Err(error) = stopped {
+                tracing::warn!("index daemon did not stop before the update: {error:#}");
+            }
+        }
+        this.update(cx, |_, cx| cx.quit()).ok();
+    }
+
+    /// Notice-only manifest check: surface the banner if a newer version
+    /// exists. Installation stays with the platform package workflow; this
+    /// never downloads or verifies an artifact. Off-thread; a failed check is
+    /// silent (retried next launch).
+    #[cfg(feature = "updater")]
+    fn spawn_notice_update_check(&self, cx: &mut Context<Self>) {
         let url = platform::UPDATE_MANIFEST_URL;
         if url.is_empty() {
             return;
@@ -84,8 +191,8 @@ impl Workspace {
     }
 
     /// Act on the update banner's primary button per the current
-    /// affordance: copy the command, open the releases page, or (Windows,
-    /// unused here) restart.
+    /// affordance: copy the command, open the releases page, or (Windows)
+    /// have the update service install and reopen Filex.
     pub(super) fn apply_update_action(&mut self, cx: &mut Context<Self>) {
         let filex::update::UpdateStatus::Available { affordance, .. } = &self.update_status else {
             return;
@@ -98,7 +205,10 @@ impl Workspace {
             filex::update::UpdateAffordance::OpenUrl(url) => {
                 let _ = open_with_default_app(std::path::Path::new(&url));
             }
-            filex::update::UpdateAffordance::Restart => {}
+            filex::update::UpdateAffordance::Restart => {
+                #[cfg(all(target_os = "windows", feature = "updater"))]
+                self.drive_update_service(filex::updater::protocol::Command::Apply, cx);
+            }
         }
         cx.notify();
     }
@@ -113,8 +223,11 @@ impl Workspace {
     pub(super) fn spawn_service_probe(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                let existing = this.update(cx, |this, _| this.service.clone());
-                let Ok(existing) = existing else {
+                let existing = this.update(cx, |this, _| {
+                    (!this.exiting_for_update).then(|| this.service.clone())
+                });
+                // Gone, or quitting for an update: don't (re)start the daemon.
+                let Ok(Some(existing)) = existing else {
                     break;
                 };
                 let outcome = cx

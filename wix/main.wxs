@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="windows-1252"?>
-<!-- Installs the UI and per-user search daemon. The UI launches the sibling
-     daemon with its own filesystem permissions. WiX major upgrades remove the
-     v1 SCM service through the previous package's uninstall actions.
-     Build with cargo-wix / WiX v3; targets x64. -->
+<!-- Installs the UI, the per-user search daemon, and the filex-updater
+     service. The UI launches the sibling daemon with its own filesystem
+     permissions. filex-updater is a demand-start LocalSystem service that
+     installs verified releases silently (docs/design-updater.md). WiX major
+     upgrades remove the v1 SCM service through the previous package's
+     uninstall actions.
+     Every binary here must be listed in src/updater/components.rs (tests
+     enforce it). Build with cargo-wix / WiX v3; targets x64. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
       Id="*"
@@ -69,6 +73,42 @@
                  Major upgrades uninstall and remove the old v1 SCM service. -->
           </Component>
 
+          <!-- The update service. Demand start: it runs only while the app
+               asks it something (it grants interactive users SERVICE_START on
+               itself when it first runs) and exits when idle.
+               The stop (Wait=yes) frees the binary before files are
+               replaced; the start runs after install so the new build can
+               relaunch the app and settle the pending install. Wait=no:
+               a service that fails to start must never fail an install. -->
+          <Component Id="FilexUpdater" Guid="*" Win64="yes">
+            <File
+                Id="FilexUpdaterExe"
+                Name="filex-updater.exe"
+                Source="$(var.CargoTargetBinDir)\filex-updater.exe"
+                KeyPath="yes" />
+            <ServiceInstall
+                Id="FilexUpdaterService"
+                Name="filex-updater"
+                DisplayName="Filex Updater"
+                Description="Installs Filex updates. Runs only when Filex checks for updates."
+                Type="ownProcess"
+                Start="demand"
+                ErrorControl="normal"
+                Account="LocalSystem"
+                Vital="yes" />
+            <ServiceControl
+                Id="FilexUpdaterStop"
+                Name="filex-updater"
+                Stop="both"
+                Remove="uninstall"
+                Wait="yes" />
+            <ServiceControl
+                Id="FilexUpdaterStart"
+                Name="filex-updater"
+                Start="install"
+                Wait="no" />
+          </Component>
+
         </Directory>
       </Directory>
 
@@ -104,6 +144,7 @@
       <ComponentRef Id="FilexApp" />
       <ComponentRef Id="FilexCrashReportsChoice" />
       <ComponentRef Id="FilexIndexd" />
+      <ComponentRef Id="FilexUpdater" />
       <ComponentRef Id="FilexStartMenuShortcut" />
     </Feature>
 

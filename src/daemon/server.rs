@@ -336,6 +336,11 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
                     }
                     Ok(Some(Response::Ack))
                 }
+                Command::Shutdown => {
+                    // The wake thread sees the flag and unblocks `incoming`.
+                    stop.store(true, Ordering::Relaxed);
+                    Ok(Some(Response::Ack))
+                }
                 Command::Verify(hit) => {
                     query::verify(&hit)?;
                     let view = shared.view.read().unwrap();

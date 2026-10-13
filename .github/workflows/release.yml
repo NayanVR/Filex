@@ -33,7 +33,9 @@ env:
   TAP_REPO: NayanVR/homebrew-filex
 
 jobs:
-  # --- Windows: MSI (app + per-user daemon), signed -------------------------
+  # --- Windows: MSI (app + per-user daemon + update service), signed --------
+  # Every binary built here must be in src/updater/components.rs (tests
+  # enforce it).
   windows:
     name: windows (msi)
     runs-on: windows-latest
@@ -53,18 +55,20 @@ jobs:
         run: cargo install cargo-wix --locked
         env:
           RUSTFLAGS: ""
-      # The search daemon must never link the telemetry SDK, so build it
-      # (and filex-sign) without default features; the UI app gets
-      # `observability`. Both land in target/release for cargo-wix to
+      # The search daemon and the update service must never link the
+      # telemetry SDK, so build them (and filex-sign) without default
+      # features; the updater gets only `updater`, the UI app gets
+      # `observability`. All land in target/release for cargo-wix to
       # package. FILEX_SENTRY_DSN is compiled into the app when the secret
       # is set, and is simply absent (Sentry stays disabled) when it isn't.
-      - name: Build release (daemon without telemetry; app with observability)
+      - name: Build release (daemon + updater without telemetry; app with observability)
         shell: bash
         env:
           FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
         run: |
           set -euo pipefail
           cargo build --release --locked --no-default-features --bin filex-indexd
+          cargo build --release --locked --no-default-features --features updater --bin filex-updater
           cargo build --release --locked --features observability --bin filex
       - name: Build the MSI
         run: cargo wix --no-build -v
