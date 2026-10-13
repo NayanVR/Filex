@@ -134,11 +134,13 @@ Small, self-contained, no new tooling:
   present.
 - `MSIFASTINSTALL=7` — skips System Restore point creation. Speed is the
   product; this is a couple of seconds of the install, free.
-- Uninstall cleanup of the **index snapshot cache** (`RemoveFolder` /
-  `util:RemoveFolderEx` on `…\AppData\Local\filex\index`). Note the service
-  runs as LocalSystem, so its snapshots live under
-  `C:\Windows\System32\config\systemprofile\AppData\Local\filex\index` —
-  potentially gigabytes, invisible to the user, orphaned forever today.
+- Uninstall cleanup of the **index cache** (`RemoveFolder` /
+  `util:RemoveFolderEx` on `…\AppData\Local\filex\index-v2`, plus `logs`).
+  Since v0.2.0 the daemon runs per-user (started by the UI, no LocalSystem
+  service), so this lives in each user's own profile — potentially gigabytes
+  per user, and orphaned on uninstall today. A perMachine MSI can't reach
+  other users' profiles, so this needs a per-user cleanup on next launch or
+  stays documented as left behind.
   User *settings* (`<config_dir>\filex\settings.json`) are deliberately
   left behind, which is the platform convention.
 
@@ -239,9 +241,11 @@ either succeeds or falls back visibly.
   from the theme — a blank "License" hyperlink is worse than none.
 - **Bundle `UpgradeCode`:** new GUID, minted once, then permanent. Getting
   this wrong later means users with two ARP entries.
-- **Per-user install:** not offered. The elevated service makes perMachine
-  structural, so "install without admin" would mean shipping a degraded
-  no-service mode. Not planned; noted because someone will ask.
+- **Per-user install:** not offered today. The original reason (an elevated
+  LocalSystem service made perMachine structural) is gone since v0.2.0 —
+  the daemon now runs as the user — so admin is only needed to write to
+  Program Files. A per-user MSI is possible but not planned; noted because
+  someone will ask.
 - **arm64 Windows:** the MSI and bundle are x64-only, matching CI. Same
   deferral as the macOS Intel build.
 - **Signing, still:** if it ever gets bought, it changes only CI (sign the

@@ -16,7 +16,20 @@ use std::{
 
 pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
     let meta = std::fs::symlink_metadata(path)?;
-    Ok(Record {
+    let identity = identity(path, &meta);
+    Ok(record(path, &meta, identity, id, parent, root))
+}
+/// The record for `path` from metadata and identity the caller already holds,
+/// so a walk opens each entry once rather than once per lookup.
+fn record(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    identity: Identity,
+    id: u64,
+    parent: u64,
+    root: u32,
+) -> Record {
+    Record {
         id,
         parent,
         root,
@@ -27,14 +40,14 @@ pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
             } else {
                 0
             },
-        identity: identity(path, &meta),
+        identity,
         size: Some(meta.len()),
         mtime: meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64),
-    })
+    }
 }
 /// Iterative walk: bounded directory stack, no full descendant path arena and no
 /// symlink traversal. Permission loss is reported rather than silently claiming
@@ -56,7 +69,14 @@ pub fn walk(
     let meta = std::fs::symlink_metadata(&root.path)?;
     let root_identity = identity(&root.path, &meta);
     let root_id = allocate(&root.path, 0, &root_identity);
-    emit(inspect(&root.path, root_id, 0, root.id)?)?;
+    emit(record(
+        &root.path,
+        &meta,
+        root_identity,
+        root_id,
+        0,
+        root.id,
+    ))?;
     let mut stack = vec![(root.path.clone(), root_id)];
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
     while let Some((path, parent)) = stack.pop() {
@@ -96,13 +116,7 @@ pub fn walk(
             };
             let key = identity(&path, &meta);
             let id = allocate(&path, parent, &key);
-            let record = match inspect(&path, id, parent, root.id) {
-                Ok(r) => r,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
-            };
+            let record = record(&path, &meta, key, id, parent, root.id);
             let dir = record.is_dir();
             emit(record)?;
             if dir {
@@ -467,5 +481,76 @@ mod tests {
             seen.iter().any(|name| name == "hidden.txt"),
             "restored contents are picked up by the next walk: {seen:?}"
         );
+    }
+
+    /// A walk reuses the metadata and identity it already read for each
+    /// entry; its records must match a fresh per-path `inspect`.
+    #[test]
+    fn walk_records_match_inspect() {
+        use super::{Root, inspect, walk};
+        use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
+
+        let tree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tree.path().join("docs/old")).unwrap();
+        fs::write(tree.path().join("docs/resume.pdf"), b"pdf").unwrap();
+        fs::write(tree.path().join("docs/old/notes.txt"), b"some notes").unwrap();
+        let root = Root {
+            id: 3,
+            path: tree.path().to_path_buf(),
+            device: 0,
+        };
+        let mut paths = std::collections::HashMap::<u64, PathBuf>::new();
+        let mut records = Vec::new();
+        let mut next = 0;
+        walk(
+            &root,
+            &tree.path().join("not-the-database"),
+            &super::IndexFilter::from_settings(&Default::default()),
+            |path, _, _| {
+                next += 1;
+                paths.insert(next, path.to_path_buf());
+                next
+            },
+            |record| {
+                records.push(record);
+                Ok(())
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(records.len(), 5, "root, 2 dirs, 2 files");
+        for record in records {
+            let path = &paths[&record.id];
+            let fresh = inspect(path, record.id, record.parent, root.id).unwrap();
+            assert_eq!(record, fresh, "{}", path.display());
+        }
+    }
+
+    /// Regression: identity opened files for reading, which made Defender
+    /// scan every file a walk touched and failed on files held open without
+    /// sharing, leaving them a zero key. An attribute-only open is exempt
+    /// from share modes, so an exclusively held file still gets its key.
+    #[cfg(windows)]
+    #[test]
+    fn identity_reads_files_held_open_without_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locked.dat");
+        std::fs::write(&path, b"x").unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(
+            std::fs::File::open(&path).is_err(),
+            "the file should refuse data opens while held"
+        );
+        let identity = super::identity(&path, &meta);
+        assert_ne!(identity.key, 0, "{identity:?}");
+        assert_ne!(identity.device, 0, "{identity:?}");
     }
 }
