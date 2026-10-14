@@ -232,7 +232,7 @@ impl Workspace {
                             .into_any_element(),
                     );
                     // "Open With" only applies to files. The menu stays open:
-                    // macOS shows an app-list submenu beside it.
+                    // macOS and Windows show an app-list submenu beside it.
                     if !is_dir {
                         let p = path.clone();
                         items.push(
@@ -435,20 +435,31 @@ impl Workspace {
             }
         }
         let submenu = menu.submenu.as_ref().map(|sub| {
-            let items = sub
+            let mut items: Vec<_> = sub
                 .apps
                 .iter()
                 .enumerate()
                 .map(|(ix, app)| {
-                    let (p, app_path) = (sub.path.clone(), app.path.clone());
+                    let (p, app_id) = (sub.path.clone(), app.id.clone());
                     ui::menu::item(&theme, ("open-with-app", ix), app.name.clone(), false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.close_menu(cx);
-                            this.open_in_app(p.clone(), &app_path, cx);
+                            this.open_in_app(p.clone(), app_id.clone(), cx);
                         }))
                         .into_any_element()
                 })
                 .collect();
+            if let Some(label) = OPEN_WITH_OTHER {
+                let p = sub.path.clone();
+                items.push(ui::menu::separator(&theme).into_any_element());
+                items.push(
+                    ui::menu::item(&theme, "open-with-other", label, false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.choose_other_app(p.clone(), cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
             ui::menu::scroll_panel(
                 &theme,
                 "open-with-submenu",

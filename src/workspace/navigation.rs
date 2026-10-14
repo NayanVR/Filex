@@ -261,9 +261,9 @@ impl Workspace {
     }
 
     /// "Open With…" (context-menu action): pick a program other than the
-    /// default. macOS opens an app-list submenu beside the menu, level with
-    /// `anchor_y`, once the list is looked up off the UI thread; elsewhere
-    /// the OS chooser dialog is shown.
+    /// default. macOS and Windows open an app-list submenu beside the menu,
+    /// level with `anchor_y`, once the list is looked up off the UI thread;
+    /// Linux — or Windows with nothing to suggest — shows the OS chooser.
     pub(super) fn open_with(
         &mut self,
         path: PathBuf,
@@ -288,16 +288,7 @@ impl Workspace {
                     cx.notify();
                 }
                 Some(apps) => this.show_open_with_submenu(path, apps, anchor_y, window, cx),
-                None => {
-                    this.close_menu(cx);
-                    if let Err(err) = open_with_dialog(&path) {
-                        this.notice = Some(
-                            format!("couldn't open {} with another app: {err}", path.display())
-                                .into(),
-                        );
-                        cx.notify();
-                    }
-                }
+                None => this.choose_other_app(path, cx),
             })
             .ok();
         })
@@ -328,7 +319,8 @@ impl Workspace {
         } else {
             right
         };
-        let (y, max_height) = submenu_frame(anchor_y, apps.len(), window.viewport_size().height);
+        let rows = apps.len() + usize::from(OPEN_WITH_OTHER.is_some());
+        let (y, max_height) = submenu_frame(anchor_y, rows, window.viewport_size().height);
         menu.submenu = Some(OpenWithSubmenu {
             position: gpui::point(x, y),
             max_height,
@@ -338,13 +330,38 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Launch `path` in a chosen app from the "Open With…" list.
-    pub(super) fn open_in_app(&mut self, path: PathBuf, app: &Path, cx: &mut Context<Self>) {
-        if let Err(err) = open_with_app(&path, app) {
-            self.notice = Some(format!("couldn't open {}: {err}", path.display()).into());
+    /// Launch `path` in a chosen app from the "Open With…" list. Off the
+    /// UI thread: on Windows the Shell's hand-off can take a moment.
+    pub(super) fn open_in_app(&mut self, path: PathBuf, app: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let launched = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { open_with_app(&path, &app) }
+                })
+                .await;
+            this.update(cx, |this, cx| match launched {
+                Ok(()) => this.record_recent(path, cx),
+                Err(err) => {
+                    this.notice = Some(format!("couldn't open {}: {err}", path.display()).into());
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Close the menu and show the OS "Open with" chooser for `path`
+    /// (Linux's only route; Windows' "Choose another app…").
+    pub(super) fn choose_other_app(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        if let Err(err) = open_with_dialog(&path) {
+            self.notice =
+                Some(format!("couldn't open {} with another app: {err}", path.display()).into());
             cx.notify();
         }
-        self.record_recent(path, cx);
     }
 
     /// Jump to a file's parent directory and select it there (context

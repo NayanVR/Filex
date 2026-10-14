@@ -59,30 +59,47 @@ pub(super) fn machine_place() -> (&'static str, &'static str, PathBuf) {
     }
 }
 
-/// Context-menu label: a submenu on macOS, the OS dialog elsewhere.
-pub(super) const OPEN_WITH_LABEL: &str = if cfg!(target_os = "macos") {
+/// Context-menu label: a submenu where Filex lists the apps itself
+/// (macOS, Windows), the OS dialog elsewhere.
+pub(super) const OPEN_WITH_LABEL: &str = if cfg!(any(target_os = "macos", target_os = "windows")) {
     "Open With  ›"
 } else {
     "Open With…"
+};
+
+/// Last submenu entry, for apps the list leaves out: opens the OS chooser
+/// ([`open_with_dialog`]). macOS has no such dialog.
+pub(super) const OPEN_WITH_OTHER: Option<&str> = if cfg!(target_os = "windows") {
+    Some("Choose another app…")
+} else {
+    None
 };
 
 /// An application that can open a file, for the in-app "Open With…" list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AppChoice {
     pub(super) name: String,
-    pub(super) path: PathBuf,
+    /// What [`open_with_app`] launches by: the `.app` bundle path on
+    /// macOS; the Shell handler's name on Windows (an exe path, or a Store
+    /// app's ID).
+    pub(super) id: PathBuf,
 }
 
-/// Applications registered to open `path`, default app first, then by
-/// name — or `None` where the OS has its own chooser dialog instead
-/// (Windows, Linux: see [`open_with_dialog`]). Queries LaunchServices on
-/// macOS, which can be slow on a cold cache: call it off the UI thread.
+/// Applications to list for `path`, default app first, then by name — or
+/// `None` to show the OS chooser instead ([`open_with_dialog`]): always on
+/// Linux, and on Windows when the Shell has nothing to suggest. Queries
+/// LaunchServices / the Shell, which can be slow on a cold cache: call it
+/// off the UI thread.
 pub(super) fn open_with_choices(path: &Path) -> Option<Vec<AppChoice>> {
     #[cfg(target_os = "macos")]
     {
         Some(macos_apps_for(path))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        super::open_with_windows::apps_for(path)
+    }
+    #[cfg(target_os = "linux")]
     {
         let _ = path;
         None
@@ -117,7 +134,7 @@ fn macos_apps_for(path: &Path) -> Vec<AppChoice> {
                 .to_string();
             AppChoice {
                 name: name.trim_end_matches(".app").to_string(),
-                path,
+                id: path,
             }
         })
         .collect();
@@ -125,19 +142,20 @@ fn macos_apps_for(path: &Path) -> Vec<AppChoice> {
     apps
 }
 
-/// Default app first, the rest by name; duplicates (same app path) dropped.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn sort_choices(apps: &mut Vec<AppChoice>, default: Option<&Path>) {
+/// Default app first, the rest by name; duplicates (same app id) dropped.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub(super) fn sort_choices(apps: &mut Vec<AppChoice>, default: Option<&Path>) {
     apps.sort_by(|a, b| {
-        let a_default = Some(a.path.as_path()) != default;
-        let b_default = Some(b.path.as_path()) != default;
+        let a_default = Some(a.id.as_path()) != default;
+        let b_default = Some(b.id.as_path()) != default;
         (a_default, a.name.to_lowercase()).cmp(&(b_default, b.name.to_lowercase()))
     });
-    apps.dedup_by(|a, b| a.path == b.path);
+    apps.dedup_by(|a, b| a.id == b.id);
 }
 
-/// Open `file` with a specific application. Detached. Only macOS builds an
-/// app list ([`open_with_choices`]), so only macOS launches from one.
+/// Open `file` with a chosen app from [`open_with_choices`]. Blocks while
+/// Windows' Shell hands the file over: call it off the UI thread. Linux
+/// builds no list, so has nothing to launch from one.
 pub(super) fn open_with_app(file: &Path, app: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -148,12 +166,16 @@ pub(super) fn open_with_app(file: &Path, app: &Path) -> std::io::Result<()> {
             .spawn()
             .map(drop)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        super::open_with_windows::launch(file, app)
+    }
+    #[cfg(target_os = "linux")]
     {
         let _ = (file, app);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "launching a chosen app is macOS-only; other platforms use the OS chooser",
+            "Linux uses the OS chooser instead of an app list",
         ))
     }
 }
@@ -164,16 +186,7 @@ pub(super) fn open_with_app(file: &Path, app: &Path) -> std::io::Result<()> {
 pub(super) fn open_with_dialog(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt as _;
-        // The Shell's classic "How do you want to open this file?" dialog.
-        // CREATE_NO_WINDOW keeps rundll32 from flashing a console.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("rundll32.exe")
-            .arg("shell32.dll,OpenAs_RunDLL")
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map(drop)
+        super::open_with_windows::dialog(path)
     }
     #[cfg(target_os = "linux")]
     {
@@ -261,7 +274,7 @@ mod tests {
     fn app(name: &str, path: &str) -> AppChoice {
         AppChoice {
             name: name.into(),
-            path: PathBuf::from(path),
+            id: PathBuf::from(path),
         }
     }
 

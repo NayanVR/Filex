@@ -30,8 +30,8 @@ use crate::ui::theme::{ActiveTheme as _, Theme};
 pub use app::run;
 use filex::listing::FileKind;
 use platform::{
-    AppChoice, OPEN_WITH_LABEL, open_with_app, open_with_choices, open_with_default_app,
-    open_with_dialog,
+    AppChoice, OPEN_WITH_LABEL, OPEN_WITH_OTHER, open_with_app, open_with_choices,
+    open_with_default_app, open_with_dialog,
 };
 use state::*;
 
@@ -433,6 +433,8 @@ mod input;
 mod location;
 mod navigation;
 mod onboarding;
+#[cfg(target_os = "windows")]
+mod open_with_windows;
 mod platform;
 mod preferences;
 mod quick_look;
