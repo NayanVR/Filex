@@ -1353,3 +1353,23 @@ fn a_worker_from_another_build_exits_with_the_skew_code() {
         Some(filex::daemon::builder::WORKER_SKEW_EXIT)
     );
 }
+/// Before an update replaces the binaries, the app asks its daemon to exit
+/// cleanly instead of leaving the updater to terminate it.
+#[test]
+fn shutdown_command_stops_the_daemon_and_removes_its_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"), b"a").unwrap();
+    let data = dir.path().join("db");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (path, roots, shutdown) = (data.clone(), vec![root.clone()], stop.clone());
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown));
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    client.shutdown(Duration::from_secs(20)).unwrap();
+    assert!(!data.join("endpoint.json").exists());
+    thread.join().unwrap().unwrap();
+    assert!(stop.load(Ordering::Relaxed));
+    assert!(Client::connect(&data).is_err());
+}

@@ -266,9 +266,12 @@ struct Workspace {
     /// Transient user-facing message (e.g. why a root couldn't be added).
     notice: Option<SharedString>,
     /// The auto-updater's UI state, a slim banner above the status bar.
-    /// Advanced by a background manifest check on launch (macOS/Linux);
-    /// the Windows service path would report via IPC (pending).
+    /// Advanced by a background manifest check on launch (macOS/Linux) or
+    /// by the `filex-updater` service over its pipe (Windows).
     update_status: filex::update::UpdateStatus,
+    /// Set once an install has started and the app is shutting its daemon
+    /// down to quit: the service probe must not restart the daemon.
+    exiting_for_update: bool,
     #[cfg(target_os = "macos")]
     fda_missing: bool,
     /// Connection to the per-user filex-indexd daemon.
@@ -636,6 +639,7 @@ impl Workspace {
             search_debounce: None,
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_status: filex::update::UpdateStatus::default(),
+            exiting_for_update: false,
         };
         this.load_dir(&cwd, cx);
         if this.settings.read(cx).settings().onboarding_pending {

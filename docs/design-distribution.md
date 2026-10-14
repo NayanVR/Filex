@@ -89,6 +89,13 @@ in v1** — the field is written but clients ignore it for now (decision 8).
 
 ## §3 Windows auto-update — service-driven, silent
 
+> **Superseded 2026-10-14 by [design-updater.md](design-updater.md).** Since
+> v0.2.0 `filex-indexd` is a per-user process, so the update loop moved to a
+> dedicated demand-start LocalSystem service, `filex-updater`. The MSI
+> transaction/rollback reasoning below still holds; the download, verify and
+> detached-msiexec steps now live in `filex::updater`. The rest of this
+> section is the original v1 record.
+
 The `filex-indexd` service (already LocalSystem) owns the update loop.
 Because it is already elevated and downloads via its own HTTP client:
 
@@ -301,9 +308,8 @@ Ordered so each block is independently testable and lands one concern.
   revisit only if a flaky-network case argues otherwise.
 - **macOS arch:** release builds arm64 only (single runner arch); an
   Intel/universal build is deferred until there's demand.
-- **Windows UI↔service update status:** wire `filex-indexd`'s download/
-  ready state to the UI banner over the named pipe (block 4 left this
-  `Idle` on Windows).
+- **Windows UI↔service update status — DONE 2026-10-14** via the
+  `filex-updater` service and its pipe ([design-updater.md](design-updater.md)).
 - **Ed25519 key management:** exact storage (CI secret store), and a
   rotation story if the key is ever compromised (embed a second/rollover
   public key?).

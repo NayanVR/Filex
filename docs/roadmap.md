@@ -246,8 +246,9 @@ Sequence matters here:
    initial index. USN-fast-path bootstrap is seconds, so its stop latency
    is already small; the cancellation covers the slower walk fallback.
 3. **Code signing** (Azure Trusted Signing) to pass SmartScreen, then a
-   **winget** manifest. Auto-update (Velopack) later, when there are
-   external users.
+   **winget** manifest. Auto-update: built 2026-10-14 as the demand-start
+   `filex-updater` service ([design-updater.md](design-updater.md));
+   Velopack is no longer planned.
 4. Run the `#[ignore]`d full-volume MFT bootstrap test on real hardware
    once (`cargo test -- --ignored`).
 

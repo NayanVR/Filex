@@ -28,6 +28,13 @@ jobs:
         run: cargo test --locked --no-default-features
       - name: Run v2 catalog and literal laboratory tests
         run: cargo test --locked --no-default-features --features index-v2-lab
+      # The update service's Windows plumbing (pipe, SCM, processes) only
+      # compiles with `updater`; build the service binary alongside.
+      - name: Run update service tests and build filex-updater
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo test --locked --no-default-features --features updater --lib updater
+          cargo build --locked --no-default-features --features updater --bin filex-updater
       # Benches aren't built by `cargo test`; keep them compiling too.
       - name: Check all library targets (incl. benches)
         run: cargo check --locked --all-targets --no-default-features --features index-v2-lab
@@ -72,8 +79,10 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: cargo check --locked --example quick_look_smoke
 
-  # Build the Windows MSI (app + per-user daemon) and smoke-test that it
-  # installs the UI and per-user daemon, and uninstalls cleanly.
+  # Build the Windows MSI (app + per-user daemon + update service) and
+  # smoke-test that it installs them, that the update service registers
+  # demand-start and boots (it grants users SERVICE_START on first run), and
+  # that everything uninstalls cleanly.
   msi:
     name: MSI installer (windows)
     runs-on: windows-latest
@@ -114,6 +123,24 @@ jobs:
           if (-not (Test-Path "C:\Program Files\Filex\filex-indexd.exe")) { throw "filex-indexd.exe not installed" }
           # V2 uses a per-user daemon, not an elevated machine-wide endpoint.
           if (-not (Test-Path "C:\Program Files\Filex\filex.exe")) { throw "UI was not installed" }
+          if (-not (Test-Path "C:\Program Files\Filex\filex-updater.exe")) { throw "filex-updater.exe not installed" }
+          # The update service: demand start, LocalSystem.
+          $qc = (sc.exe qc filex-updater) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw "filex-updater service not registered:`n$qc" }
+          if ($qc -notmatch 'DEMAND_START') { throw "filex-updater should be demand-start:`n$qc" }
+          if ($qc -notmatch 'LocalSystem') { throw "filex-updater should run as LocalSystem:`n$qc" }
+          # The MSI starts it once after install; on boot it grants interactive
+          # users SERVICE_START (RP) on itself. Proves the service binary boots.
+          $granted = $false
+          for ($i = 0; $i -lt 30 -and -not $granted; $i++) {
+            $sd = (sc.exe sdshow filex-updater) -join ''
+            $granted = $sd -match '\(A;;CCLCSWRPLOCRRC;;;IU\)'
+            if (-not $granted) { Start-Sleep -Seconds 1 }
+          }
+          if (-not $granted) {
+            Get-ChildItem "C:\Windows\System32\config\systemprofile\AppData\Local\filex\logs" -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 40 }
+            throw "filex-updater did not set its service DACL (got: $sd)"
+          }
           # The privacy page's crash-report choice: on by default, and an
           # unattended FILEX_CRASH_REPORTS=0 opts out (checked below).
           $crash = (Get-ItemProperty "HKLM:\Software\Filex").CrashReports
@@ -130,6 +157,9 @@ jobs:
           if (Test-Path "HKLM:\Software\Filex") { throw "HKLM\Software\Filex left behind after uninstall" }
           sc.exe query filex-indexd 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { throw "filex-indexd service still present after uninstall" }
+          sc.exe query filex-updater 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw "filex-updater service still present after uninstall" }
+          if (Test-Path "C:\Program Files\Filex") { throw "C:\Program Files\Filex left behind after uninstall" }
           Write-Host "MSI smoke test passed"
           # Don't leak the last (intentionally non-zero) native exit code.
           exit 0

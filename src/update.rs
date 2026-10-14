@@ -4,9 +4,9 @@
 //!
 //! # Security model
 //!
-//! Filex ships without OS code signing, and on Windows the updater runs as
-//! **LocalSystem** — an unverified payload would be a SYSTEM-level RCE
-//! vector. Every artifact MUST pass [`Manifest::verify_payload`] (Ed25519
+//! Filex ships without OS code signing, and on Windows the updater
+//! (`filex-updater`, see `crate::updater`) runs as **LocalSystem** — an
+//! unverified payload would be a SYSTEM-level RCE vector. Every artifact MUST pass [`Manifest::verify_payload`] (Ed25519
 //! over the artifact bytes) before any install step. The public key is
 //! embedded in shipping binaries; the private key exists only in CI. See
 //! `docs/design-distribution.md` §4.
@@ -337,7 +337,7 @@ where
 #[cfg(feature = "updater")]
 const MAX_ARTIFACT_BYTES: usize = 500 * 1024 * 1024;
 
-/// Concrete HTTPS fetcher for the app and the Windows index service.
+/// Concrete HTTPS fetcher for the app and the Windows update service.
 /// Streams the body polling `cancel` between chunks, and refuses one
 /// larger than [`MAX_ARTIFACT_BYTES`]. Behind the `updater` feature so the
 /// default library build stays network-free.
@@ -423,14 +423,19 @@ fn classify_fetch_error(cancel: &CancelFlag, msg: String) -> DownloadError {
 /// The `msiexec` arguments that silently apply a staged MSI. `/qn` is
 /// fully silent (the SYSTEM service has no UI); `/norestart` forbids an
 /// unattended reboot — the service restart is the MSI's `ServiceControl`
-/// job. Pure string logic, unit-testable off-Windows.
-pub fn msiexec_args(msi_path: &str) -> Vec<String> {
-    vec![
+/// job. `log_path` adds a verbose install log. Pure string logic,
+/// unit-testable off-Windows.
+pub fn msiexec_args(msi_path: &str, log_path: Option<&str>) -> Vec<String> {
+    let mut args = vec![
         "/i".into(),
         msi_path.into(),
         "/qn".into(),
         "/norestart".into(),
-    ]
+    ];
+    if let Some(log) = log_path {
+        args.extend(["/l*v".into(), log.into()]);
+    }
+    args
 }
 
 /// A lightweight "is a newer version available?" check for platforms that
@@ -496,6 +501,8 @@ pub enum UpdateStatus {
     },
     /// (Windows) the service is downloading in the background.
     Downloading { version: String },
+    /// (Windows) the service is installing; the app is about to close.
+    Installing { version: String },
     /// The last check failed; rendered as nothing.
     Failed,
 }
@@ -518,6 +525,10 @@ pub fn banner_content(status: &UpdateStatus) -> Option<BannerContent> {
         UpdateStatus::Idle | UpdateStatus::Failed => None,
         UpdateStatus::Downloading { version } => Some(BannerContent {
             message: format!("Downloading Filex {version}…"),
+            action_label: None,
+        }),
+        UpdateStatus::Installing { version } => Some(BannerContent {
+            message: format!("Installing Filex {version} — Filex will reopen"),
             action_label: None,
         }),
         UpdateStatus::Available {
@@ -980,8 +991,19 @@ mod tests {
     #[test]
     fn msiexec_args_are_silent_and_no_restart() {
         assert_eq!(
-            msiexec_args(r"C:\Temp\Filex-1.4.0.msi"),
+            msiexec_args(r"C:\Temp\Filex-1.4.0.msi", None),
             vec!["/i", r"C:\Temp\Filex-1.4.0.msi", "/qn", "/norestart"]
+        );
+        assert_eq!(
+            msiexec_args(r"C:\U\Filex-1.4.0.msi", Some(r"C:\L\msi.log")),
+            vec![
+                "/i",
+                r"C:\U\Filex-1.4.0.msi",
+                "/qn",
+                "/norestart",
+                "/l*v",
+                r"C:\L\msi.log"
+            ]
         );
     }
 
@@ -1056,6 +1078,16 @@ mod tests {
         };
         let content = banner_content(&downloading).unwrap();
         assert_eq!(content.message, "Downloading Filex 2.0.0…");
+        assert_eq!(content.action_label, None);
+
+        let installing = UpdateStatus::Installing {
+            version: "2.0.0".into(),
+        };
+        let content = banner_content(&installing).unwrap();
+        assert_eq!(
+            content.message,
+            "Installing Filex 2.0.0 — Filex will reopen"
+        );
         assert_eq!(content.action_label, None);
     }
 }

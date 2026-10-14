@@ -19,6 +19,7 @@ pub mod selection;
 pub mod settings;
 pub mod tags;
 pub mod update;
+pub mod updater;
 
 pub mod daemon;
 pub mod ingest;

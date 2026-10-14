@@ -117,6 +117,10 @@ pub enum Command {
         path: PathBuf,
     },
     Verify(Hit),
+    /// Exit cleanly (writer flushed, endpoint removed). Sent by the app
+    /// before an update replaces the binaries. Daemons before v0.3.6 don't
+    /// know it and drop the connection.
+    Shutdown,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Request {
@@ -259,6 +263,21 @@ impl Client {
     }
     pub fn verify(&self, hit: Hit) -> Result<()> {
         self.call(Command::Verify(hit))?;
+        Ok(())
+    }
+    /// Ask the daemon to exit cleanly and wait (bounded) until its endpoint
+    /// is gone. Errors mean it may still be running.
+    pub fn shutdown(&self, timeout: Duration) -> Result<()> {
+        self.call(Command::Shutdown)?;
+        let endpoint = self.directory.join("endpoint.json");
+        let deadline = std::time::Instant::now() + timeout;
+        while endpoint.exists() {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "index daemon did not exit within {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
         Ok(())
     }
     pub fn start() -> Result<Self> {
