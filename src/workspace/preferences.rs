@@ -10,14 +10,16 @@ pub(super) enum SettingsSection {
     Search,
     Keyboard,
     Privacy,
+    About,
 }
 impl SettingsSection {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Appearance,
         Self::Browsing,
         Self::Search,
         Self::Keyboard,
         Self::Privacy,
+        Self::About,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -26,6 +28,7 @@ impl SettingsSection {
             Self::Search => "Search",
             Self::Keyboard => "Keyboard",
             Self::Privacy => "Privacy",
+            Self::About => "About",
         }
     }
     fn icon(self) -> &'static str {
@@ -35,6 +38,7 @@ impl SettingsSection {
             Self::Search => "icons/search.svg",
             Self::Keyboard => "icons/keyboard.svg",
             Self::Privacy => "icons/shield.svg",
+            Self::About => "icons/info.svg",
         }
     }
     fn description(self) -> &'static str {
@@ -44,6 +48,7 @@ impl SettingsSection {
             Self::Search => "Choose which folders search covers, and what it skips inside them.",
             Self::Keyboard => "Click a shortcut, then press your preferred combination.",
             Self::Privacy => "Choose what you share with filex.",
+            Self::About => "Your version of filex, and the welcome tour.",
         }
     }
     fn contains(self, id: &str) -> bool {
@@ -292,26 +297,10 @@ impl Workspace {
                         "Density",
                         "Give files more room or fit more on screen",
                         self.render_density_selector(&theme, settings.density, cx),
-                    ))
-                    .child(ui::settings_pane::action_row(
-                        &theme,
-                        "Welcome tour",
-                        "Replay the first-run welcome and import pinned folders",
-                        ui::button::button(
-                            &theme,
-                            "replay-welcome",
-                            "Replay",
-                            ui::button::Variant::Secondary,
-                            ui::button::Size::Small,
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.start_onboarding(cx);
-                                window.focus(&this.focus_handle, cx);
-                            },
-                        )),
                     )),
             );
+        } else if section == SettingsSection::About {
+            page = page.child(self.render_about(&theme, cx));
         } else if section == SettingsSection::Keyboard {
             page = page.child(self.render_keyboard_preferences(&theme, cx));
         } else if section == SettingsSection::Search {
@@ -347,6 +336,36 @@ impl Workspace {
                 .child(card)
                 .into_any_element(),
         )
+    }
+
+    /// "About": the running version and the welcome-tour replay.
+    fn render_about(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        ui::settings_pane::group(theme)
+            .child(ui::settings_pane::action_row(
+                theme,
+                "Version",
+                "The filex release you are running",
+                div()
+                    .text_sm()
+                    .text_color(theme.text_dim)
+                    .child(env!("CARGO_PKG_VERSION")),
+            ))
+            .child(ui::settings_pane::action_row(
+                theme,
+                "Welcome tour",
+                "Replay the first-run welcome and import pinned folders",
+                ui::button::button(
+                    theme,
+                    "replay-welcome",
+                    "Replay",
+                    ui::button::Variant::Secondary,
+                    ui::button::Size::Small,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.start_onboarding(cx);
+                    window.focus(&this.focus_handle, cx);
+                })),
+            ))
     }
 
     /// The section's plain on/off settings, as one group.

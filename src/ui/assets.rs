@@ -77,6 +77,7 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("keyboard"),
     icon!("check"),
     icon!("message-square"),
+    icon!("info"),
 ];
 
 /// Serves the embedded [`ICONS`]. Registered via
