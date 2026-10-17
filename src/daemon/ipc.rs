@@ -343,3 +343,308 @@ pub fn notify_applied(applied: &crate::ops::AppliedOp) {
     };
     let _ = queue.try_send(paths);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        catalog::segment::Identity,
+        listing::FileKind,
+        search::filter::{Bound, Filter},
+    };
+    use std::io::Cursor;
+
+    /// A path no `String` can hold: invalid UTF-8 on Unix, an unpaired
+    /// surrogate on Windows. `path_codec` must carry it across untouched.
+    fn odd_path() -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/odd\xff\xfe\x80.bin"))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let mut units: Vec<u16> = "C:\\odd".encode_utf16().collect();
+            units.extend([0xD800, u16::from(b'x')]);
+            PathBuf::from(std::ffi::OsString::from_wide(&units))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            PathBuf::from("/tmp/odd.bin")
+        }
+    }
+
+    fn query() -> Query {
+        Query {
+            text: "report ünï".into(),
+            filters: vec![
+                Filter::Ext("pdf".into()),
+                Filter::Kind(FileKind::Image),
+                Filter::Size(Bound::Range(1, u64::MAX)),
+                Filter::Modified(Bound::Lt(i64::MIN)),
+                Filter::Tag("work".into()),
+            ],
+            scope: Some(odd_path()),
+            allowed: Some(vec![odd_path(), PathBuf::from("plain")]),
+            limit: 7,
+            offset: 3,
+            fuzzy: false,
+            client: u64::MAX,
+            request: 42,
+            epoch_hint: Some(9),
+        }
+    }
+
+    fn hit() -> Hit {
+        Hit {
+            id: 5,
+            name: "odd.bin".into(),
+            path: odd_path(),
+            is_dir: false,
+            identity: Identity {
+                device: u64::MAX,
+                key: 1,
+                birth: 2,
+            },
+            tier: Tier::Fuzzy,
+        }
+    }
+
+    fn commands() -> Vec<Command> {
+        vec![
+            Command::Status,
+            Command::Reconcile,
+            Command::Search(query()),
+            Command::StreamMatches(Query::default()),
+            Command::AddRoot(odd_path()),
+            Command::RemoveRoot(odd_path()),
+            Command::HintFilesystemChange {
+                operation_id: u64::MAX,
+                paths: vec![odd_path(), PathBuf::new()],
+            },
+            Command::Cancel {
+                client: 1,
+                before_request: 2,
+            },
+            Command::Touch { path: odd_path() },
+            Command::Verify(hit()),
+            Command::Shutdown,
+        ]
+    }
+
+    fn responses() -> Vec<Response> {
+        vec![
+            Response::Status(Status {
+                epoch: 3,
+                roots: vec![RootStatus {
+                    path: odd_path(),
+                    files: 10,
+                    state: "ready".into(),
+                }],
+                building: true,
+                error: Some("disk gone".into()),
+                progress: Some(Progress {
+                    scanned: 99,
+                    indexing: true,
+                    recent: vec!["a".into(), "b".into()],
+                }),
+            }),
+            Response::Page(Page {
+                partial: true,
+                epoch: 4,
+                hits: vec![hit()],
+                more: true,
+                examined: 12,
+            }),
+            Response::Batch(Batch {
+                epoch: 5,
+                hits: vec![hit(), hit()],
+                scanned: 6,
+                total: None,
+            }),
+            Response::Ack,
+            Response::Error("boom".into()),
+        ]
+    }
+
+    /// Wire types carry no `PartialEq`; the JSON value of a re-encoding
+    /// is the comparison (it includes the raw path bytes).
+    fn roundtrip<T: Serialize + serde::de::DeserializeOwned>(message: &T) -> T {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, message).expect("write");
+        let mut reader = Cursor::new(wire);
+        let decoded: T = read_frame(&mut reader).expect("read");
+        assert_eq!(reader.position() as usize, reader.get_ref().len());
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("re-encode"),
+            serde_json::to_value(message).expect("encode")
+        );
+        decoded
+    }
+
+    fn frame(body: &[u8]) -> Vec<u8> {
+        let mut wire = (body.len() as u32).to_le_bytes().to_vec();
+        wire.extend_from_slice(body);
+        wire
+    }
+
+    #[test]
+    fn every_request_command_roundtrips() {
+        for command in commands() {
+            let request = roundtrip(&Request {
+                version: VERSION,
+                token: "secret".into(),
+                command,
+            });
+            assert_eq!(request.version, VERSION);
+            assert_eq!(request.token, "secret");
+        }
+    }
+
+    #[test]
+    fn non_utf8_paths_survive_the_wire_byte_for_byte() {
+        let decoded = roundtrip(&Command::HintFilesystemChange {
+            operation_id: 1,
+            paths: vec![odd_path()],
+        });
+        let Command::HintFilesystemChange { paths, .. } = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(paths, vec![odd_path()]);
+        let Command::Search(query) = roundtrip(&Command::Search(query())) else {
+            panic!("wrong variant");
+        };
+        assert_eq!(query.scope, Some(odd_path()));
+        assert_eq!(
+            query.allowed,
+            Some(vec![odd_path(), PathBuf::from("plain")])
+        );
+        assert_eq!(query.filters, self::query().filters);
+    }
+
+    #[test]
+    fn every_response_roundtrips() {
+        for response in responses() {
+            roundtrip(&response);
+        }
+    }
+
+    #[test]
+    fn frame_header_is_le_length_of_json_body() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, &Response::Ack).expect("write");
+        let body = serde_json::to_vec(&Response::Ack).expect("encode");
+        assert_eq!(wire, frame(&body));
+    }
+
+    #[test]
+    fn write_rejects_oversized_message_without_writing() {
+        let mut wire = Vec::new();
+        let huge = Response::Error("x".repeat(MAX_FRAME));
+        assert!(write_frame(&mut wire, &huge).is_err());
+        assert!(wire.is_empty());
+    }
+
+    /// Fails the test if the body of an oversized frame is ever read.
+    struct NoBody;
+    impl Read for NoBody {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("read_frame read past an oversized header");
+        }
+    }
+
+    #[test]
+    fn read_rejects_oversized_header_before_reading_body() {
+        let header = ((MAX_FRAME + 1) as u32).to_le_bytes();
+        let mut reader = Cursor::new(header).chain(NoBody);
+        assert!(read_frame::<Response>(&mut reader).is_err());
+        let mut reader = Cursor::new(u32::MAX.to_le_bytes()).chain(NoBody);
+        assert!(read_frame::<Response>(&mut reader).is_err());
+    }
+
+    #[test]
+    fn read_accepts_frame_of_exactly_max_size() {
+        // A JSON string of MAX_FRAME bytes: quotes plus filler.
+        let mut body = vec![b'"'];
+        body.resize(MAX_FRAME - 1, b'a');
+        body.push(b'"');
+        let value: String = read_frame(&mut Cursor::new(frame(&body))).expect("read");
+        assert_eq!(value.len(), MAX_FRAME - 2);
+    }
+
+    #[test]
+    fn read_rejects_truncated_header() {
+        for len in 0..4 {
+            let mut reader = Cursor::new(vec![1u8; len]);
+            assert!(read_frame::<Response>(&mut reader).is_err(), "{len} bytes");
+        }
+    }
+
+    #[test]
+    fn read_rejects_truncated_body() {
+        let body = serde_json::to_vec(&Response::Error("hello".into())).expect("encode");
+        let wire = frame(&body);
+        for cut in 4..wire.len() {
+            let mut reader = Cursor::new(&wire[..cut]);
+            assert!(read_frame::<Response>(&mut reader).is_err(), "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn read_rejects_invalid_json() {
+        for body in [&b"{not json"[..], b"", b"\xff\xfe", b"\"Ack\" trailing"] {
+            let mut reader = Cursor::new(frame(body));
+            assert!(read_frame::<Response>(&mut reader).is_err());
+        }
+    }
+
+    #[test]
+    fn back_to_back_frames_decode_in_order() {
+        let mut wire = Vec::new();
+        for response in responses() {
+            write_frame(&mut wire, &response).expect("write");
+        }
+        let mut reader = Cursor::new(wire);
+        for expected in responses() {
+            let decoded: Response = read_frame(&mut reader).expect("read");
+            assert_eq!(
+                serde_json::to_value(&decoded).expect("encode"),
+                serde_json::to_value(&expected).expect("encode")
+            );
+        }
+        assert!(read_frame::<Response>(&mut reader).is_err());
+    }
+
+    #[test]
+    fn unknown_command_is_an_error_not_a_panic() {
+        for command in [r#"{"Bogus":null}"#, r#""Bogus""#, r#"{"Search":"nope"}"#] {
+            let body = format!(r#"{{"version":2,"token":"t","command":{command}}}"#);
+            let mut reader = Cursor::new(frame(body.as_bytes()));
+            assert!(read_frame::<Request>(&mut reader).is_err(), "{command}");
+        }
+    }
+
+    /// Unit variants are bare strings on the wire; older daemons rely on
+    /// unknown ones (e.g. `Shutdown` before v0.3.6) failing to decode.
+    #[test]
+    fn unit_commands_keep_their_wire_names() {
+        for (command, wire) in [
+            (Command::Status, r#""Status""#),
+            (Command::Reconcile, r#""Reconcile""#),
+            (Command::Shutdown, r#""Shutdown""#),
+        ] {
+            assert_eq!(serde_json::to_string(&command).expect("encode"), wire);
+        }
+    }
+
+    #[test]
+    fn status_without_progress_from_older_daemons_decodes() {
+        let body = br#"{"Status":{"epoch":1,"roots":[],"building":false,"error":null}}"#;
+        let Response::Status(status) = read_frame(&mut Cursor::new(frame(body))).expect("read")
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(status.progress, None);
+    }
+}
