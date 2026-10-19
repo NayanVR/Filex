@@ -197,3 +197,211 @@ pub fn one_edit(a: &str, b: &str) -> bool {
     }
     edits + usize::from(i < a.len() || j < b.len()) <= 1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds from `(name, word-start byte offsets)` with ids in list order,
+    /// the shape `LiteralIndex` passes (folded names, ascending ids).
+    fn index(names: &[(&str, &[usize])]) -> FuzzyIndex {
+        FuzzyIndex::build(
+            names
+                .iter()
+                .enumerate()
+                .map(|(id, (name, starts))| (id as u32, *name, *starts)),
+        )
+        .unwrap()
+    }
+
+    fn ids(found: &[(u32, bool)]) -> Vec<u32> {
+        found.iter().map(|(id, _)| *id).collect()
+    }
+
+    #[test]
+    fn one_edit_accepts_equal_strings() {
+        // Zero edits is within "at most one"; callers rely on exact words
+        // matching too.
+        assert!(one_edit("report", "report"));
+        assert!(one_edit("", ""));
+    }
+
+    #[test]
+    fn one_edit_accepts_a_single_insert_or_delete_anywhere() {
+        for (a, b) in [
+            ("report", "xreport"),
+            ("report", "repxort"),
+            ("report", "reportx"),
+            ("report", "eport"),
+            ("report", "repot"),
+            ("report", "repor"),
+            ("", "a"),
+        ] {
+            assert!(one_edit(a, b), "{a} -> {b}");
+            assert!(one_edit(b, a), "{b} -> {a}");
+        }
+    }
+
+    #[test]
+    fn one_edit_accepts_a_single_substitution_anywhere() {
+        for b in ["xeport", "rexort", "reporx"] {
+            assert!(one_edit("report", b), "{b}");
+        }
+    }
+
+    #[test]
+    fn one_edit_rejects_two_edits() {
+        for (a, b) in [
+            ("report", "xexort"),
+            ("report", "rpot"),
+            ("report", "xreportx"),
+            ("report", "repo"),
+            ("", "ab"),
+            ("report", "reportxx"),
+        ] {
+            assert!(!one_edit(a, b), "{a} -> {b}");
+            assert!(!one_edit(b, a), "{b} -> {a}");
+        }
+    }
+
+    #[test]
+    fn one_edit_rejects_adjacent_transposition() {
+        // A swap is two substitutions here, not Damerau's one.
+        assert!(!one_edit("report", "rpeort"));
+        assert!(!one_edit("ab", "ba"));
+    }
+
+    #[test]
+    fn one_edit_counts_chars_not_bytes() {
+        assert!(one_edit("cafe", "café"));
+        assert!(one_edit("café", "cafè"));
+        assert!(one_edit("日本語", "日本"));
+        assert!(one_edit("日本語", "日文語"));
+        assert!(one_edit("ok", "ok🙂"));
+        assert!(!one_edit("日本語", "日"));
+    }
+
+    #[test]
+    fn deletes_into_matches_deletes() {
+        let mut out = Vec::new();
+        for s in [
+            "report",
+            "aab",
+            "aaaa",
+            "bookkeeper",
+            "café",
+            "日本語",
+            "a🙂b",
+            "x",
+        ] {
+            let count = deletes_into(s, &mut out);
+            assert_eq!(count, s.chars().count(), "{s}");
+            assert!(out[..count].windows(2).all(|w| w[0] <= w[1]), "{s}");
+            let set: BTreeSet<String> = out[..count].iter().cloned().collect();
+            assert_eq!(set, deletes(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn deletes_into_reuses_buffers_without_stale_entries() {
+        let mut out = Vec::new();
+        assert_eq!(deletes_into("abcdef", &mut out), 6);
+        assert_eq!(deletes_into("xy", &mut out), 2);
+        assert_eq!(out[..2], ["x".to_owned(), "y".to_owned()]);
+        assert_eq!(deletes_into("pqrs", &mut out), 4);
+        assert_eq!(out[..4], ["pqr", "pqs", "prs", "qrs"]);
+    }
+
+    #[test]
+    fn acronym_query_finds_name_by_word_starts() {
+        let fuzzy = index(&[("xmlhttprequest.rs", &[0, 3, 7]), ("notes.txt", &[0])]);
+        assert_eq!(fuzzy.candidates("xhr"), [(0, true)]);
+    }
+
+    #[test]
+    fn acronym_ignores_extension_and_needs_two_letters() {
+        // "a:" plus at least two word starts, all before the last '.'.
+        let fuzzy = index(&[("foo_bar.txt", &[0, 4, 8]), ("solo.md", &[0, 5])]);
+        assert_eq!(fuzzy.candidates("fb"), [(0, true)]);
+        assert!(fuzzy.candidates("fbt").is_empty());
+        assert!(fuzzy.candidates("sm").is_empty());
+    }
+
+    #[test]
+    fn one_char_typo_finds_the_word() {
+        // Candidates are a superset: a transposition shares a delete with the
+        // word, and `one_edit` filters it out later.
+        let fuzzy = index(&[("report.pdf", &[0, 7]), ("invoice.pdf", &[0, 8])]);
+        for query in ["report", "rexort", "repor", "reports", "repxort", "rpeort"] {
+            assert_eq!(fuzzy.candidates(query), [(0, false)], "{query}");
+        }
+        assert!(fuzzy.candidates("rxpxrt").is_empty());
+    }
+
+    #[test]
+    fn short_and_long_words_are_not_indexed() {
+        let long = "a".repeat(25);
+        let name = format!("ab {long}");
+        let fuzzy = index(&[(&name, &[0, 3])]);
+        assert!(fuzzy.keys.iter().all(|k| !k.starts_with("d:ab")));
+        assert!(fuzzy.candidates(&long[..24]).is_empty());
+    }
+
+    #[test]
+    fn candidates_rejects_queries_outside_two_to_24_chars() {
+        let fuzzy = index(&[("ab cd", &[0, 3])]);
+        assert!(fuzzy.candidates("a").is_empty());
+        assert!(fuzzy.candidates(&"a".repeat(25)).is_empty());
+        assert_eq!(fuzzy.candidates("ac"), [(0, true)]);
+    }
+
+    #[test]
+    fn per_key_list_is_capped() {
+        let names = vec![("report", &[0usize][..]); MAX_NAMES_PER_KEY + 10];
+        let fuzzy = index(&names);
+        let found = fuzzy.candidates("report");
+        assert_eq!(
+            ids(&found),
+            (0..MAX_NAMES_PER_KEY as u32).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn candidates_are_capped_and_lowest_ids_win() {
+        // "abcd" probes d:abcd and its four deletes. Each of the first four
+        // words reaches exactly one of those deletes, 64 names apiece, so
+        // they alone fill MAX_CANDIDATES; "abcd" itself adds ten more.
+        let mut names = Vec::new();
+        for word in ["xbcd", "axcd", "abxd", "abcx"] {
+            names.extend(std::iter::repeat_n(
+                (word, &[0usize][..]),
+                MAX_NAMES_PER_KEY,
+            ));
+        }
+        names.extend(std::iter::repeat_n(("abcd", &[0usize][..]), 10));
+        let fuzzy = index(&names);
+        let found = fuzzy.candidates("abcd");
+        assert_eq!(ids(&found), (0..MAX_CANDIDATES as u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn key_count_is_capped_in_first_seen_order() {
+        // A unique five-letter prefix on a run of distinct letters: each
+        // 24-letter word brings at least 20 keys of its own (itself and its
+        // suffix deletes), so this offers well over MAX_KEYS.
+        let words: Vec<String> = (0..MAX_KEYS / 20 + 10)
+            .map(|i| {
+                let prefix = (0..5).map(|k| char::from(b'a' + (i / 26usize.pow(k) % 26) as u8));
+                prefix.chain("abcdefghijklmnopqrs".chars()).collect()
+            })
+            .collect();
+        let names: Vec<(&str, &[usize])> = words.iter().map(|w| (w.as_str(), &[0][..])).collect();
+        let fuzzy = index(&names);
+        assert_eq!(fuzzy.keys.len(), MAX_KEYS);
+        // The first word's keys were admitted; the last word's own key was
+        // not (it may still share delete keys admitted earlier).
+        assert!(ids(&fuzzy.candidates(&words[0])).contains(&0));
+        let last = format!("d:{}", words[words.len() - 1]);
+        assert!(fuzzy.keys.binary_search(&last).is_err());
+    }
+}

@@ -59,16 +59,13 @@ pub(super) fn machine_place() -> (&'static str, &'static str, PathBuf) {
     }
 }
 
-/// Context-menu label: a submenu where Filex lists the apps itself
-/// (macOS, Windows), the OS dialog elsewhere.
-pub(super) const OPEN_WITH_LABEL: &str = if cfg!(any(target_os = "macos", target_os = "windows")) {
-    "Open With  ›"
-} else {
-    "Open With…"
-};
+/// Context-menu label: a submenu where Filex lists the apps itself.
+pub(super) const OPEN_WITH_LABEL: &str = "Open With  ›";
 
 /// Last submenu entry, for apps the list leaves out: opens the OS chooser
-/// ([`open_with_dialog`]). macOS has no such dialog.
+/// ([`open_with_dialog`]). macOS has no such dialog, and Linux has no
+/// desktop-neutral one (`mimeopen -d` needs a terminal), so its list
+/// already holds every app registered for the type.
 pub(super) const OPEN_WITH_OTHER: Option<&str> = if cfg!(target_os = "windows") {
     Some("Choose another app…")
 } else {
@@ -81,15 +78,15 @@ pub(super) struct AppChoice {
     pub(super) name: String,
     /// What [`open_with_app`] launches by: the `.app` bundle path on
     /// macOS; the Shell handler's name on Windows (an exe path, or a Store
-    /// app's ID).
+    /// app's ID); the `.desktop` file on Linux.
     pub(super) id: PathBuf,
 }
 
 /// Applications to list for `path`, default app first, then by name — or
-/// `None` to show the OS chooser instead ([`open_with_dialog`]): always on
-/// Linux, and on Windows when the Shell has nothing to suggest. Queries
-/// LaunchServices / the Shell, which can be slow on a cold cache: call it
-/// off the UI thread.
+/// `None` to show the OS chooser instead ([`open_with_dialog`]): on Windows
+/// when the Shell has nothing to suggest, on Linux when the MIME type can't
+/// be resolved. Queries LaunchServices / the Shell / the XDG files, which
+/// can be slow on a cold cache: call it off the UI thread.
 pub(super) fn open_with_choices(path: &Path) -> Option<Vec<AppChoice>> {
     #[cfg(target_os = "macos")]
     {
@@ -101,8 +98,7 @@ pub(super) fn open_with_choices(path: &Path) -> Option<Vec<AppChoice>> {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = path;
-        None
+        super::open_with_linux::apps_for(path)
     }
 }
 
@@ -143,7 +139,6 @@ fn macos_apps_for(path: &Path) -> Vec<AppChoice> {
 }
 
 /// Default app first, the rest by name; duplicates (same app id) dropped.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(super) fn sort_choices(apps: &mut Vec<AppChoice>, default: Option<&Path>) {
     apps.sort_by(|a, b| {
         let a_default = Some(a.id.as_path()) != default;
@@ -154,8 +149,8 @@ pub(super) fn sort_choices(apps: &mut Vec<AppChoice>, default: Option<&Path>) {
 }
 
 /// Open `file` with a chosen app from [`open_with_choices`]. Blocks while
-/// Windows' Shell hands the file over: call it off the UI thread. Linux
-/// builds no list, so has nothing to launch from one.
+/// Windows' Shell hands the file over (Linux re-reads the `.desktop`
+/// file): call it off the UI thread.
 pub(super) fn open_with_app(file: &Path, app: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -172,11 +167,7 @@ pub(super) fn open_with_app(file: &Path, app: &Path) -> std::io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = (file, app);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Linux uses the OS chooser instead of an app list",
-        ))
+        super::open_with_linux::launch(file, app)
     }
 }
 
@@ -190,8 +181,9 @@ pub(super) fn open_with_dialog(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        // `mimeopen -d` (perl-file-mimeinfo) prompts for the application;
-        // plain `xdg-open` would silently use the default instead.
+        // Only reached when `xdg-mime` couldn't type the file, so there's
+        // no in-app list. `mimeopen -d` (perl-file-mimeinfo) prompts for
+        // the application; plain `xdg-open` would silently use the default.
         std::process::Command::new("mimeopen")
             .arg("-d")
             .arg(path)

@@ -433,6 +433,8 @@ mod input;
 mod location;
 mod navigation;
 mod onboarding;
+#[cfg(target_os = "linux")]
+mod open_with_linux;
 #[cfg(target_os = "windows")]
 mod open_with_windows;
 mod platform;
