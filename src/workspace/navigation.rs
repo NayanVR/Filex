@@ -261,9 +261,10 @@ impl Workspace {
     }
 
     /// "Open With…" (context-menu action): pick a program other than the
-    /// default. macOS and Windows open an app-list submenu beside the menu,
-    /// level with `anchor_y`, once the list is looked up off the UI thread;
-    /// Linux — or Windows with nothing to suggest — shows the OS chooser.
+    /// default. Opens an app-list submenu beside the menu, level with
+    /// `anchor_y`, once the list is looked up off the UI thread; Windows
+    /// with nothing to suggest, or Linux without `xdg-mime`, shows the OS
+    /// chooser instead.
     pub(super) fn open_with(
         &mut self,
         path: PathBuf,
@@ -354,7 +355,8 @@ impl Workspace {
     }
 
     /// Close the menu and show the OS "Open with" chooser for `path`
-    /// (Linux's only route; Windows' "Choose another app…").
+    /// (Windows' "Choose another app…", and the fallback when no list can
+    /// be built).
     pub(super) fn choose_other_app(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.close_menu(cx);
         if let Err(err) = open_with_dialog(&path) {
