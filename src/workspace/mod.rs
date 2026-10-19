@@ -19,7 +19,7 @@ use filex::ops::{self, FileOp};
 use filex::recents::Recents;
 use filex::search::filter::Filter;
 use filex::selection::Selection;
-use filex::settings::{AccentColor, Density, FolderIcon, SortBy, ThemeMode, ViewMode};
+use filex::settings::{AccentColor, Density, SortBy, ThemeMode, ViewMode};
 use filex::tags::{PlatformTags, Tag, TagColor, TagStore as _};
 
 use crate::settings_store::{SettingsEvent, SettingsStore};
@@ -28,9 +28,10 @@ use crate::ui;
 use crate::ui::search_input::{self, SearchInput, SearchInputEvent};
 use crate::ui::theme::{ActiveTheme as _, Theme};
 pub use app::run;
+use filex::context_menu as menu_model;
 use filex::listing::FileKind;
 use platform::{
-    AppChoice, OPEN_WITH_LABEL, OPEN_WITH_OTHER, open_with_app, open_with_choices,
+    AppChoice, OPEN_WITH_OTHER, open_terminal, open_with_app, open_with_choices,
     open_with_default_app, open_with_dialog,
 };
 use state::*;
@@ -63,7 +64,15 @@ actions!(
         ExtendNext,
         OpenSelected,
         ToggleShortcuts,
-        ToggleView
+        ToggleView,
+        CopyAsPath,
+        ShowProperties,
+        MenuPrev,
+        MenuNext,
+        MenuLeft,
+        MenuRight,
+        MenuConfirm,
+        MenuDismiss
     ]
 );
 
@@ -219,6 +228,13 @@ fn describe_op(op: &FileOp) -> PlanRow {
             dest: Some(SharedString::from(new_name.clone())),
             tooltip: format!("{} → {new_name}", display_path(path)).into(),
         },
+        // Magic plans never create folders; described for completeness.
+        FileOp::CreateFolder { path } => PlanRow {
+            name: file_name(path).into(),
+            location: parent(path).into(),
+            dest: None,
+            tooltip: format!("new folder {}", display_path(path)).into(),
+        },
     }
 }
 
@@ -366,6 +382,17 @@ struct Workspace {
     next_job_id: u64,
     /// Open context menu, if any.
     context_menu: Option<ContextMenu>,
+    /// Bumped per opened menu; hover timers carry it so one from a closed
+    /// menu can never act on the next.
+    menu_serial: u64,
+    /// After a menu closes: its focus handle and the one to return focus
+    /// to. Applied at the next render (closing has no `Window` in hand),
+    /// and only if the menu still held focus — an action that moved focus
+    /// itself (rename) wins.
+    menu_focus_restore: Option<(FocusHandle, FocusHandle)>,
+    /// A folder just made by New › Folder: start renaming it once the
+    /// reload lists it.
+    pending_rename: Option<String>,
     browse_scroll: UniformListScrollHandle,
     /// Entries per `browse_scroll` row as of the last render: 1 in list
     /// view, the column count in grid view (whose rows are card strips).
@@ -431,6 +458,7 @@ mod app;
 mod file_ops;
 mod input;
 mod location;
+mod menus;
 mod navigation;
 mod onboarding;
 #[cfg(target_os = "linux")]
@@ -446,6 +474,8 @@ mod render_menus;
 mod roots;
 mod search;
 mod services;
+#[cfg(target_os = "windows")]
+mod shell_windows;
 mod shortcuts;
 mod sidebar;
 mod state;
@@ -614,6 +644,9 @@ impl Workspace {
             jobs: Vec::new(),
             next_job_id: 0,
             context_menu: None,
+            menu_serial: 0,
+            menu_focus_restore: None,
+            pending_rename: None,
             browse_scroll: UniformListScrollHandle::new(),
             browse_cols: 1,
             results_scroll: UniformListScrollHandle::new(),

@@ -260,77 +260,6 @@ impl Workspace {
         }
     }
 
-    /// "Open With…" (context-menu action): pick a program other than the
-    /// default. Opens an app-list submenu beside the menu, level with
-    /// `anchor_y`, once the list is looked up off the UI thread; Windows
-    /// with nothing to suggest, or Linux without `xdg-mime`, shows the OS
-    /// chooser instead.
-    pub(super) fn open_with(
-        &mut self,
-        path: PathBuf,
-        anchor_y: Pixels,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.validate_search_paths(std::slice::from_ref(&path), cx) {
-            self.close_menu(cx);
-            return;
-        }
-        cx.spawn_in(window, async move |this, cx| {
-            let lookup = path.clone();
-            let choices = cx
-                .background_executor()
-                .spawn(async move { open_with_choices(&lookup) })
-                .await;
-            this.update_in(cx, |this, window, cx| match choices {
-                Some(apps) if apps.is_empty() => {
-                    this.close_menu(cx);
-                    this.notice = Some(format!("no apps can open {}", path.display()).into());
-                    cx.notify();
-                }
-                Some(apps) => this.show_open_with_submenu(path, apps, anchor_y, window, cx),
-                None => this.choose_other_app(path, cx),
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Show the app list beside the still-open entry menu: to its right,
-    /// or its left when that would leave the window. A menu closed or
-    /// re-targeted while the lookup ran is left alone.
-    fn show_open_with_submenu(
-        &mut self,
-        path: PathBuf,
-        apps: Vec<AppChoice>,
-        anchor_y: Pixels,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(menu) = self.context_menu.as_mut() else {
-            return;
-        };
-        if !matches!(&menu.target, MenuTarget::Entry { path: p, .. } if *p == path) {
-            return;
-        }
-        let width = px(ui::menu::MENU_WIDTH);
-        let right = menu.position.x + width;
-        let x = if right + width > window.viewport_size().width {
-            (menu.position.x - width).max(px(0.))
-        } else {
-            right
-        };
-        let rows = apps.len() + usize::from(OPEN_WITH_OTHER.is_some());
-        let (y, max_height) = submenu_frame(anchor_y, rows, window.viewport_size().height);
-        menu.submenu = Some(OpenWithSubmenu {
-            position: gpui::point(x, y),
-            max_height,
-            path,
-            apps,
-        });
-        cx.notify();
-    }
-
     /// Launch `path` in a chosen app from the "Open With…" list. Off the
     /// UI thread: on Windows the Shell's hand-off can take a moment.
     pub(super) fn open_in_app(&mut self, path: PathBuf, app: PathBuf, cx: &mut Context<Self>) {
@@ -581,42 +510,5 @@ mod tests {
         assert_eq!(browse_row(47, 6), 7);
         assert_eq!(browse_row(47, 1), 47);
         assert_eq!(browse_row(3, 0), 3);
-    }
-}
-
-/// Vertical placement of the "Open With" submenu: first app level with
-/// the clicked row where it fits, shifted up to stay on screen, and capped
-/// to the window height — the list scrolls past that. Row height is an
-/// overestimate on purpose: too tall only moves the menu up a little,
-/// too short cut it off.
-fn submenu_frame(anchor_y: Pixels, rows: usize, viewport_height: Pixels) -> (Pixels, Pixels) {
-    const MARGIN: f32 = 8.;
-    let content = px(16. + 34. * rows as f32);
-    let height = content.min(viewport_height - px(2. * MARGIN)).max(px(0.));
-    // Line the first app up with the clicked row (item py_1 + card py_1).
-    let y = (anchor_y - px(18.))
-        .min(viewport_height - height - px(MARGIN))
-        .max(px(MARGIN));
-    (y, height)
-}
-
-#[cfg(test)]
-mod submenu_tests {
-    use super::*;
-
-    #[test]
-    fn short_list_lines_up_with_clicked_row() {
-        assert_eq!(submenu_frame(px(200.), 3, px(700.)), (px(182.), px(118.)));
-    }
-
-    #[test]
-    fn long_list_low_on_screen_moves_up_and_stays_inside() {
-        let (y, h) = submenu_frame(px(450.), 15, px(680.));
-        assert!(y + h <= px(672.), "{y:?} + {h:?} runs off the bottom");
-    }
-
-    #[test]
-    fn list_taller_than_window_is_capped_to_scroll() {
-        assert_eq!(submenu_frame(px(450.), 40, px(680.)), (px(8.), px(664.)));
     }
 }

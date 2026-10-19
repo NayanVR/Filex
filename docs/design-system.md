@@ -37,7 +37,7 @@ this page says where to look and what not to do.
 | Icon-only button | `button::icon_button(theme, id, icon, color, IconSize)` |
 | Floating surface (menu, dialog, card) | `ui::card` |
 | Dialog | `modal::{backdrop, panel, title, message, buttons, button}` |
-| Context menu | `menu::{overlay, panel, item, separator, heading}` |
+| Context menu | `menu::{overlay, panel, scroll_panel, model_row, icon_bar, icon_button, separator, heading}`; contents from `filex::context_menu` |
 | Tooltip | `tooltip::text_tooltip` |
 | Key hint | `kbd::keycap` |
 | Icon glyph | `icon::ui_icon` (always pass an explicit colour) |

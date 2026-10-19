@@ -375,6 +375,8 @@ impl SidecarTags {
                 *removed_tags = self.remove_key(original)?;
                 Ok(())
             }
+            // Brand new: nothing can be tagged yet.
+            AppliedOp::Created { .. } => Ok(()),
         }
     }
 
@@ -397,6 +399,11 @@ impl SidecarTags {
                 removed_tags,
                 ..
             } => self.restore_key(original, removed_tags.clone()),
+            // Undo trashes it; drop any tags given to it since.
+            AppliedOp::Created { path } => {
+                self.remove_key(path)?;
+                Ok(())
+            }
         }
     }
 }

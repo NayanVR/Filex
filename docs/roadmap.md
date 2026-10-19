@@ -211,6 +211,58 @@ Rename for Reveal in Folder; sidebar roots get Remove from Index
 reuse the keyboard's op/journal paths, so they all undo. Kind sorting
 still isn't exposed here — add it if anyone misses it.
 
+**Windows 11 parity, 2026-10-19 (FIL-41).** What a menu contains now
+comes from `filex::context_menu` — pure, GPUI-free, unit-tested — and
+`ui::menu` only draws its rows; `workspace::menus` is the controller.
+
+- *Layout:* Windows 11's icon bar (Cut, Copy, Rename, Share, Delete —
+  label as tooltip) above labelled rows with a leading icon column,
+  right-aligned shortcut hints (read from the shortcut registry, so user
+  overrides show) and a chevron on submenu rows. The trash verb says
+  "Delete" on Windows and "Move to Trash" elsewhere.
+- *File/folder menu:* Open, Open With ›, Reveal in Folder (search),
+  Add to / Remove from Favorites (folders; was Pin to Sidebar), Compress
+  to ZIP File, Copy as Path (Ctrl+Shift+C / ⌥⌘C), Index This Folder,
+  Folder Icon…, Open in Terminal (folders), Properties (Alt+Enter / ⌥⌘I).
+- *Background menu* (right-click empty space; clears the selection like
+  Explorer): View › (List/Grid), Sort By › (Name, Date Modified, Type,
+  Size; Ascending/Descending — Type sorting finally has a home), New ›
+  Folder (creates "New folder", then renames in place), Paste (when the
+  clipboard holds files), Open in Terminal, Properties.
+- *Hover submenus:* rows open their submenu after the pointer rests
+  300 ms (`SUBMENU_HOVER_DELAY`; Windows' MenuShowDelay is 400) and an
+  open one closes after resting on another row; reaching the submenu
+  cancels a pending close, so diagonal travel works. `HoverIntent` is
+  ticket-based so a stale timer never acts; a per-menu serial stops a
+  timer from a closed menu touching the next one. Clicking a submenu row
+  still opens it at once. The Open With app list is looked up off the UI
+  thread as a file's menu opens, so hovering it is instant.
+- *Keyboard:* an open menu takes focus under the `ContextMenu` key
+  context (deeper than `Workspace`, so it wins over list navigation):
+  Up/Down move with wrap, Left/Right move along the icon bar, Right opens
+  a submenu and highlights its first row, Left closes it, Enter/Space
+  activate, Escape closes one level. Focus returns where it was on close
+  unless the action moved it (rename).
+- *Per-OS:* Properties is the Shell's dialog on Windows
+  (`SHObjectProperties`, `SHMultiFileProperties` for a selection, run on
+  a short-lived STA thread); macOS/Linux open Filex's details panel —
+  revisit with Finder's Get Info (AppleScript/`NSWorkspace`) and a
+  freedesktop `FileManager1` call if users want the native sheet. Share
+  is the WinRT share sheet (`IDataTransferManagerInterop`; files only,
+  `StorageFile`s resolved on a worker thread behind a deferral); hidden
+  on Linux (no standard sheet) and on macOS until `NSSharingServicePicker`
+  is wired. Open in Terminal: `wt -d`, else a PowerShell console;
+  Terminal.app; `$TERMINAL`, `x-terminal-emulator`, then common emulators
+  started in the folder. Compress to ZIP is cross-platform (`zip` crate,
+  Deflate via the existing `flate2` backend): a cancellable job named
+  after the right-clicked item, never leaving a partial archive.
+- *Undo:* New Folder and Compress record `AppliedOp::Created`; undo moves
+  the item to the trash (it may have gained contents since).
+- *Left out on purpose:* shell-extension entries (Open with Code, Ask
+  Copilot, Edit in Notepad, Show more options, Send to My Phone) per the
+  standalone-app rule; "Group by ›" needs list grouping first (FIL-42);
+  "Share with ›" is Explorer/OneDrive access management (FIL-43).
+
 ## Phase 2b — Finish the Windows story (parallel track; needs Windows hardware or CI-driven iteration)
 
 Sequence matters here:

@@ -38,7 +38,7 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
-        self.context_menu = None;
+        self.close_menu(cx);
         let result = (|| -> anyhow::Result<()> {
             if self.quick_look.is_none() {
                 let workspace = cx.weak_entity();

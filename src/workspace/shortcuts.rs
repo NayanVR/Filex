@@ -177,6 +177,27 @@ pub fn catalog() -> Vec<Shortcut> {
             RenameSelected
         ),
         entry!(
+            "copy_path",
+            "Copy as path",
+            "Selection & files",
+            // Finder's "Copy as Pathname" is ⌥⌘C; Explorer's is Ctrl+Shift+C.
+            if mac { "cmd-alt-c" } else { "ctrl-shift-c" },
+            &[],
+            false,
+            CopyAsPath
+        ),
+        entry!(
+            "properties",
+            "Properties",
+            "Selection & files",
+            // ⌘I already toggles the details panel on macOS, which is what
+            // Properties shows there; ⌥⌘I is Finder's inspector.
+            if mac { "cmd-alt-i" } else { "alt-enter" },
+            &[],
+            false,
+            ShowProperties
+        ),
+        entry!(
             "trash",
             "Move to Trash",
             "Selection & files",
@@ -448,6 +469,17 @@ pub fn bindings(overrides: &BTreeMap<String, String>) -> Vec<KeyBinding> {
         search_input::ClearInput,
         Some("Workspace && !SearchInput && !PathInput && !Settings"),
     ));
+    // An open context menu holds focus; its context is deeper than
+    // `Workspace`, so these win over list navigation while it's up. Not
+    // remappable: they mirror the OS's own menu keys.
+    let menu = Some("ContextMenu");
+    output.push(KeyBinding::new("up", MenuPrev, menu));
+    output.push(KeyBinding::new("down", MenuNext, menu));
+    output.push(KeyBinding::new("left", MenuLeft, menu));
+    output.push(KeyBinding::new("right", MenuRight, menu));
+    output.push(KeyBinding::new("enter", MenuConfirm, menu));
+    output.push(KeyBinding::new("space", MenuConfirm, menu));
+    output.push(KeyBinding::new("escape", MenuDismiss, menu));
     output
 }
 
