@@ -722,3 +722,94 @@ pub fn stream_before_indexed_magic(
         total: Some(total),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::segment::Identity;
+    use std::path::PathBuf;
+
+    fn hit_for(path: PathBuf, is_dir: bool) -> Hit {
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        Hit {
+            id: 1,
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            identity: crate::ingest::identity(&path, &meta),
+            path,
+            is_dir,
+            tier: Tier::Exact,
+        }
+    }
+
+    fn file_hit(dir: &Path) -> Hit {
+        let path = dir.join("a.txt");
+        std::fs::write(&path, b"x").unwrap();
+        hit_for(path, false)
+    }
+
+    fn assert_err_contains(result: Result<()>, needle: &str) {
+        let err = result.expect_err("verify should refuse").to_string();
+        assert!(err.contains(needle), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn unchanged_file_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let hit = file_hit(dir.path());
+        assert_ne!(hit.identity.key, 0, "platform identity should be native");
+        verify(&hit).unwrap();
+    }
+
+    #[test]
+    fn unchanged_directory_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub");
+        std::fs::create_dir(&path).unwrap();
+        verify(&hit_for(path, true)).unwrap();
+    }
+
+    #[test]
+    fn removed_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let hit = file_hit(dir.path());
+        std::fs::remove_file(&hit.path).unwrap();
+        assert!(verify(&hit).is_err());
+    }
+
+    /// Each identity field is compared on its own: a hit that differs from
+    /// the file on disk in only one of them must be refused.
+    #[test]
+    fn any_identity_field_change_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let hit = file_hit(dir.path());
+        let tamper: [fn(&mut Identity); 3] = [
+            |i| i.device = i.device.wrapping_add(1),
+            |i| i.key = i.key.wrapping_add(1).max(1),
+            |i| i.birth = i.birth.wrapping_add(1),
+        ];
+        for change in tamper {
+            let mut stale = hit.clone();
+            change(&mut stale.identity);
+            assert_ne!(stale.identity, hit.identity);
+            assert_err_contains(verify(&stale), "identity changed");
+        }
+    }
+
+    #[test]
+    fn missing_native_identity_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hit = file_hit(dir.path());
+        hit.identity.key = 0;
+        assert_err_contains(verify(&hit), "native identity unavailable");
+    }
+
+    #[test]
+    fn replaced_file_is_refused_when_identity_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let hit = file_hit(dir.path());
+        // Keep the original alive so its inode / file index can't be reused.
+        std::fs::rename(&hit.path, dir.path().join("old.txt")).unwrap();
+        std::fs::write(&hit.path, b"y").unwrap();
+        assert_err_contains(verify(&hit), "identity changed");
+    }
+}
