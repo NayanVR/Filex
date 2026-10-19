@@ -200,276 +200,46 @@ impl Workspace {
         )
     }
 
+    /// The open context menu: a full-window overlay (click/right-click
+    /// outside closes) holding the main panel and, beside it, any open
+    /// submenu. The overlay owns keyboard focus while it's up, so the
+    /// `ContextMenu` key context routes arrows/Enter/Escape to the menu.
     pub(super) fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.context_menu.as_ref()?;
         let theme = *cx.theme();
-        let mut items: Vec<gpui::AnyElement> = Vec::new();
-        match &menu.target {
-            MenuTarget::Entry {
-                ix,
-                path,
-                name,
-                is_dir,
-                from_search,
-            } => {
-                let (ix, is_dir, from_search) = (*ix, *is_dir, *from_search);
-                // The whole selection is the target; single-item-only
-                // actions (open, rename, reveal, index) drop out when
-                // more than one row is selected.
-                let count = self.active_selection().len();
-                let heading =
-                    describe_items(&self.selected_paths()).unwrap_or_else(|| name.clone());
-                items.push(ui::menu::heading(&theme, heading).into_any_element());
-
-                if count <= 1 {
-                    let p = path.clone();
-                    items.push(
-                        ui::menu::item(&theme, "menu-open", "Open", false)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                this.close_menu(cx);
-                                this.open_target(p.clone(), is_dir, from_search, cx);
-                            }))
-                            .into_any_element(),
-                    );
-                    // "Open With" only applies to files. The menu stays open:
-                    // macOS and Windows show an app-list submenu beside it.
-                    if !is_dir {
-                        let p = path.clone();
-                        items.push(
-                            ui::menu::item(&theme, "menu-open-with", OPEN_WITH_LABEL, false)
-                                .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    this.open_with(p.clone(), e.position().y, window, cx);
-                                }))
-                                .into_any_element(),
-                        );
-                    }
-                    if from_search {
-                        let p = path.clone();
-                        items.push(
-                            ui::menu::item(&theme, "menu-reveal", "Reveal in Folder", false)
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                    this.close_menu(cx);
-                                    this.reveal(p.clone(), cx);
-                                }))
-                                .into_any_element(),
-                        );
-                    } else {
-                        items.push(
-                            ui::menu::item(&theme, "menu-rename", "Rename", false)
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.close_menu(cx);
-                                    this.active_selection_mut().select_one(ix);
-                                    this.start_rename(window, cx);
-                                }))
-                                .into_any_element(),
-                        );
-                    }
-                    items.push(ui::menu::separator(&theme).into_any_element());
-                }
-
-                items.push(
-                    ui::menu::item(&theme, "menu-copy", "Copy", false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.clip_selected(ClipMode::Copy, cx);
-                        }))
-                        .into_any_element(),
-                );
-                items.push(
-                    ui::menu::item(&theme, "menu-cut", "Cut", false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.clip_selected(ClipMode::Cut, cx);
-                        }))
-                        .into_any_element(),
-                );
-                let copy_path_label = if count > 1 { "Copy Paths" } else { "Copy Path" };
-                items.push(
-                    ui::menu::item(&theme, "menu-copy-path", copy_path_label, false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.copy_selected_paths(cx);
-                        }))
-                        .into_any_element(),
-                );
-                if count <= 1 && is_dir {
-                    let p = path.clone();
-                    items.push(
-                        ui::menu::item(&theme, "menu-index", "Index This Folder", false)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                this.close_menu(cx);
-                                this.add_root(p.clone(), cx);
-                            }))
-                            .into_any_element(),
-                    );
-                }
-                if count <= 1 && is_dir {
-                    let pinned = self.is_favorite(path, cx);
-                    let p = path.clone();
-                    let label = if pinned {
-                        "Unpin from Sidebar"
-                    } else {
-                        "Pin to Sidebar"
-                    };
-                    items.push(
-                        ui::menu::item(&theme, "menu-pin", label, false)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                this.close_menu(cx);
-                                if pinned {
-                                    this.unpin_favorite(&p, cx);
-                                } else {
-                                    this.pin_favorite(p.clone(), cx);
-                                }
-                            }))
-                            .into_any_element(),
-                    );
-                }
-                if count <= 1 && is_dir {
-                    let p = path.clone();
-                    items.push(
-                        ui::menu::item(&theme, "menu-folder-icon", "Folder Icon…", false)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                cx.stop_propagation();
-                                this.open_folder_icon_menu(p.clone(), window, cx);
-                            }))
-                            .into_any_element(),
-                    );
-                }
-                items.push(ui::menu::separator(&theme).into_any_element());
-                items.push(
-                    ui::menu::item(&theme, "menu-trash", "Move to Trash", true)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.trash_selected(cx);
-                        }))
-                        .into_any_element(),
-                );
-            }
-            MenuTarget::Favorite { path } => {
-                let label = filex::listing::location_label(path);
-                items.push(ui::menu::heading(&theme, label).into_any_element());
-                let p = path.clone();
-                items.push(
-                    ui::menu::item(&theme, "fav-up", "Move Up", false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.move_favorite(&p, -1, cx);
-                        }))
-                        .into_any_element(),
-                );
-                let p = path.clone();
-                items.push(
-                    ui::menu::item(&theme, "fav-down", "Move Down", false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.move_favorite(&p, 1, cx);
-                        }))
-                        .into_any_element(),
-                );
-                items.push(ui::menu::separator(&theme).into_any_element());
-                let p = path.clone();
-                items.push(
-                    ui::menu::item(&theme, "fav-folder-icon", "Folder Icon…", false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.open_folder_icon_menu(p.clone(), window, cx);
-                        }))
-                        .into_any_element(),
-                );
-                let p = path.clone();
-                items.push(
-                    ui::menu::item(&theme, "fav-unpin", "Unpin from Sidebar", true)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.unpin_favorite(&p, cx);
-                        }))
-                        .into_any_element(),
-                );
-            }
-            MenuTarget::FolderIcon { path } => {
-                items.push(ui::menu::heading(&theme, "Folder Icon").into_any_element());
-                let current = self
-                    .settings
-                    .read(cx)
-                    .settings()
-                    .folder_icons
-                    .get(path)
-                    .copied();
-                let choices = [
-                    (None, "Automatic"),
-                    (Some(FolderIcon::Plain), "Plain"),
-                    (Some(FolderIcon::Pictures), "Pictures"),
-                    (Some(FolderIcon::Music), "Music"),
-                    (Some(FolderIcon::Videos), "Videos"),
-                    (Some(FolderIcon::Documents), "Documents"),
-                    (Some(FolderIcon::Downloads), "Downloads"),
-                    (Some(FolderIcon::Code), "Code"),
-                    (Some(FolderIcon::Archives), "Archives"),
-                    (Some(FolderIcon::Desktop), "Desktop"),
-                ];
-                for (ix, (choice, label)) in choices.into_iter().enumerate() {
-                    let p = path.clone();
-                    let label = if current == choice {
-                        format!("✓ {label}")
-                    } else {
-                        format!("   {label}")
-                    };
-                    items.push(
-                        ui::menu::item(&theme, ("folder-icon-choice", ix), label, false)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                this.close_menu(cx);
-                                this.settings.update(cx, |store, cx| {
-                                    store.update(cx, |settings| {
-                                        if let Some(icon) = choice {
-                                            settings.folder_icons.insert(p.clone(), icon);
-                                        } else {
-                                            settings.folder_icons.remove(&p);
-                                        }
-                                    });
-                                });
-                            }))
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
+        let main = self.menu_rows(MenuPanel::Main, &menu.rows, menu.focus, &theme, cx);
         let submenu = menu.submenu.as_ref().map(|sub| {
-            let mut items: Vec<_> = sub
-                .apps
-                .iter()
-                .enumerate()
-                .map(|(ix, app)| {
-                    let (p, app_id) = (sub.path.clone(), app.id.clone());
-                    ui::menu::item(&theme, ("open-with-app", ix), app.name.clone(), false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.close_menu(cx);
-                            this.open_in_app(p.clone(), app_id.clone(), cx);
-                        }))
-                        .into_any_element()
-                })
-                .collect();
-            if let Some(label) = OPEN_WITH_OTHER {
-                let p = sub.path.clone();
-                items.push(ui::menu::separator(&theme).into_any_element());
-                items.push(
-                    ui::menu::item(&theme, "open-with-other", label, false)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.choose_other_app(p.clone(), cx);
-                        }))
-                        .into_any_element(),
-                );
-            }
+            let rows = self.menu_rows(MenuPanel::Sub, &sub.rows, sub.focus, &theme, cx);
             ui::menu::scroll_panel(
                 &theme,
-                "open-with-submenu",
+                "context-submenu",
                 sub.position,
                 sub.max_height,
-                items,
+                rows,
             )
         });
         Some(
             ui::menu::overlay("context-menu-overlay")
+                .track_focus(&menu.focus_handle)
+                .key_context("ContextMenu")
+                .on_action(cx.listener(|this, _: &MenuPrev, window, cx| {
+                    this.menu_key(menus::MenuKey::Prev, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MenuNext, window, cx| {
+                    this.menu_key(menus::MenuKey::Next, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MenuLeft, window, cx| {
+                    this.menu_key(menus::MenuKey::Left, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MenuRight, window, cx| {
+                    this.menu_key(menus::MenuKey::Right, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MenuConfirm, window, cx| {
+                    this.menu_key(menus::MenuKey::Confirm, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MenuDismiss, window, cx| {
+                    this.menu_key(menus::MenuKey::Dismiss, window, cx)
+                }))
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.close_menu(cx);
                 }))
@@ -479,10 +249,83 @@ impl Workspace {
                         this.close_menu(cx);
                     }),
                 )
-                .child(ui::menu::panel(&theme, menu.position, items))
+                .child(ui::menu::panel(&theme, menu.position, main))
                 .children(submenu)
                 .into_any_element(),
         )
+    }
+
+    /// Elements for one panel's rows, each wired to hover (highlight +
+    /// submenu intent) and click.
+    fn menu_rows(
+        &self,
+        panel: MenuPanel,
+        rows: &[menu_model::Row],
+        focus: Option<menu_model::Focus>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let overrides = self.settings.read(cx).settings().keyboard_shortcuts.clone();
+        let catalog = shortcuts::catalog();
+        let shortcut_label = |id: &str| -> Option<SharedString> {
+            let spec = catalog.iter().find(|spec| spec.id == id)?;
+            let key = shortcuts::active_keys(spec, &overrides)
+                .into_iter()
+                .next()?;
+            Some(shortcuts::label(&key).into())
+        };
+        let tag = match panel {
+            MenuPanel::Main => "menu-main",
+            MenuPanel::Sub => "menu-sub",
+        };
+        let wire =
+            |element: gpui::Stateful<gpui::Div>, at: menu_model::Focus, cx: &mut Context<Self>| {
+                element
+                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                        if *hovered {
+                            this.menu_hover(panel, at, window, cx);
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.menu_click(panel, at, window, cx);
+                    }))
+            };
+        let mut out = Vec::with_capacity(rows.len());
+        for (row_ix, row) in rows.iter().enumerate() {
+            let element = match row {
+                menu_model::Row::Heading(text) => {
+                    ui::menu::heading(theme, text.clone()).into_any_element()
+                }
+                menu_model::Row::Separator => ui::menu::separator(theme).into_any_element(),
+                menu_model::Row::Item(item) => {
+                    let at = menu_model::Focus::row(row_ix);
+                    let shortcut = item.shortcut.and_then(shortcut_label);
+                    let element = ui::menu::model_row(
+                        theme,
+                        (tag, row_ix),
+                        item,
+                        shortcut,
+                        focus == Some(at),
+                    );
+                    wire(element, at, cx).into_any_element()
+                }
+                menu_model::Row::Icons(items) => {
+                    let buttons = items
+                        .iter()
+                        .enumerate()
+                        .map(|(col, item)| {
+                            let at = menu_model::Focus { row: row_ix, col };
+                            let id = gpui::ElementId::from((tag, row_ix * 16 + col));
+                            let button = ui::menu::icon_button(theme, id, item, focus == Some(at));
+                            wire(button, at, cx).into_any_element()
+                        })
+                        .collect();
+                    ui::menu::icon_bar(buttons).into_any_element()
+                }
+            };
+            out.push(element);
+        }
+        out
     }
 
     pub(super) fn render_conflict_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {

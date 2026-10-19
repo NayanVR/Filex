@@ -59,9 +59,6 @@ pub(super) fn machine_place() -> (&'static str, &'static str, PathBuf) {
     }
 }
 
-/// Context-menu label: a submenu where Filex lists the apps itself.
-pub(super) const OPEN_WITH_LABEL: &str = "Open With  ›";
-
 /// Last submenu entry, for apps the list leaves out: opens the OS chooser
 /// ([`open_with_dialog`]). macOS has no such dialog, and Linux has no
 /// desktop-neutral one (`mimeopen -d` needs a terminal), so its list
@@ -200,6 +197,104 @@ pub(super) fn open_with_dialog(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Open a terminal window whose shell starts in `dir` (context menu "Open
+/// in Terminal"). Windows: Windows Terminal (`wt -d`), else a PowerShell
+/// console; macOS: Terminal.app; Linux: `$TERMINAL`, then the Debian
+/// alternative, then common emulators, each started *in* `dir` since every
+/// one of them opens its shell in its working directory. Detached.
+pub(super) fn open_terminal(dir: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        // `wt.exe` is an app-execution alias under WindowsApps; on some
+        // installs it can't be started at all (os error 1920, even from a
+        // shell). Any failure falls back to a PowerShell console in the
+        // folder, which Windows 11 hosts in Terminal anyway when that's
+        // the default terminal app.
+        let wt = std::process::Command::new("wt.exe")
+            .arg("-d")
+            .arg(filex::listing::display_path(dir))
+            .spawn();
+        match wt {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                tracing::debug!("wt.exe unavailable ({err}); opening PowerShell");
+                std::process::Command::new("powershell.exe")
+                    .current_dir(dir)
+                    .creation_flags(CREATE_NEW_CONSOLE)
+                    .spawn()
+                    .map(drop)
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-a", "Terminal"])
+            .arg(dir)
+            .spawn()
+            .map(drop)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no terminal found");
+        for program in terminal_candidates(std::env::var("TERMINAL").ok()) {
+            match std::process::Command::new(&program)
+                .current_dir(dir)
+                .spawn()
+            {
+                Ok(_) => return Ok(()),
+                Err(err) => last = err,
+            }
+        }
+        Err(last)
+    }
+}
+
+/// Linux terminal emulators to try, in order: the user's `$TERMINAL`
+/// (first word only — it's a program, not a command line), Debian's
+/// `x-terminal-emulator` alternative, then the desktops' defaults.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn terminal_candidates(env_terminal: Option<String>) -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "konsole",
+        "xfce4-terminal",
+        "kgx",
+        "ptyxis",
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "foot",
+        "xterm",
+    ];
+    let mut out: Vec<String> = env_terminal
+        .as_deref()
+        .and_then(|t| t.split_whitespace().next())
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    for known in KNOWN {
+        if !out.iter().any(|p| p == known) {
+            out.push((*known).to_owned());
+        }
+    }
+    out
+}
+
+/// The window's native handle (HWND) for Shell APIs that parent a
+/// dialog or sheet to it.
+#[cfg(target_os = "windows")]
+pub(super) fn native_window(window: &gpui::Window) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
+}
+
 /// The update affordance for this platform's UI banner. macOS copies a
 /// `brew` command; Linux opens the releases page to re-download the
 /// tarball. Windows opens the release page for its per-machine MSI.
@@ -281,5 +376,24 @@ mod tests {
         sort_choices(&mut apps, Some(Path::new("/Applications/Zed.app")));
         let names: Vec<_> = apps.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["Zed", "preview", "TextEdit"]);
+    }
+
+    #[test]
+    fn terminal_env_wins_and_is_not_repeated() {
+        let list = terminal_candidates(Some("kitty --single-instance".into()));
+        assert_eq!(list[0], "kitty");
+        assert_eq!(list.iter().filter(|p| *p == "kitty").count(), 1);
+        assert_eq!(list[1], "x-terminal-emulator");
+        let list = terminal_candidates(None);
+        assert_eq!(
+            list.first().map(String::as_str),
+            Some("x-terminal-emulator")
+        );
+        assert_eq!(list.last().map(String::as_str), Some("xterm"));
+        // A blank $TERMINAL is ignored rather than tried as "".
+        assert_eq!(
+            terminal_candidates(Some("  ".into())),
+            terminal_candidates(None)
+        );
     }
 }

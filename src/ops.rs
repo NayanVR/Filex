@@ -40,8 +40,18 @@ impl OpProgress {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    fn canceled(&self) -> bool {
+    pub(crate) fn canceled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Bytes the whole operation will process (for [`fraction`](Self::fraction)).
+    pub(crate) fn set_total(&self, total: u64) {
+        self.total.store(total, Ordering::Relaxed);
+    }
+
+    /// Record `bytes` more as processed.
+    pub(crate) fn add_done(&self, bytes: u64) {
+        self.copied.fetch_add(bytes, Ordering::Relaxed);
     }
 }
 
@@ -72,13 +82,15 @@ pub enum FileOp {
     Rename { path: PathBuf, new_name: String },
     /// Move `path` (absolute) to the OS trash.
     Delete { path: PathBuf },
+    /// Make a new, empty folder at `path` ("New › Folder").
+    CreateFolder { path: PathBuf },
 }
 
 impl FileOp {
     pub fn source(&self) -> &Path {
         match self {
             Self::Move { from, .. } | Self::Copy { from, .. } => from,
-            Self::Rename { path, .. } | Self::Delete { path } => path,
+            Self::Rename { path, .. } | Self::Delete { path } | Self::CreateFolder { path } => path,
         }
     }
     /// Where this operation wants to create something — the path a
@@ -88,6 +100,7 @@ impl FileOp {
             Self::Move { to, .. } | Self::Copy { to, .. } => Some(to.clone()),
             Self::Rename { path, new_name } => rename_target(path, new_name).ok(),
             Self::Delete { .. } => None,
+            Self::CreateFolder { path } => Some(path.clone()),
         }
     }
 
@@ -105,6 +118,7 @@ impl FileOp {
                 Self::Rename { path, new_name }
             }
             op @ Self::Delete { .. } => op,
+            Self::CreateFolder { .. } => Self::CreateFolder { path: dest },
         }
     }
 }
@@ -162,6 +176,12 @@ pub enum AppliedOp {
         restore: TrashRestore,
         removed_tags: Vec<Tag>,
     },
+    /// Something new Filex made (a folder, a ZIP archive). Undo moves it
+    /// to the trash rather than deleting it, since the user may have put
+    /// things in it since.
+    Created {
+        path: PathBuf,
+    },
 }
 
 /// What undo needs to bring a trashed item back — shaped by what each
@@ -198,6 +218,10 @@ impl AppliedOp {
             Self::Deleted { original, .. } => format!(
                 "moved {} to the trash",
                 original.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Self::Created { path } => format!(
+                "created {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
             ),
         }
     }
@@ -251,6 +275,10 @@ pub fn apply_with_progress(op: &FileOp, progress: &OpProgress) -> Result<Applied
                 removed_tags: Vec::new(),
             })
         }
+        FileOp::CreateFolder { path } => {
+            std::fs::create_dir(path).with_context(|| format!("creating {}", path.display()))?;
+            Ok(AppliedOp::Created { path: path.clone() })
+        }
     }
 }
 
@@ -292,6 +320,7 @@ pub fn undo(applied: &AppliedOp) -> Result<()> {
         AppliedOp::Deleted {
             original, restore, ..
         } => trash_backend::restore_from_trash(restore, original),
+        AppliedOp::Created { path } => trash_backend::delete_to_trash(path).map(drop),
     }
 }
 
@@ -834,6 +863,32 @@ mod tests {
         undo(&applied).unwrap();
         assert!(victim.exists(), "undo didn't restore the file");
         assert_eq!(fs::read_to_string(&victim).unwrap(), "bye");
+    }
+
+    #[test]
+    fn create_folder_refuses_an_existing_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("New folder");
+        let applied = apply(&FileOp::CreateFolder { path: path.clone() }).unwrap();
+        assert_eq!(applied, AppliedOp::Created { path: path.clone() });
+        assert!(path.is_dir());
+        assert_eq!(applied.describe(), "created New folder");
+        assert!(apply(&FileOp::CreateFolder { path }).is_err());
+    }
+
+    /// Undo trashes the folder (it may have gained contents since), so it
+    /// needs a usable trash; skips like the trash test above without one.
+    #[test]
+    fn create_folder_then_undo_moves_it_to_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("filex-created-roundtrip");
+        let applied = apply(&FileOp::CreateFolder { path: path.clone() }).unwrap();
+        write(&path.join("added later.txt"), "keep");
+        if let Err(err) = undo(&applied) {
+            eprintln!("skipping created-undo test (no usable trash here): {err:#}");
+            return;
+        }
+        assert!(!path.exists(), "undo left the created folder in place");
     }
 
     fn one(name: &str) -> Vec<AppliedOp> {

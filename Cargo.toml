@@ -23,6 +23,10 @@ app = [
   "windows/Win32_System_LibraryLoader", "windows/Win32_System_Threading", "windows/Win32_UI_Shell",
   "windows/Win32_UI_Shell_PropertiesSystem", "windows/Win32_UI_WindowsAndMessaging",
   "windows/Win32_UI_Input_KeyboardAndMouse",
+  # Context menu: the Share sheet (WinRT DataTransferManager) and the
+  # Shell's Properties dialog.
+  "dep:windows-collections", "windows/ApplicationModel_DataTransfer", "windows/Storage",
+  "windows/Foundation_Collections", "windows/Win32_UI_Shell_Common",
 ]
 # Update downloader for the UI, and on Windows the `filex-updater` service
 # and its client (pipe, SCM, process and session plumbing). The per-user
@@ -125,6 +129,7 @@ lz4_flex = { version = "0.14", default-features = false, features = ["std", "saf
 bytemuck = "1"
 notify = "8"
 fs2 = "0.4"
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 
 # The Windows update service (LocalSystem, demand start). Prints an error and
 # exits elsewhere. Release builds it with `--no-default-features --features
@@ -203,6 +208,8 @@ trash = "5.2.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-core = { version = "0.62", optional = true }
+# `IIterable<IStorageItem>` for the Share sheet (not re-exported by `windows`).
+windows-collections = { version = "0.3", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 # Recycle Bin with list/restore (undo) via os_limited.
 trash = "5.2.6"
