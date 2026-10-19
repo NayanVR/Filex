@@ -19,7 +19,7 @@ fn apply_folder_icon_op(settings: &mut filex::settings::Settings, op: &ops::Appl
                 settings.remap_folder_icons(from, to, true);
             }
         }
-        ops::AppliedOp::Deleted { .. } => {}
+        ops::AppliedOp::Deleted { .. } | ops::AppliedOp::Created { .. } => {}
     }
 }
 

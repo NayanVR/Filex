@@ -78,6 +78,15 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("check"),
     icon!("message-square"),
     icon!("info"),
+    // Context-menu verbs.
+    icon!("scissors"),
+    icon!("copy"),
+    icon!("pencil"),
+    icon!("share"),
+    icon!("link"),
+    icon!("terminal"),
+    icon!("arrow-up-down"),
+    icon!("clipboard"),
 ];
 
 /// Serves the embedded [`ICONS`]. Registered via

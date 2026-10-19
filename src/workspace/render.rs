@@ -397,6 +397,14 @@ impl Workspace {
             .on_drop(cx.listener(move |this, ext: &ExternalPaths, _window, cx| {
                 this.drop_onto(dest.clone(), ext.paths().to_vec(), ClipMode::Copy, cx);
             }))
+            // Rows stop propagation when they open their own menu, so this
+            // only fires on empty space (or the column headers).
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.open_background_menu(event.position, window, cx);
+                }),
+            )
             .into_any_element()
     }
 
@@ -566,6 +574,7 @@ impl Render for Workspace {
         if self.onboarding.is_some() {
             return self.render_onboarding(window, cx);
         }
+        self.apply_menu_aftermath(window, cx);
         let reveal = self.reveal_time(window);
         let searching = !self.query.is_empty();
         let theme = *cx.theme();
@@ -606,6 +615,12 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleView, _window, cx| this.toggle_view(cx)))
+            .on_action(cx.listener(|this, _: &CopyAsPath, _window, cx| {
+                this.copy_as_path_action(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowProperties, window, cx| {
+                this.properties_action(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &QuickLook, window, cx| {
                 this.toggle_quick_look(window, cx);
             }))

@@ -62,31 +62,64 @@ pub(super) enum MenuTarget {
     Entry {
         ix: usize,
         path: PathBuf,
-        name: String,
         is_dir: bool,
         from_search: bool,
     },
-    /// An indexed root in the sidebar.
+    /// Empty space in the folder on screen (`Workspace::cwd`).
+    Background,
     /// A pinned folder in the sidebar's Favorites section.
     Favorite { path: PathBuf },
     /// Icon choices for one folder, opened from its context menu.
     FolderIcon { path: PathBuf },
 }
 
+/// Which panel of an open menu a row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuPanel {
+    Main,
+    Sub,
+}
+
 pub(super) struct ContextMenu {
     pub(super) position: Point<Pixels>,
     pub(super) target: MenuTarget,
-    /// The "Open With" app list beside the menu (macOS; elsewhere the OS
-    /// dialog is used).
-    pub(super) submenu: Option<OpenWithSubmenu>,
+    /// The main panel's rows (`filex::context_menu`).
+    pub(super) rows: Vec<menu_model::Row>,
+    /// Highlighted row of the main panel (pointer or keyboard).
+    pub(super) focus: Option<menu_model::Focus>,
+    /// Pointer-rest timing for opening/closing submenus on hover.
+    pub(super) hover: menu_model::HoverIntent,
+    pub(super) submenu: Option<OpenSubmenu>,
+    /// The Open With app list, looked up off the UI thread as a file's
+    /// menu opens, so hovering "Open With" shows it without waiting.
+    pub(super) apps: AppsLookup,
+    /// Main-panel row whose submenu should open once `apps` lands.
+    pub(super) wants_apps: Option<(usize, bool)>,
+    /// Keyboard focus while the menu is up (its arrow-key context).
+    pub(super) focus_handle: FocusHandle,
+    /// Where keyboard focus returns when the menu closes.
+    pub(super) restore_focus: Option<FocusHandle>,
 }
 
-pub(super) struct OpenWithSubmenu {
+pub(super) enum AppsLookup {
+    /// Not a single file: there is no Open With.
+    Unused,
+    Pending,
+    /// `None` inside: the platform couldn't list apps for the type, so the
+    /// submenu offers only the OS chooser.
+    Ready(Option<Vec<AppChoice>>),
+}
+
+/// A submenu shown beside the main panel.
+pub(super) struct OpenSubmenu {
+    /// The main-panel row it belongs to.
+    pub(super) parent_row: usize,
+    pub(super) rows: Vec<menu_model::Row>,
     pub(super) position: Point<Pixels>,
     /// Capped to the window; the list scrolls past it.
     pub(super) max_height: Pixels,
-    pub(super) path: PathBuf,
-    pub(super) apps: Vec<AppChoice>,
+    /// Highlighted row; `Some` also means the keyboard is in the submenu.
+    pub(super) focus: Option<menu_model::Focus>,
 }
 
 /// One background file-operation job with live progress; shown in the

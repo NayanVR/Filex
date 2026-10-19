@@ -340,6 +340,7 @@ pub fn notify_applied(applied: &crate::ops::AppliedOp) {
         | AppliedOp::Copied { from, to }
         | AppliedOp::Renamed { from, to } => vec![from.clone(), to.clone()],
         AppliedOp::Deleted { original, .. } => vec![original.clone()],
+        AppliedOp::Created { path } => vec![path.clone()],
     };
     let _ = queue.try_send(paths);
 }
