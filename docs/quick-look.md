@@ -34,9 +34,10 @@ This is a full-file viewer, separate from `src/thumbnails.rs`. It does not
 replace grid thumbnails or their cache. Framework dependencies are gated to
 macOS and the `app` feature, so the index daemon does not link Quick Look.
 
-The viewer interface leaves room for Windows preview-handler hosting and Linux
-desktop preview services. Those backends are not implemented yet, and the
-shortcut is only exposed on macOS.
+Windows has its own viewer: a GPUI preview window that hosts Windows preview
+handlers in an isolated helper — see [Windows previews](windows-previews.md).
+Linux desktop preview services are not implemented yet, so the shortcut is
+exposed on macOS and Windows only.
 
 ## Validation
 

@@ -216,12 +216,18 @@ pub fn display_path(path: &Path) -> String {
     if crate::drives::is_this_pc(path) {
         return crate::drives::THIS_PC_LABEL.to_string();
     }
-    let text = path.to_string_lossy();
+    plain_path(path).to_string_lossy().into_owned()
+}
+
+/// `path` without a verbatim prefix when the plain Win32 form names the
+/// same file; otherwise `path` unchanged. For APIs that mishandle `\\?\`,
+/// such as Shell preview handlers that open the file by name.
+pub fn plain_path(path: &Path) -> std::borrow::Cow<'_, Path> {
     #[cfg(windows)]
-    if let Some(plain) = strip_verbatim(&text) {
-        return plain;
+    if let Some(plain) = strip_verbatim(&path.to_string_lossy()) {
+        return std::borrow::Cow::Owned(PathBuf::from(plain));
     }
-    text.into_owned()
+    std::borrow::Cow::Borrowed(path)
 }
 
 /// A location's short name for tabs, headings and sidebar rows: the
@@ -427,6 +433,25 @@ mod tests {
         assert_eq!(Path::new(&shown).canonicalize().unwrap(), canonical);
         // Breadcrumb root reads "C:\", not "\\?\C:\".
         assert_eq!(path_segments(&canonical)[0].0, shown[..3]);
+    }
+
+    /// Regression: Space-bar previews of PDFs stayed blank. Workspace paths
+    /// are canonical (`\\?\C:\…`), and handlers that open by file name,
+    /// like PDF viewers, can't open the verbatim spelling.
+    #[cfg(windows)]
+    #[test]
+    fn plain_path_drops_the_verbatim_prefix_only_when_safe() {
+        assert_eq!(
+            plain_path(Path::new(r"\\?\C:\docs\report.pdf")),
+            Path::new(r"C:\docs\report.pdf")
+        );
+        assert_eq!(
+            plain_path(Path::new(r"\\?\UNC\nas\share\a.pdf")),
+            Path::new(r"\\nas\share\a.pdf")
+        );
+        let long = format!(r"\\?\C:\{}.pdf", "a".repeat(300));
+        assert_eq!(plain_path(Path::new(&long)), Path::new(&long));
+        assert_eq!(plain_path(Path::new(r"C:\a.pdf")), Path::new(r"C:\a.pdf"));
     }
 
     #[test]

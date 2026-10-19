@@ -4,6 +4,8 @@ mod deferred;
 #[cfg(not(windows))]
 pub use deferred::Viewer;
 #[cfg(windows)]
+mod preview_window;
+#[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::Viewer;

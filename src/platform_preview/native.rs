@@ -1,8 +1,10 @@
-//! All COM, HWND and GDI ownership stays on this helper's main STA thread.
-use super::protocol::{self, Event, Request};
+//! Helper-process side: Shell thumbnails, and preview handlers hosted in a
+//! surface embedded in Filex's GPUI preview window. All COM, HWND and GDI
+//! ownership stays on this helper's main STA thread.
+use super::protocol::{self, Event, Key, Rect, Request};
 use anyhow::{Context, Result};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     mem::size_of,
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
@@ -18,6 +20,7 @@ use windows::{
             Ole::{IObjectWithSite, OleInitialize, OleUninitialize},
         },
         UI::{
+            Input::KeyboardAndMouse::{GetFocus, SetFocus},
             Shell::{PropertiesSystem::*, *},
             WindowsAndMessaging::*,
         },
@@ -137,7 +140,7 @@ impl IPreviewHandlerFrame_Impl for Frame_Impl {
     }
     fn TranslateAccelerator(&self, message: *const MSG) -> windows::core::Result<()> {
         if let Some(message) = unsafe { message.as_ref() } {
-            if message.message == WM_KEYDOWN && key_action(message.wParam.0, true) {
+            if message.message == WM_KEYDOWN && queue_key(message.wParam.0) {
                 return Ok(());
             }
         }
@@ -165,26 +168,29 @@ fn handler_id(path: &Path) -> Result<GUID> {
         CLSIDFromString(PCWSTR(buf.as_ptr())).map_err(Into::into)
     }
 }
-const CLOSE: u32 = 1;
-const NEXT: u32 = 2;
-const PREVIOUS: u32 = 4;
-const OPEN: u32 = 8;
-const PAINT: u32 = 16;
-thread_local! { static ACTIONS: Cell<u32> = const { Cell::new(0) }; }
-fn action(flag: u32) {
-    ACTIONS.with(|a| a.set(a.get() | flag));
+thread_local! {
+    /// Viewer keys a handler forwarded, drained after each message pump.
+    static KEYS: RefCell<Vec<Key>> = const { RefCell::new(Vec::new()) };
+    /// Surface fill (0x00BBGGRR), painted until the handler covers it.
+    static BACKGROUND: Cell<u32> = const { Cell::new(0) };
 }
-fn key_action(key: usize, multiple: bool) -> bool {
-    let flag = match key {
-        0x1b | 0x20 => CLOSE,
-        0x25 if multiple => PREVIOUS,
-        0x27 if multiple => NEXT,
-        _ => return false,
+/// Viewer keys belong to Filex even while a handler has focus.
+fn viewer_key(key: usize) -> Option<Key> {
+    match key {
+        0x1b | 0x20 => Some(Key::Close),
+        0x25 => Some(Key::Previous),
+        0x27 => Some(Key::Next),
+        _ => None,
+    }
+}
+fn queue_key(key: usize) -> bool {
+    let Some(key) = viewer_key(key) else {
+        return false;
     };
-    action(flag);
+    KEYS.with(|keys| keys.borrow_mut().push(key));
     true
 }
-unsafe extern "system" fn window_proc(
+unsafe extern "system" fn surface_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
@@ -193,23 +199,16 @@ unsafe extern "system" fn window_proc(
     // No borrowed Rust window state across a native call: COM and window APIs
     // may synchronously reenter this procedure.
     match message {
-        WM_CLOSE => {
-            action(CLOSE);
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => unsafe {
+            let mut paint = PAINTSTRUCT::default();
+            let dc = BeginPaint(hwnd, &mut paint);
+            let brush = CreateSolidBrush(COLORREF(BACKGROUND.with(Cell::get)));
+            FillRect(dc, &paint.rcPaint, brush);
+            let _ = DeleteObject(brush.into());
+            let _ = EndPaint(hwnd, &paint);
             LRESULT(0)
-        }
-        WM_COMMAND => {
-            match wparam.0 & 0xffff {
-                101 => action(PREVIOUS),
-                102 => action(NEXT),
-                103 => action(OPEN),
-                _ => {}
-            }
-            LRESULT(0)
-        }
-        WM_SIZE | WM_PAINT => {
-            action(PAINT);
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
+        },
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
@@ -224,6 +223,10 @@ impl Drop for Handler {
         }
     }
 }
+/// Activates the extension's registered `IPreviewHandler` out of process
+/// (`CLSCTX_LOCAL_SERVER`, so its DLL never loads here) and points it at
+/// `hwnd`. Assumes the calling thread is an OLE STA that pumps messages:
+/// handlers call back through `IPreviewHandlerFrame` on this thread.
 fn load_handler(path: &Path, hwnd: HWND, rect: &RECT) -> Result<Handler> {
     unsafe {
         let handler = Handler(CoCreateInstance(
@@ -257,357 +260,172 @@ fn load_handler(path: &Path, hwnd: HWND, rect: &RECT) -> Result<Handler> {
         Ok(handler)
     }
 }
-fn image_fallback(path: &Path) -> Result<image::RgbaImage> {
-    let metadata = std::fs::metadata(path)?;
-    anyhow::ensure!(
-        metadata.is_file() && metadata.len() <= 64 * 1024 * 1024,
-        "image exceeds preview size limit"
-    );
-    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    limits.max_image_width = Some(32768);
-    limits.max_image_height = Some(32768);
-    reader.limits(limits);
-    let mut image = reader.decode()?.thumbnail(2048, 2048).to_rgba8();
-    // Composite transparency onto the native window background; GDI BI_RGB
-    // ignores alpha. No opaque black boxes around transparent source images.
-    for pixel in image.chunks_exact_mut(4) {
-        let alpha = u32::from(pixel[3]);
-        for channel in &mut pixel[..3] {
-            *channel = ((u32::from(*channel) * alpha + 245 * (255 - alpha)) / 255) as u8;
-        }
-        pixel.swap(0, 2);
-        pixel[3] = 255;
+fn client(rect: &Rect) -> RECT {
+    RECT {
+        left: 0,
+        top: 0,
+        right: rect.width,
+        bottom: rect.height,
     }
-    Ok(image)
 }
-enum Content {
-    Native(Handler),
-    Image(image::RgbaImage),
-    Missing(Host),
+/// The handler's window: a child of Filex's GPUI preview window, owned by
+/// this helper's thread.
+///
+/// Assumes the parent is a DirectComposition window created with
+/// `WS_EX_NOREDIRECTIONBITMAP` and a topmost composition target (gpui-ce's
+/// DirectX renderer). Such a parent has no GDI surface for ordinary
+/// children to draw into, so the surface is `WS_EX_LAYERED` (child
+/// layering, Windows 8+), which gives it its own. GPUI composites above it
+/// and leaves that region transparent to reveal it. The parent lives in
+/// another process, so Windows attaches the two threads' input queues; the
+/// supervisor kills a helper that stops pumping messages.
+///
+/// Layered *child* windows also need the creating executable to declare
+/// Windows 8+ in its manifest. `filex.exe` (which is also the helper) gets
+/// that from gpui-ce's embedded `gpui.manifest.xml`; any other executable
+/// that runs the helper must link gpui too (see `windows_preview_smoke`).
+struct Surface {
+    // Field order is drop order: unload the handler before its window goes.
+    handler: Option<Handler>,
+    window: Host,
+    parent: isize,
+    rect: Rect,
 }
-struct Viewer {
-    content: Option<Content>,
-    previous: Host,
-    next: Host,
-    _open: Host,
-    surface: Host,
-    host: Host,
-    surface_size: (i32, i32),
-    paths: Vec<PathBuf>,
-    selected: usize,
-    request_id: u64,
-    rect: RECT,
-}
-impl Viewer {
-    fn new(owner: isize) -> Result<Self> {
+impl Surface {
+    fn new(parent: isize, rect: Rect) -> Result<Self> {
         unsafe {
             let instance: HINSTANCE =
                 windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?.into();
             let class = WNDCLASSW {
                 hInstance: instance,
-                lpfnWndProc: Some(window_proc),
-                lpszClassName: w!("FilexIsolatedPreview"),
+                lpfnWndProc: Some(surface_proc),
+                lpszClassName: w!("FilexPreviewSurface"),
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
-                hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
                 ..Default::default()
             };
-            anyhow::ensure!(
-                RegisterClassW(&class) != 0,
-                "registering preview window failed"
+            // Fails harmlessly when an earlier surface registered it.
+            RegisterClassW(&class);
+            let window = Host(
+                CreateWindowExW(
+                    WS_EX_LAYERED,
+                    w!("FilexPreviewSurface"),
+                    None,
+                    WS_CHILD | WS_CLIPCHILDREN,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    Some(HWND(parent as *mut _)),
+                    None,
+                    Some(instance),
+                    None,
+                )
+                // Fails (with a stale last error) in an executable without a
+                // Windows 8+ `supportedOS` manifest; see `Surface`.
+                .context("creating preview surface")?,
             );
-            let owner = if owner == 0 {
-                None
-            } else {
-                Some(HWND(owner as *mut _))
-            };
-            let host = Host(CreateWindowExW(
-                WS_EX_TOOLWINDOW,
-                w!("FilexIsolatedPreview"),
-                w!("Filex Preview"),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                960,
-                760,
-                owner,
-                None,
-                None,
-                None,
-            )?);
-            // Handlers receive a dedicated child HWND with a zero-origin
-            // client rect. Their content can never paint over our toolbar.
-            let surface = Host(CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                w!("FilexIsolatedPreview"),
-                None,
-                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
-                0,
-                48,
-                1,
-                1,
-                Some(host.0),
-                None,
-                Some(instance),
-                None,
-            )?);
-            let button = |label: PCWSTR, x, width, id: usize| -> Result<Host> {
-                Ok(Host(CreateWindowExW(
-                    WINDOW_EX_STYLE::default(),
-                    w!("BUTTON"),
-                    label,
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                    x,
-                    8,
-                    width,
-                    30,
-                    Some(host.0),
-                    Some(HMENU(id as *mut _)),
-                    None,
-                    None,
-                )?))
-            };
-            let previous = button(w!("Previous"), 12, 85, 101)?;
-            let next = button(w!("Next"), 105, 85, 102)?;
-            let open = button(w!("Open in default app"), 200, 180, 103)?;
+            SetLayeredWindowAttributes(window.0, COLORREF(0), 255, LWA_ALPHA)
+                .context("layering preview surface")?;
             Ok(Self {
-                content: None,
-                host,
-                previous,
-                next,
-                _open: open,
-                surface,
-                surface_size: (1, 1),
-                paths: Vec::new(),
-                selected: 0,
-                request_id: 0,
-                rect: RECT::default(),
+                handler: None,
+                window,
+                parent,
+                rect,
             })
         }
     }
-    fn bounds(&mut self) -> Result<RECT> {
-        let mut parent = RECT::default();
-        unsafe {
-            GetClientRect(self.host.0, &mut parent)?;
+    fn resize(&mut self, rect: Rect) -> Result<()> {
+        if rect == self.rect {
+            return Ok(());
         }
-        let size = (parent.right.max(1), (parent.bottom - 48).max(1));
-        if size != self.surface_size {
-            self.surface_size = size;
-            unsafe {
-                MoveWindow(self.surface.0, 0, 48, size.0, size.1, true)?;
-            }
-        }
-        Ok(RECT {
-            left: 0,
-            top: 0,
-            right: size.0,
-            bottom: size.1,
-        })
-    }
-    fn present(&mut self, paths: Vec<Vec<u16>>, selected: usize, request_id: u64) -> Result<()> {
-        self.request_id = request_id;
-        let paths: Vec<PathBuf> = paths
-            .into_iter()
-            .map(|p| std::ffi::OsString::from_wide(&p).into())
-            .collect();
-        if self.paths == paths && self.selected == selected {
-            return self.ready();
-        }
-        self.paths = paths;
-        self.selected = selected;
-        self.load()
-    }
-    fn load(&mut self) -> Result<()> {
-        self.content = None; // Unload before replacing, on the same STA.
-        let rect = self.bounds()?;
-        let path = &self.paths[self.selected];
-        let name = path
-            .file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy();
-        let title = HSTRING::from(format!(
-            "{name} — Filex Preview ({}/{})",
-            self.selected + 1,
-            self.paths.len()
-        ));
-        unsafe {
-            SetWindowTextW(self.host.0, &title)?;
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                self.previous.0,
-                self.selected > 0,
-            );
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
-                self.next.0,
-                self.selected + 1 < self.paths.len(),
-            );
-        }
-        self.content = Some(if super::policy::rust_image(path) {
-            match image_fallback(path) {
-                Ok(image) => Content::Image(image),
-                Err(_) => self.missing(path, &rect)?,
-            }
-        } else {
-            match load_handler(path, self.surface.0, &rect) {
-                Ok(handler) => Content::Native(handler),
-                Err(_) => match image_fallback(path) {
-                    Ok(image) => Content::Image(image),
-                    Err(_) => self.missing(path, &rect)?,
-                },
-            }
-        });
         self.rect = rect;
-        self.draw()?;
-        self.ready()
-    }
-    fn missing(&self, path: &Path, rect: &RECT) -> Result<Content> {
-        let metadata = std::fs::metadata(path).ok();
-        let detail = metadata
-            .map(|m| {
-                if m.is_dir() {
-                    "Folder".into()
-                } else {
-                    format!("{} bytes", m.len())
-                }
-            })
-            .unwrap_or_else(|| "File is unavailable".into());
-        let text = HSTRING::from(format!(
-            "No preview available\r\n\r\n{}\r\n\r\n{detail}\r\n\r\nUse Open in default app to view this file.",
-            path.file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-        ));
         unsafe {
-            Ok(Content::Missing(Host(CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                w!("STATIC"),
-                &text,
-                WS_CHILD
-                    | WS_VISIBLE
-                    | WINDOW_STYLE(windows::Win32::System::SystemServices::SS_CENTER.0),
-                20,
-                rect.top + 30,
-                (rect.right - 40).max(1),
-                (rect.bottom - rect.top - 60).max(1),
-                Some(self.surface.0),
-                None,
-                None,
-                None,
-            )?)))
-        }
-    }
-    fn ready(&self) -> Result<()> {
-        let kind = match self.content {
-            Some(Content::Native(_)) => "native",
-            Some(Content::Image(_)) => "image",
-            _ => "unavailable",
-        };
-        emit(&Event::Ready {
-            kind: kind.into(),
-            request_id: self.request_id,
-        })
-    }
-    fn draw(&mut self) -> Result<()> {
-        let rect = self.bounds()?;
-        let resized = rect != self.rect;
-        self.rect = rect;
-        match self.content.as_ref() {
-            Some(Content::Native(handler)) => {
-                if resized {
-                    unsafe {
-                        handler.0.SetRect(&rect)?;
-                    }
-                }
+            MoveWindow(self.window.0, rect.x, rect.y, rect.width, rect.height, true)
+                .context("moving preview surface")?;
+            if let Some(handler) = &self.handler {
+                handler
+                    .0
+                    .SetRect(&client(&rect))
+                    .context("resizing preview handler")?;
             }
-            Some(Content::Missing(text)) => unsafe {
-                MoveWindow(
-                    text.0,
-                    20,
-                    rect.top + 30,
-                    (rect.right - 40).max(1),
-                    (rect.bottom - rect.top - 60).max(1),
-                    true,
-                )?;
-            },
-            Some(Content::Image(image)) => unsafe {
-                let dc = GetDC(Some(self.surface.0));
-                if dc.is_invalid() {
-                    return Ok(());
-                }
-                let brush = CreateSolidBrush(COLORREF(0x00f5f5f5));
-                FillRect(dc, &rect, brush);
-                let _ = DeleteObject(brush.into());
-                let available_w = (rect.right - 24).max(1);
-                let available_h = (rect.bottom - rect.top - 24).max(1);
-                let scale = (available_w as f64 / image.width() as f64)
-                    .min(available_h as f64 / image.height() as f64)
-                    .min(1.0);
-                let width = (image.width() as f64 * scale).max(1.0) as i32;
-                let height = (image.height() as f64 * scale).max(1.0) as i32;
-                let info = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: image.width() as i32,
-                        biHeight: -(image.height() as i32),
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                SetStretchBltMode(dc, HALFTONE);
-                StretchDIBits(
-                    dc,
-                    (rect.right - width) / 2,
-                    rect.top + (rect.bottom - rect.top - height) / 2,
-                    width,
-                    height,
-                    0,
-                    0,
-                    image.width() as i32,
-                    image.height() as i32,
-                    Some(image.as_ptr().cast()),
-                    &info,
-                    DIB_RGB_COLORS,
-                    SRCCOPY,
-                );
-                ReleaseDC(Some(self.surface.0), dc);
-            },
-            None => {}
         }
         Ok(())
     }
-    fn actions(&mut self, flags: u32) -> Result<bool> {
-        if flags & CLOSE != 0 {
-            return Ok(false);
+    /// Replaces the handler; `false` when the file has no usable one.
+    fn load(&mut self, path: &Path) -> bool {
+        self.hide(); // Unload before replacing, on the same STA.
+        unsafe {
+            let _ = ShowWindow(self.window.0, SW_SHOWNOACTIVATE);
+            let _ = InvalidateRect(Some(self.window.0), None, true);
         }
-        if flags & PREVIOUS != 0 && self.selected > 0 {
-            self.selected -= 1;
-            self.load()?;
-        }
-        if flags & NEXT != 0 && self.selected + 1 < self.paths.len() {
-            self.selected += 1;
-            self.load()?;
-        }
-        if flags & OPEN != 0 {
-            if let Some(path) = self.paths.get(self.selected) {
-                use std::os::windows::ffi::OsStrExt;
-                emit(&Event::Open(path.as_os_str().encode_wide().collect()))?;
+        match load_handler(path, self.window.0, &client(&self.rect)) {
+            Ok(handler) => {
+                self.handler = Some(handler);
+                true
+            }
+            Err(_) => {
+                // Hidden, so it can't take clicks meant for Filex's fallback.
+                self.hide();
+                false
             }
         }
-        if flags & PAINT != 0 {
-            self.draw()?;
+    }
+    /// Hands keyboard focus back to the parent when the handler holds it.
+    /// The parent belongs to another process; this works because a child
+    /// window shares its parent's input state, and runs here rather than in
+    /// Filex so a hung handler stalls this helper, not the UI thread.
+    fn return_focus(&self) {
+        unsafe {
+            let focus = GetFocus();
+            if focus == self.window.0 || IsChild(self.window.0, focus).as_bool() {
+                let _ = SetFocus(Some(HWND(self.parent as *mut _)));
+            }
         }
-        Ok(true)
+    }
+    fn hide(&mut self) {
+        self.handler = None;
+        unsafe {
+            let _ = ShowWindow(self.window.0, SW_HIDE);
+        }
     }
 }
 fn emit(event: &Event) -> Result<()> {
     protocol::write(&mut std::io::stdout().lock(), event)
 }
+fn present(
+    surface: &mut Option<Surface>,
+    path: Vec<u16>,
+    parent: isize,
+    rect: Rect,
+    background: u32,
+    request_id: u64,
+) -> Result<()> {
+    if surface.as_ref().is_some_and(|s| s.parent != parent) {
+        *surface = None;
+    }
+    if surface.is_none() {
+        *surface = Some(Surface::new(parent, rect)?);
+    }
+    let surface = surface.as_mut().context("preview surface missing")?;
+    BACKGROUND.with(|b| b.set(background));
+    surface.resize(rect)?;
+    let path = PathBuf::from(std::ffi::OsString::from_wide(&path));
+    // Handlers that open by name (PDF viewers) fail on `\\?\` paths.
+    let path = crate::listing::plain_path(&path);
+    let kind = if surface.load(&path) {
+        "native"
+    } else {
+        "unavailable"
+    };
+    emit(&Event::Ready {
+        kind: kind.into(),
+        request_id,
+    })
+}
 #[derive(Default)]
 struct Incoming {
     latest: Option<Request>,
+    resize: Option<Rect>,
     stopped: bool,
 }
 pub fn run(mode: &str) -> Result<()> {
@@ -617,7 +435,7 @@ pub fn run(mode: &str) -> Result<()> {
     let incoming = Arc::new((
         Mutex::new(Incoming {
             latest: Some(first),
-            stopped: false,
+            ..Default::default()
         }),
         Condvar::new(),
     ));
@@ -631,6 +449,11 @@ pub fn run(mode: &str) -> Result<()> {
                     return;
                 };
                 match request {
+                    // Resizes coalesce on their own, so a window drag can't
+                    // replace a pending presentation, or the reverse.
+                    Ok(Request::Resize(rect)) if rect.validate().is_ok() => {
+                        state.resize = Some(rect)
+                    }
                     Ok(request) if request.validate().is_ok() => state.latest = Some(request),
                     _ => {
                         state.stopped = true;
@@ -641,15 +464,15 @@ pub fn run(mode: &str) -> Result<()> {
                 reader.1.notify_one();
             }
         })?;
-    let mut viewer: Option<Viewer> = None;
+    let mut surface: Option<Surface> = None;
     let mut heartbeat = Instant::now();
     loop {
-        let (request, stopped) = {
+        let (request, resize, stopped) = {
             let mut state = incoming
                 .0
                 .lock()
                 .map_err(|_| anyhow::anyhow!("preview command reader failed"))?;
-            (state.latest.take(), state.stopped)
+            (state.latest.take(), state.resize.take(), state.stopped)
         };
         if stopped {
             break;
@@ -670,63 +493,92 @@ pub fn run(mode: &str) -> Result<()> {
                 emit(&event)?;
             }
             Some(Request::Present {
-                paths,
-                selected,
-                owner,
+                path,
+                parent,
+                rect,
+                background,
                 request_id,
             }) if mode == "--filex-preview-helper" => {
-                if viewer.is_none() {
-                    viewer = Some(Viewer::new(owner)?);
+                present(&mut surface, path, parent, rect, background, request_id)?;
+            }
+            Some(Request::ReturnFocus) if mode == "--filex-preview-helper" => {
+                if let Some(surface) = surface.as_ref() {
+                    surface.return_focus();
                 }
-                if let Some(viewer) = viewer.as_mut() {
-                    viewer.present(paths, selected, request_id)?;
+            }
+            Some(Request::Hide) if mode == "--filex-preview-helper" => {
+                if let Some(surface) = surface.as_mut() {
+                    surface.hide();
                 }
             }
             Some(_) => anyhow::bail!("wrong preview helper mode"),
             None => {}
         }
+        if let (Some(surface), Some(rect)) = (surface.as_mut(), resize) {
+            surface.resize(rect)?;
+        }
         unsafe {
             let mut message = MSG::default();
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
-                if message.message == WM_KEYDOWN
-                    && key_action(
-                        message.wParam.0,
-                        viewer.as_ref().is_some_and(|v| v.paths.len() > 1),
-                    )
-                {
+                if message.message == WM_KEYDOWN && queue_key(message.wParam.0) {
                     continue;
                 }
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
         }
-        if let Some(viewer) = viewer.as_mut() {
-            let flags = ACTIONS.with(|a| a.replace(0));
-            if !viewer.actions(flags)? {
-                break;
-            }
-            if heartbeat.elapsed() >= Duration::from_millis(500) {
-                emit(&Event::Heartbeat)?;
-                heartbeat = Instant::now();
-            }
+        for key in KEYS.with(|keys| std::mem::take(&mut *keys.borrow_mut())) {
+            emit(&Event::Key(key))?;
+        }
+        if mode == "--filex-preview-helper" && heartbeat.elapsed() >= Duration::from_millis(500) {
+            emit(&Event::Heartbeat)?;
+            heartbeat = Instant::now();
         }
         // Wake immediately for a new file; polling used to add up to 10 ms
         // to every warm thumbnail request. Idle thumbnail workers need only
-        // occasional message pumping, while the viewer services resize input.
+        // occasional message pumping, while a surface services resize input.
         let state = incoming
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("preview command reader failed"))?;
-        if state.latest.is_none() && !state.stopped {
-            let interval = if viewer.is_some() { 16 } else { 250 };
+        if state.latest.is_none() && state.resize.is_none() && !state.stopped {
+            let interval = if surface.is_some() { 16 } else { 250 };
             let _ = incoming
                 .1
                 .wait_timeout(state, Duration::from_millis(interval));
         }
     }
-    drop(viewer); // unload native content before reporting a normal close
+    drop(surface); // unload native content before reporting a normal close
     if mode == "--filex-preview-helper" {
         emit(&Event::Closed)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn viewer_keys_are_escape_space_and_horizontal_arrows_only() {
+        assert_eq!(viewer_key(0x1b), Some(Key::Close));
+        assert_eq!(viewer_key(0x20), Some(Key::Close));
+        assert_eq!(viewer_key(0x25), Some(Key::Previous));
+        assert_eq!(viewer_key(0x27), Some(Key::Next));
+        // Up/Down and letters stay with the handler (scrolling, find).
+        assert_eq!(viewer_key(0x26), None);
+        assert_eq!(viewer_key(0x28), None);
+        assert_eq!(viewer_key(0x41), None);
+    }
+    #[test]
+    fn handler_rect_is_zero_origin_at_surface_size() {
+        let rect = Rect {
+            x: 10,
+            y: 60,
+            width: 300,
+            height: 200,
+        };
+        let client = client(&rect);
+        assert_eq!((client.left, client.top), (0, 0));
+        assert_eq!((client.right, client.bottom), (300, 200));
+    }
 }

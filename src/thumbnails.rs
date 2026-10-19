@@ -19,6 +19,9 @@ use gpui::RenderImage;
 /// the largest grid card (block 4); the list view downscales it, which
 /// stays crisp, whereas upscaling a tiny thumbnail into a card would not.
 pub const THUMBNAIL_EDGE: u32 = 128;
+/// Longest edge of a Space-bar preview image: a 4K window's width, so a
+/// maximised viewer stays sharp without holding full camera resolution.
+pub const PREVIEW_EDGE: u32 = 3840;
 
 /// At capacity, completed entries are cleared; active jobs keep their slots.
 pub const CACHE_CAP: usize = 512;
@@ -80,7 +83,14 @@ impl Cache {
 pub fn decode_thumbnail(path: &Path) -> Result<Arc<RenderImage>> {
     // Only the isolated, synchronous decoder is recoverable. No UI state,
     // shared mutation, native callbacks, or app-wide panic suppression here.
-    decoder_result(|| decode_image(path))
+    decoder_result(|| decode_image(path, THUMBNAIL_EDGE, true))
+}
+
+/// Decode `path` for the full preview window, within the same input and
+/// allocation limits as thumbnails. Blocking — call on the background
+/// executor.
+pub fn decode_preview(path: &Path) -> Result<Arc<RenderImage>> {
+    decoder_result(|| decode_image(path, PREVIEW_EDGE, false))
 }
 
 /// Production routing. Pure Rust decoding remains separately measurable.
@@ -110,7 +120,9 @@ fn decoder_result<T>(decode: impl FnOnce() -> Result<T> + std::panic::UnwindSafe
     std::panic::catch_unwind(decode).map_err(|_| anyhow::anyhow!("thumbnail decoder panicked"))?
 }
 
-fn decode_image(path: &Path) -> Result<Arc<RenderImage>> {
+/// `enlarge`: also scale sources smaller than `edge` up to it (thumbnails
+/// fill their cell); previews show small images at their own size.
+fn decode_image(path: &Path, edge: u32, enlarge: bool) -> Result<Arc<RenderImage>> {
     let metadata = std::fs::metadata(path)?;
     anyhow::ensure!(metadata.is_file(), "thumbnail source is not a regular file");
     anyhow::ensure!(
@@ -127,8 +139,12 @@ fn decode_image(path: &Path) -> Result<Arc<RenderImage>> {
     reader.limits(limits);
     let decoded = reader
         .decode()
-        .with_context(|| format!("decoding {}", path.display()))?
-        .thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
+        .with_context(|| format!("decoding {}", path.display()))?;
+    let decoded = if enlarge || decoded.width().max(decoded.height()) > edge {
+        decoded.thumbnail(edge, edge)
+    } else {
+        decoded
+    };
     let mut rgba = decoded.to_rgba8();
     // gpui's RenderImage is BGRA in an RGBA container: swap channels.
     for pixel in rgba.as_chunks_mut::<4>().0 {
@@ -214,6 +230,26 @@ mod tests {
             .save(&path)
             .unwrap();
         assert!(decode_thumbnail(&path).is_err());
+    }
+
+    #[test]
+    fn previews_keep_small_images_small_and_cap_large_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.png");
+        image::RgbaImage::from_pixel(40, 20, image::Rgba([10, 20, 30, 255]))
+            .save(&small)
+            .unwrap();
+        let preview = decode_preview(&small).unwrap();
+        let size = preview.size(0);
+        assert_eq!((size.width.0, size.height.0), (40, 20));
+        let wide = dir.path().join("wide.png");
+        image::GrayImage::new(PREVIEW_EDGE * 2, 4)
+            .save(&wide)
+            .unwrap();
+        let preview = decode_preview(&wide).unwrap();
+        let size = preview.size(0);
+        assert_eq!(size.width.0 as u32, PREVIEW_EDGE);
+        assert!(size.height.0 >= 1);
     }
 
     #[test]
