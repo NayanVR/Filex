@@ -124,3 +124,78 @@ pub(super) const OTHER_VOLUME_DIRS: &[&str] = &[];
 /// default to case-insensitive, Linux filesystems don't. A case-sensitive
 /// APFS volume would over-match here, which only excludes more.
 pub(super) const CASE_INSENSITIVE_NAMES: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Gated to the platforms with a real identity source: elsewhere every file
+/// gets the zero device/key fallback and distinctness can't hold.
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::identity;
+    use crate::catalog::segment::Identity;
+    use std::{fs, io::Write, path::Path};
+
+    fn identity_of(path: &Path) -> Identity {
+        identity(path, &fs::symlink_metadata(path).unwrap())
+    }
+
+    /// `(device, key)` is what the index matches on; `birth` is left out
+    /// because tmpfs and some Linux filesystems report no creation time.
+    fn device_key(path: &Path) -> (u64, u64) {
+        let id = identity_of(path);
+        (id.device, id.key)
+    }
+
+    #[test]
+    fn distinct_files_in_one_dir_share_device_but_not_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        let (a, b) = (identity_of(&a), identity_of(&b));
+        assert_eq!(a.device, b.device);
+        assert_ne!(a.key, b.key);
+    }
+
+    #[test]
+    fn rename_within_dir_keeps_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (before, after) = (dir.path().join("old.txt"), dir.path().join("new.txt"));
+        fs::write(&before, b"x").unwrap();
+        let original = device_key(&before);
+        fs::rename(&before, &after).unwrap();
+        assert_eq!(device_key(&after), original);
+    }
+
+    #[test]
+    fn directory_and_file_have_distinct_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sub, file) = (dir.path().join("sub"), dir.path().join("file.txt"));
+        fs::create_dir(&sub).unwrap();
+        fs::write(&file, b"x").unwrap();
+        assert_ne!(device_key(&sub), device_key(&file));
+    }
+
+    /// A zero key is the Windows "handle couldn't open" fallback; a normal
+    /// file must never produce it.
+    #[test]
+    fn normal_file_has_nonzero_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        fs::write(&file, b"x").unwrap();
+        assert_ne!(identity_of(&file).key, 0);
+    }
+
+    #[test]
+    fn content_change_keeps_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        fs::write(&file, b"x").unwrap();
+        let original = device_key(&file);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(b"more bytes")
+            .unwrap();
+        assert_eq!(device_key(&file), original);
+    }
+}
