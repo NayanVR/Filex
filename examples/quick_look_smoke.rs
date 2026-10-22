@@ -40,10 +40,10 @@ mod harness {
             div()
                 .key_context("PreviewSmoke")
                 .track_focus(&self.focus)
-                .on_action(cx.listener(|this, _: &TogglePreview, window, _cx| {
+                .on_action(cx.listener(|this, _: &TogglePreview, window, cx| {
                     if this.viewer.is_none() {
                         this.viewer = Some(
-                            native::Viewer::new(window, _cx.foreground_executor().clone(), |err| {
+                            native::Viewer::new(window, cx, |err| {
                                 panic!("Native preview failed: {err}")
                             })
                             .unwrap(),
@@ -257,11 +257,10 @@ mod harness {
                 assert!(!panel().isVisible());
                 // Also drop a live owner, rather than only cancel a queued open.
                 w.update(cx, |h, window, cx| {
-                    let viewer =
-                        native::Viewer::new(window, cx.foreground_executor().clone(), |err| {
-                            panic!("Native preview failed: {err}")
-                        })
-                        .unwrap();
+                    let viewer = native::Viewer::new(window, cx, |err| {
+                        panic!("Native preview failed: {err}")
+                    })
+                    .unwrap();
                     viewer.show(fixtures.clone(), 0);
                     h.viewer = Some(viewer);
                 })
