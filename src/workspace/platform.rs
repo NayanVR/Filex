@@ -14,7 +14,7 @@ use crate::ui;
 
 /// Open a file with the platform's default application. Detached — the
 /// launched app owns its own lifetime.
-pub(super) fn open_with_default_app(path: &Path) -> std::io::Result<()> {
+pub(crate) fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = std::process::Command::new("open");

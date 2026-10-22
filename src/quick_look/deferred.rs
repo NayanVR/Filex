@@ -71,9 +71,10 @@ pub struct Viewer {
 impl Viewer {
     pub fn new(
         window: &gpui::Window,
-        executor: gpui::ForegroundExecutor,
+        cx: &mut gpui::App,
         on_error: impl Fn(anyhow::Error) + 'static,
     ) -> anyhow::Result<Self> {
+        let executor = cx.foreground_executor().clone();
         Ok(Self {
             state: Rc::new(State {
                 driver: Driver::new(NativeViewer::new(window)?),

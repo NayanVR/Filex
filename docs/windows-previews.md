@@ -7,37 +7,76 @@ fixtures, not a measured crossover point. Documents, video, camera formats and
 other supported extensions can request Shell thumbnails. Availability depends
 on installed Windows codecs and providers. Failed requests retain file artwork.
 
-Space opens a separate, resizable preview window. Previous/Next buttons and
-Left/Right navigate the selected files (up to 64 around the lead selection).
-Space, Escape and the close button dismiss it. Changes to Filex's selection
-update the same window. Open in default app is explicit and launches outside
-the helper's lifetime job.
+## The preview window
 
-Images use a fitted, aspect-preserving view with bounded decoding and alpha
-composited onto the background. Other formats try their registered
-`IPreviewHandler`: stream initialization first, then Shell item or file.
-Handlers are activated with `CLSCTX_LOCAL_SERVER`; their DLLs are never loaded
-into Filex. No installed handler, corrupt files, and unavailable files display
-a fallback with the filename and an Open button. PDF and Office previews are
-not guaranteed on clean Windows installations.
+Space opens a Filex window drawn by GPUI (`src/quick_look/preview_window.rs`):
+a toolbar with Previous/Next (multi-selections, up to 64 around the lead),
+the file name, position and size, and an Open button. Left/Right navigate,
+Enter opens, Space and Escape close; the close box hides the window for reuse.
+Changes to Filex's selection update the same window. It follows the Filex
+theme, is owned by the Filex window (stays above it, no taskbar button of its
+own) and opens centred on its display.
+
+What fills the body depends on the file (`preview_window::route`):
+
+- **Images** Filex can decode (`policy::rust_image`) are decoded in-process
+  on the background executor, with the thumbnail decoder's limits (64 MiB
+  input, 128 MiB allocation, 32768 px per axis) and a 3840 px output edge.
+  Small images stay at their own size. Moving to another file drops the
+  task, cancelling a decode still in flight.
+- **Everything else** goes to the file's registered `IPreviewHandler`, hosted
+  by the isolated helper and embedded in the window (below).
+- **No handler, or a failure,** shows a card with the file's artwork, size and
+  an Open in default app button. PDF and Office previews are not guaranteed
+  on clean Windows installations.
+
+### Embedding the handler
+
+GPUI renders through DirectComposition with a topmost target and
+`WS_EX_NOREDIRECTIONBITMAP`, so it composites *above* child windows and an
+ordinary GDI child of its window never shows. The helper therefore creates a
+`WS_EX_LAYERED` child surface (Windows 8+ child layering gives it its own
+surface) inside the preview window, at the body's bounds in device pixels, and
+loads the handler into it. The view paints nothing over that region once the
+handler reports ready, so the handler shows through; until then it paints its
+background and a spinner over it. Layout changes become `Resize` requests.
+
+Requirements and consequences, all exercised by the smoke test:
+
+- The helper executable must declare Windows 8+ (`supportedOS`) in its
+  manifest, or `CreateWindowExW` fails for the layered child. `filex.exe`
+  gets gpui-ce's `gpui.manifest.xml`; the smoke example links GPUI for the
+  same reason.
+- Paths go to handlers without the `\\?\` prefix (`listing::plain_path`):
+  handlers that open by file name, such as PDF viewers, fail on it.
+- A cross-process parent/child pair shares input state. Clicking into the
+  handler gives it keyboard focus; a mouse-down anywhere on GPUI's chrome asks
+  the helper (not the UI thread, which a hung handler could stall) to hand
+  focus back. Handlers forward Escape/Space/Left/Right through
+  `IPreviewHandlerFrame::TranslateAccelerator` only if they choose to; the
+  built-in text handler keeps them while it has focus, as in Explorer's
+  preview pane.
+- Every native show/hide/owner call runs in a foreground task outside GPUI
+  updates. Hidden windows get their initial placement from GPUI's
+  `activate_window`, so the first show goes through it.
 
 ## Process and resource boundaries
 
 - Native work runs in copies of `filex.exe` with reserved helper switches,
   before GPUI initializes. Each helper owns one STA and pumps Windows messages.
-  No Shell objects or HWND ownership cross into GPUI's MTA background executor.
-- Two warm thumbnail helpers, one full-view helper per viewer, bounded IPC
-  frames, and a single coalesced pending selection prevent an unbounded backlog.
+  No Shell objects or helper HWNDs are owned by GPUI's threads.
+- Two warm thumbnail helpers, one preview helper per viewer, bounded IPC
+  frames, and a single coalesced pending presentation (plus a separately
+  coalesced resize) prevent an unbounded backlog. Images never start a helper.
 - Thumbnail requests and stalled preview message loops have a 10-second
-  deadline. A failed helper is killed and the next request can create a new one.
-  Closing allows up to one second for `Unload`, then terminates the helper.
+  deadline. A failed helper is killed, the view shows the fallback card, and
+  the next native file starts a new one. Closing the window stops the helper,
+  allowing up to one second for `Unload`; closing Filex stops it before the
+  preview window is destroyed.
 - Windows jobs terminate helpers if Filex exits, and cap each helper's committed
   memory at 512 MiB. This is crash/hang containment, **not a security sandbox**.
   COM servers started separately by Windows can live outside this job and its
   memory accounting. Driver or OS failures cannot be made crash-proof by this.
-- Image fallback limits: 64 MiB input, 128 MiB decoder allocation limit, 32768
-  pixels per axis, and a 2048-pixel output edge. Some codec allocations remain
-  best-effort limited inside the OS-enforced helper budget.
 - Request identifiers reject stale completion events after rapid selection
   changes. Pipes run on dedicated threads so a blocked write cannot disable
   the supervisor's timeout or block the UI.
@@ -48,12 +87,15 @@ Linux behavior is unchanged; this change adds no Linux native preview service.
 ## Verification
 
 `cargo run --locked --example windows_preview_smoke` on an interactive Windows
-session exercises production helpers: MTA callers, real BGRA thumbnail pixels,
-bad files, a native text handler, image and unsupported-format fallbacks,
-resize, coalesced selection, keyboard navigation, close/reopen, cleanup, and
+session exercises production helpers: MTA thumbnails, real BGRA thumbnail
+pixels, bad files, a native text handler embedded in a parent window (pixels
+inside its surface, nothing outside it), the unavailable result, resize,
+coalesced presentations, forwarded keys, hide/close/reopen, cleanup, and
 injected child crashes, malformed frames and hangs. Fault injection exists only
 in that example. CI runs it on Windows, plus the application and policy tests.
-API readiness alone is not a measurement of first paint or scrolling smoothness.
+The GPUI view's selection, routing, device-pixel snapping and stale-request
+handling are unit tests in `preview_window.rs`. API readiness alone is not a
+measurement of first paint or scrolling smoothness.
 
 The earlier `preview_benchmark` continues comparing Rust and raw Shell adapters.
 Its numbers do not include the production helper's IPC and startup overhead.

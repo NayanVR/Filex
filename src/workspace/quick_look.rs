@@ -43,17 +43,13 @@ impl Workspace {
             if self.quick_look.is_none() {
                 let workspace = cx.weak_entity();
                 let app = cx.to_async();
-                self.quick_look = Some(crate::quick_look::Viewer::new(
-                    window,
-                    cx.foreground_executor().clone(),
-                    move |err| {
-                        let mut app = app.clone();
-                        let _ = workspace.update(&mut app, |this, cx| {
-                            this.notice = Some(format!("Couldn’t open preview: {err}").into());
-                            cx.notify();
-                        });
-                    },
-                )?);
+                self.quick_look = Some(crate::quick_look::Viewer::new(window, cx, move |err| {
+                    let mut app = app.clone();
+                    let _ = workspace.update(&mut app, |this, cx| {
+                        this.notice = Some(format!("Couldn’t open preview: {err}").into());
+                        cx.notify();
+                    });
+                })?);
             }
             if let Some(viewer) = self.quick_look.as_ref() {
                 viewer.show(paths, selected);

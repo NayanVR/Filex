@@ -30,9 +30,9 @@ use crate::ui::theme::{ActiveTheme as _, Theme};
 pub use app::run;
 use filex::context_menu as menu_model;
 use filex::listing::FileKind;
+pub(crate) use platform::open_with_default_app;
 use platform::{
-    AppChoice, OPEN_WITH_OTHER, open_terminal, open_with_app, open_with_choices,
-    open_with_default_app, open_with_dialog,
+    AppChoice, OPEN_WITH_OTHER, open_terminal, open_with_app, open_with_choices, open_with_dialog,
 };
 use state::*;
 

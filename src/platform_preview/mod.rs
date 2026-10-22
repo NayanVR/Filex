@@ -8,7 +8,9 @@ mod process;
 #[cfg(any(windows, test))]
 mod protocol;
 #[cfg(windows)]
-pub use process::{Preview, thumbnail};
+pub use process::{Preview, PreviewEvent, thumbnail};
+#[cfg(windows)]
+pub use protocol::{Key, Rect};
 
 /// Reserved child-process entry point. Call before initializing GPUI.
 #[cfg(windows)]

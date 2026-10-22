@@ -1,12 +1,8 @@
 //! Bounded IPC and watchdogs. No native provider call runs in this process.
-use super::protocol::{self, Event, Request};
+use super::protocol::{self, Event, Key, Rect, Request};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
-    os::windows::{
-        ffi::{OsStrExt, OsStringExt},
-        io::AsRawHandle,
-        process::CommandExt,
-    },
+    os::windows::{ffi::OsStrExt, io::AsRawHandle, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Condvar, Mutex, OnceLock, mpsc},
@@ -166,95 +162,126 @@ pub fn thumbnail(path: &Path) -> Result<image::RgbaImage> {
     }
 }
 
+/// What the embedded handler surface reports back to the GPUI viewer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreviewEvent {
+    /// The presentation `request_id` finished loading. `native`: a handler
+    /// is showing; otherwise the file has no usable preview handler.
+    Ready { native: bool, request_id: u64 },
+    /// A viewer key pressed while the handler had keyboard focus.
+    Key(Key),
+    /// The helper failed, hung or crashed; it has been stopped.
+    Error(String),
+}
 enum Control {
-    Present(Vec<PathBuf>, usize, u64),
+    Present {
+        path: PathBuf,
+        parent: isize,
+        rect: Rect,
+        background: u32,
+        request_id: u64,
+    },
+    Hide,
     Close,
 }
 #[derive(Default)]
 struct State {
     pending: Option<Control>,
-    visible: bool,
+    resize: Option<Rect>,
+    return_focus: bool,
     shutdown: bool,
-    kind: Option<String>,
     request_id: u64,
+}
+impl State {
+    /// Takes the next control and resize. A resize that arrived while a
+    /// presentation was still pending is folded into that presentation.
+    fn take(&mut self) -> (Option<Control>, Option<Rect>) {
+        let mut control = self.pending.take();
+        let mut resize = self.resize.take();
+        if let (Some(Control::Present { rect, .. }), Some(latest)) = (control.as_mut(), resize) {
+            *rect = latest;
+            resize = None;
+        }
+        if matches!(control, Some(Control::Hide | Control::Close)) {
+            resize = None;
+        }
+        (control.take(), resize)
+    }
 }
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
 }
-/// A single Space-bar viewer. Native state lives only in its disposable child.
+/// The isolated preview-handler host behind one GPUI preview window.
+/// Native state lives only in its disposable child process; this side only
+/// queues commands, and never blocks the caller.
 pub struct Preview {
     shared: Arc<Shared>,
 }
 impl Preview {
-    pub fn new(owner: isize) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<String>)> {
+    pub fn new() -> Result<(
+        Self,
+        futures::channel::mpsc::UnboundedReceiver<PreviewEvent>,
+    )> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
         });
         let worker = shared.clone();
-        let (errors, receiver) = futures::channel::mpsc::unbounded();
+        let (events, receiver) = futures::channel::mpsc::unbounded();
         std::thread::Builder::new()
             .name("preview-watchdog".into())
-            .spawn(move || supervise(worker, owner, errors))?;
+            .spawn(move || supervise(worker, events))?;
         Ok((Self { shared }, receiver))
     }
-    pub fn is_visible(&self) -> bool {
-        self.shared.state.lock().is_ok_and(|s| s.visible)
-    }
-    /// Reports API initialization, not verified first paint. Useful for smoke tests.
-    pub fn ready_kind(&self) -> Option<String> {
-        self.shared.state.lock().ok().and_then(|s| s.kind.clone())
-    }
-    pub fn show(&self, paths: Vec<PathBuf>, selected: usize) {
-        if paths.is_empty() {
-            self.close();
-            return;
-        }
-        let selected = selected.min(paths.len() - 1);
-        // Bound selection IPC while retaining the lead item and nearby items.
-        let start = selected
-            .saturating_sub(protocol::MAX_PATHS / 2)
-            .min(paths.len().saturating_sub(protocol::MAX_PATHS));
-        let paths = paths
-            .into_iter()
-            .skip(start)
-            .take(protocol::MAX_PATHS)
-            .collect();
+    fn send(&self, update: impl FnOnce(&mut State)) {
         if let Ok(mut state) = self.shared.state.lock() {
+            update(&mut state);
+            self.shared.changed.notify_one();
+        }
+    }
+    /// Shows `path`'s preview handler in a child of `parent` (an HWND) at
+    /// `rect`. Replaces any pending presentation; returns its request id.
+    pub fn present(&self, path: PathBuf, parent: isize, rect: Rect, background: u32) -> u64 {
+        let mut id = 0;
+        self.send(|state| {
             state.request_id = state.request_id.wrapping_add(1);
-            state.pending = Some(Control::Present(paths, selected - start, state.request_id));
-            state.visible = true;
-            state.kind = None;
-            self.shared.changed.notify_one();
-        }
+            id = state.request_id;
+            state.pending = Some(Control::Present {
+                path,
+                parent,
+                rect,
+                background,
+                request_id: id,
+            });
+        });
+        id
     }
+    pub fn resize(&self, rect: Rect) {
+        self.send(|state| state.resize = Some(rect));
+    }
+    /// Unloads the handler and hides its surface. The helper stays warm.
+    pub fn hide(&self) {
+        self.send(|state| state.pending = Some(Control::Hide));
+    }
+    /// Takes keyboard focus back from the handler, if it has it.
+    pub fn return_focus(&self) {
+        self.send(|state| state.return_focus = true);
+    }
+    /// Stops the helper, which destroys its surface.
     pub fn close(&self) {
-        if let Ok(mut state) = self.shared.state.lock() {
-            state.pending = Some(Control::Close);
-            state.visible = false;
-            state.kind = None;
-            self.shared.changed.notify_one();
-        }
+        self.send(|state| state.pending = Some(Control::Close));
     }
 }
 impl Drop for Preview {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.shared.state.lock() {
-            state.shutdown = true;
-            state.visible = false;
-            self.shared.changed.notify_one();
-        }
+        self.send(|state| state.shutdown = true);
     }
 }
-fn supervise(
-    shared: Arc<Shared>,
-    owner: isize,
-    errors: futures::channel::mpsc::UnboundedSender<String>,
-) {
+fn supervise(shared: Arc<Shared>, events: futures::channel::mpsc::UnboundedSender<PreviewEvent>) {
     let mut helper: Option<Helper> = None;
-    let mut outgoing = None;
-    let mut allowed_paths = Vec::<PathBuf>::new();
+    let mut outgoing: Option<Request> = None;
+    let mut outgoing_resize: Option<Rect> = None;
     let mut closing: Option<Instant> = None;
     let mut last_event = Instant::now();
     loop {
@@ -264,26 +291,42 @@ fn supervise(
         if state.shutdown {
             break;
         }
-        let control = state.pending.take();
+        let (control, resize) = state.take();
+        let return_focus = std::mem::take(&mut state.return_focus);
+        let current_request = state.request_id;
         drop(state);
         let mut failure = None;
         let mut finished = false;
         match control {
             Some(Control::Close) => {
-                outgoing = Some(Request::Close);
-                closing = Some(Instant::now());
+                outgoing = helper.is_some().then_some(Request::Close);
+                outgoing_resize = None;
+                closing = helper.is_some().then(Instant::now);
             }
-            Some(Control::Present(paths, selected, request_id)) => {
+            Some(Control::Hide) => {
+                if helper.is_some() && closing.is_none() {
+                    outgoing = Some(Request::Hide);
+                    outgoing_resize = None;
+                }
+            }
+            Some(Control::Present {
+                path,
+                parent,
+                rect,
+                background,
+                request_id,
+            }) => {
                 if closing.take().is_some() {
                     helper = None;
                 }
-                allowed_paths.clone_from(&paths);
                 let request = Request::Present {
-                    paths: paths.iter().map(|p| wide(p)).collect(),
-                    selected,
-                    owner,
+                    path: wide(&path),
+                    parent,
+                    rect,
+                    background,
                     request_id,
                 };
+                outgoing_resize = None;
                 if let Err(error) = request.validate() {
                     failure = Some(error.to_string());
                 } else {
@@ -301,6 +344,9 @@ fn supervise(
             }
             None => {}
         }
+        if resize.is_some() && closing.is_none() {
+            outgoing_resize = resize;
+        }
         if let Some(child) = helper.as_mut() {
             if let Some(request) = outgoing.take() {
                 match child.sender.try_send(request) {
@@ -309,31 +355,41 @@ fn supervise(
                     Err(_) => failure = Some("Windows preview helper stopped".into()),
                 }
             }
+            // Best effort: a click during a busy pipe keeps the old focus.
+            if return_focus && outgoing.is_none() && closing.is_none() {
+                let _ = child.sender.try_send(Request::ReturnFocus);
+            }
+            // A resize never overtakes the presentation it applies to.
+            if outgoing.is_none()
+                && let Some(rect) = outgoing_resize.take()
+            {
+                match child.sender.try_send(Request::Resize(rect)) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(_)) => outgoing_resize = Some(rect),
+                    Err(_) => failure = Some("Windows preview helper stopped".into()),
+                }
+            }
             while let Ok(event) = child.receiver.try_recv() {
                 match event {
                     Ok(Event::Heartbeat) => last_event = Instant::now(),
                     Ok(Event::Ready { kind, request_id }) => {
                         last_event = Instant::now();
-                        if let Ok(mut state) = shared.state.lock() {
-                            if state.visible && state.request_id == request_id {
-                                state.kind = Some(kind);
-                            }
+                        // Stale completions from rapid selection changes are dropped.
+                        if request_id == current_request && closing.is_none() {
+                            let native = kind == "native";
+                            let _ =
+                                events.unbounded_send(PreviewEvent::Ready { native, request_id });
+                        }
+                    }
+                    Ok(Event::Key(key)) => {
+                        last_event = Instant::now();
+                        if closing.is_none() {
+                            let _ = events.unbounded_send(PreviewEvent::Key(key));
                         }
                     }
                     Ok(Event::Closed) => {
                         finished = true;
                         break;
-                    }
-                    Ok(Event::Open(path)) => {
-                        let path = PathBuf::from(std::ffi::OsString::from_wide(&path));
-                        if allowed_paths.contains(&path) {
-                            // Launch outside the helper's kill-on-close job. Explorer
-                            // delegates to the registered app, with no command shell.
-                            if let Err(error) = Command::new("explorer.exe").arg(path).spawn() {
-                                let _ = errors
-                                    .unbounded_send(format!("Could not open default app: {error}"));
-                            }
-                        }
                     }
                     Ok(Event::Error(error)) | Err(error) => {
                         failure = Some(error);
@@ -350,13 +406,9 @@ fn supervise(
             if finished {
                 helper = None;
                 outgoing = None;
+                outgoing_resize = None;
                 failure = None;
-                if let Ok(mut state) = shared.state.lock() {
-                    if state.pending.is_none() {
-                        state.visible = false;
-                        state.kind = None;
-                    }
-                }
+                closing = None;
             }
         }
         if closing.is_some_and(|start| start.elapsed() > Duration::from_secs(1)) {
@@ -370,18 +422,17 @@ fn supervise(
         if let Some(error) = failure {
             helper = None;
             outgoing = None;
-            if let Ok(mut state) = shared.state.lock() {
-                if state.pending.is_none() {
-                    state.visible = false;
-                    state.kind = None;
-                }
-            }
-            let _ = errors.unbounded_send(error);
+            outgoing_resize = None;
+            let _ = events.unbounded_send(PreviewEvent::Error(error));
         }
         let Ok(state) = shared.state.lock() else {
             break;
         };
-        if state.pending.is_none() && !state.shutdown {
+        if state.pending.is_none()
+            && state.resize.is_none()
+            && !state.return_focus
+            && !state.shutdown
+        {
             let _ = shared
                 .changed
                 .wait_timeout(state, Duration::from_millis(50));
@@ -392,39 +443,71 @@ fn supervise(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn selection_updates_are_bounded_coalesced_and_close_cancels_pending_open() {
+    fn shared() -> (Arc<Shared>, Preview) {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             changed: Condvar::new(),
         });
-        let viewer = Preview {
+        let preview = Preview {
             shared: shared.clone(),
         };
-        for _ in 0..100 {
-            viewer.show(
-                (0..1000)
-                    .map(|n| PathBuf::from(format!("C:\\{n}.txt")))
-                    .collect(),
-                999,
-            );
+        (shared, preview)
+    }
+    fn rect(width: i32) -> Rect {
+        Rect {
+            x: 0,
+            y: 48,
+            width,
+            height: 300,
+        }
+    }
+    #[test]
+    fn presentations_coalesce_and_close_cancels_a_pending_open() {
+        let (shared, preview) = shared();
+        for n in 0..100 {
+            preview.present(PathBuf::from(format!("C:\\{n}.txt")), 7, rect(400), 0);
         }
         {
             let state = shared.state.lock().unwrap();
-            let Some(Control::Present(paths, selected, id)) = &state.pending else {
+            let Some(Control::Present {
+                path, request_id, ..
+            }) = &state.pending
+            else {
                 panic!("missing presentation");
             };
-            assert_eq!(paths.len(), protocol::MAX_PATHS);
-            assert_eq!(paths[*selected], PathBuf::from("C:\\999.txt"));
-            assert_eq!(*id, 100);
+            assert_eq!(path, &PathBuf::from("C:\\99.txt"));
+            assert_eq!(*request_id, 100);
         }
-        viewer.close();
-        assert!(!viewer.is_visible());
+        preview.close();
         assert!(matches!(
             shared.state.lock().unwrap().pending,
             Some(Control::Close)
         ));
-        drop(viewer);
+        drop(preview);
         assert!(shared.state.lock().unwrap().shutdown);
+    }
+    #[test]
+    fn a_resize_folds_into_its_pending_presentation() {
+        let (shared, preview) = shared();
+        preview.present(PathBuf::from("C:\\a.txt"), 7, rect(400), 0);
+        preview.resize(rect(500));
+        preview.resize(rect(600));
+        let (control, resize) = shared.state.lock().unwrap().take();
+        let Some(Control::Present { rect: folded, .. }) = control else {
+            panic!("missing presentation");
+        };
+        assert_eq!(folded.width, 600);
+        assert_eq!(resize, None);
+        // Without a pending presentation the latest resize goes on its own.
+        preview.resize(rect(700));
+        let (control, resize) = shared.state.lock().unwrap().take();
+        assert!(control.is_none());
+        assert_eq!(resize.map(|r| r.width), Some(700));
+        // Hiding discards geometry for a surface about to disappear.
+        preview.resize(rect(800));
+        preview.hide();
+        let (control, resize) = shared.state.lock().unwrap().take();
+        assert!(matches!(control, Some(Control::Hide)));
+        assert_eq!(resize, None);
     }
 }
