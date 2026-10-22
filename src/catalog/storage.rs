@@ -235,3 +235,175 @@ pub(crate) fn release_builder_memory() {
         libc::malloc_trim(0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn write_segment(path: &Path, blocks: &[&[u8]]) -> Vec<Span> {
+        let mut writer = Writer::create(path).unwrap();
+        let spans = blocks.iter().map(|b| writer.block(b).unwrap()).collect();
+        writer.finish(&serde_json::json!({ "k": 7 })).unwrap();
+        spans
+    }
+    fn open(path: &Path) -> Reader {
+        unsafe { Reader::open(path) }.unwrap()
+    }
+    fn open_err(path: &Path) -> String {
+        match unsafe { Reader::open(path) } {
+            Ok(_) => panic!("segment unexpectedly opened"),
+            Err(err) => format!("{err:#}"),
+        }
+    }
+    fn load_err<T: Pod>(reader: &Reader, offset: u64, len: u64) -> String {
+        format!(
+            "{:#}",
+            Packed::<T>::load(reader, Span { offset, len }).unwrap_err()
+        )
+    }
+    /// Writes a container by hand: header with `tag` and the metadata span,
+    /// `body` from byte 64, then a valid SHA-256 trailer over everything.
+    fn write_raw(path: &Path, tag: &[u8; 8], metadata: Span, body: &[u8]) {
+        let mut bytes = vec![0u8; 64];
+        bytes[..8].copy_from_slice(tag);
+        bytes[8..16].copy_from_slice(&metadata.offset.to_le_bytes());
+        bytes[16..24].copy_from_slice(&metadata.len.to_le_bytes());
+        bytes.extend_from_slice(body);
+        let digest = Sha256::digest(&bytes);
+        bytes.extend_from_slice(&digest);
+        std::fs::write(path, bytes).unwrap();
+    }
+    fn segment_path(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("segment.fx2")
+    }
+
+    #[test]
+    fn roundtrip_columns_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        let small: Vec<u32> = vec![1, 2, 3];
+        let wide: Vec<u64> = vec![u64::MAX, 0, 42, 7];
+        let mut writer = Writer::create(&path).unwrap();
+        let a = Packed::from(small.clone()).save(&mut writer).unwrap();
+        let odd = writer.block(&[9; 5]).unwrap();
+        let b = Packed::from(wide.clone()).save(&mut writer).unwrap();
+        writer
+            .finish(&serde_json::json!({ "name": "seg" }))
+            .unwrap();
+        for span in [a, odd, b] {
+            assert!(
+                span.offset >= 64 && span.offset.is_multiple_of(64),
+                "{span:?}"
+            );
+        }
+        assert_eq!((odd.offset, odd.len), (a.offset + 64, 5));
+        assert_eq!(b.offset, odd.offset + 64);
+
+        let reader = open(&path);
+        let meta: serde_json::Value = reader.metadata().unwrap();
+        assert_eq!(meta, serde_json::json!({ "name": "seg" }));
+        assert_eq!(&*Packed::<u32>::load(&reader, a).unwrap(), &small[..]);
+        assert_eq!(&*Packed::<u64>::load(&reader, b).unwrap(), &wide[..]);
+    }
+
+    #[test]
+    fn empty_column_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        let mut writer = Writer::create(&path).unwrap();
+        let span = Packed::<u64>::default().save(&mut writer).unwrap();
+        writer.finish(&()).unwrap();
+        assert_eq!((span.offset, span.len), (64, 0));
+        let reader = open(&path);
+        assert!(Packed::<u64>::load(&reader, span).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_refuses_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        std::fs::write(&path, b"existing").unwrap();
+        assert!(Writer::create(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn open_rejects_truncated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        std::fs::write(&path, [0u8; 95]).unwrap();
+        assert!(open_err(&path).contains("truncated segment"));
+    }
+
+    #[test]
+    fn open_rejects_checksum_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        write_segment(&path, &[&[1, 2, 3, 4]]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[64] ^= 0xff;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(open_err(&path).contains("segment checksum mismatch"));
+    }
+
+    #[test]
+    fn open_rejects_other_format_tag_with_valid_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        let metadata = Span { offset: 64, len: 2 };
+        write_raw(&path, b"FXSEG003", metadata, b"{}");
+        assert!(open_err(&path).contains("unsupported segment version"));
+        // The same container with the current tag opens, so only the tag differed.
+        write_raw(&path, SEGMENT_FORMAT, metadata, b"{}");
+        open(&path);
+    }
+
+    #[test]
+    fn open_rejects_metadata_span_not_ending_at_data_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        let short = Span { offset: 64, len: 1 };
+        write_raw(&path, SEGMENT_FORMAT, short, b"{}");
+        assert!(open_err(&path).contains("invalid metadata span"));
+        let in_header = Span {
+            offset: 32,
+            len: 34,
+        };
+        write_raw(&path, SEGMENT_FORMAT, in_header, b"{}");
+        assert!(open_err(&path).contains("invalid metadata span"));
+        let overflow = Span {
+            offset: 64,
+            len: u64::MAX,
+        };
+        write_raw(&path, SEGMENT_FORMAT, overflow, b"{}");
+        assert!(open_err(&path).contains("invalid metadata span"));
+    }
+
+    #[test]
+    fn load_rejects_bad_spans() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = segment_path(&dir);
+        let spans = write_segment(&path, &[&[0u8; 16]]);
+        assert_eq!((spans[0].offset, spans[0].len), (64, 16));
+        let reader = open(&path);
+        assert!(load_err::<u32>(&reader, u64::MAX, 2).contains("span overflow"));
+        assert!(load_err::<u32>(&reader, 0, 16).contains("invalid segment span"));
+        assert!(load_err::<u32>(&reader, 65, 4).contains("invalid segment span"));
+        let past_end = reader.data_end - 64 + 1;
+        assert!(load_err::<u32>(&reader, 64, past_end).contains("invalid segment span"));
+        assert!(load_err::<u32>(&reader, 64, 3).contains("invalid column alignment or width"));
+        assert!(load_err::<u64>(&reader, 64, 12).contains("invalid column alignment or width"));
+        // The boundary itself is accepted.
+        assert!(
+            Packed::<u8>::load(
+                &reader,
+                Span {
+                    offset: 64,
+                    len: reader.data_end - 64,
+                }
+            )
+            .is_ok()
+        );
+    }
+}
