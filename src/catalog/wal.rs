@@ -109,3 +109,112 @@ impl Wal {
         Ok(())
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const LIMIT: usize = 32 * 1024 * 1024;
+    fn tx(sequence: u64) -> Transaction {
+        Transaction {
+            sequence,
+            deltas: vec![Delta::Delete(sequence)],
+            next_id: sequence + 1,
+        }
+    }
+    fn sequences(entries: &[Transaction]) -> Vec<u64> {
+        entries.iter().map(|tx| tx.sequence).collect()
+    }
+    fn wal_with(path: &Path, seqs: impl IntoIterator<Item = u64>) -> Wal {
+        let (mut wal, entries) = Wal::open(path).unwrap();
+        assert!(entries.is_empty());
+        for seq in seqs {
+            wal.append(&tx(seq)).unwrap();
+        }
+        wal
+    }
+    #[test]
+    fn open_rejects_sequence_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+        drop(wal_with(&path, [1, 3]));
+        let err = Wal::open(&path).err().unwrap();
+        assert!(err.to_string().contains("WAL sequence gap"), "{err}");
+    }
+    #[test]
+    fn open_rejects_oversized_frame_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+        drop(wal_with(&path, [1]));
+        let mut bytes = std::fs::read(&path).unwrap();
+        // A complete header claiming more than the limit must error before
+        // any payload buffer is allocated, even with no payload following it.
+        bytes.extend_from_slice(&(LIMIT as u32 + 1).to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let err = Wal::open(&path).err().unwrap();
+        assert!(err.to_string().contains("WAL frame exceeds limit"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+    #[test]
+    fn append_rejects_oversized_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+        let mut wal = wal_with(&path, [1]);
+        let before = std::fs::read(&path).unwrap();
+        let huge = Transaction {
+            sequence: 2,
+            deltas: vec![Delta::Roots(vec![Root {
+                id: 1,
+                path: "a".repeat(12 * 1024 * 1024).into(),
+                device: 1,
+            }])],
+            next_id: 3,
+        };
+        assert!(serde_json::to_vec(&huge).unwrap().len() > LIMIT);
+        let err = wal.append(&huge).err().unwrap();
+        assert!(
+            err.to_string().contains("WAL transaction too large"),
+            "{err}"
+        );
+        drop(wal);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let (_, entries) = Wal::open(&path).unwrap();
+        assert_eq!(sequences(&entries), [1]);
+    }
+    #[test]
+    fn append_after_checkpoint_lands_in_replaced_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+        let mut wal = wal_with(&path, 1..=5);
+        wal.checkpoint(3).unwrap();
+        wal.append(&tx(6)).unwrap();
+        drop(wal);
+        let (_, entries) = Wal::open(&path).unwrap();
+        assert_eq!(sequences(&entries), [4, 5, 6]);
+        assert!(!path.with_extension("checkpoint").exists());
+    }
+    #[test]
+    fn checkpoint_past_last_sequence_empties_log_and_accepts_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+        let mut wal = wal_with(&path, 1..=3);
+        wal.checkpoint(u64::MAX).unwrap();
+        drop(wal);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        let (mut wal, entries) = Wal::open(&path).unwrap();
+        assert!(entries.is_empty());
+        wal.append(&tx(4)).unwrap();
+        drop(wal);
+        let (_, entries) = Wal::open(&path).unwrap();
+        assert_eq!(sequences(&entries), [4]);
+    }
+    #[test]
+    fn open_creates_missing_file_and_accepts_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal");
+        let (wal, entries) = Wal::open(&path).unwrap();
+        assert!(entries.is_empty());
+        drop(wal);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        let (_, entries) = Wal::open(&path).unwrap();
+        assert!(entries.is_empty());
+    }
+}
