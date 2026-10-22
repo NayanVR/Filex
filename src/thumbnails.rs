@@ -21,6 +21,8 @@ use gpui::RenderImage;
 pub const THUMBNAIL_EDGE: u32 = 128;
 /// Longest edge of a Space-bar preview image: a 4K window's width, so a
 /// maximised viewer stays sharp without holding full camera resolution.
+// Only the Windows preview window draws images itself so far.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const PREVIEW_EDGE: u32 = 3840;
 
 /// At capacity, completed entries are cleared; active jobs keep their slots.
@@ -89,6 +91,7 @@ pub fn decode_thumbnail(path: &Path) -> Result<Arc<RenderImage>> {
 /// Decode `path` for the full preview window, within the same input and
 /// allocation limits as thumbnails. Blocking — call on the background
 /// executor.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn decode_preview(path: &Path) -> Result<Arc<RenderImage>> {
     decoder_result(|| decode_image(path, PREVIEW_EDGE, false))
 }
