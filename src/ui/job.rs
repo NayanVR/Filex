@@ -7,13 +7,19 @@ use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, relative
 use super::theme::Theme;
 
 /// Container stacking one [`job_row`] per active job.
+/// A small card on the shell under the canvas, inset to line up with it.
 pub fn jobs_bar(theme: &Theme) -> Div {
     div()
         .flex()
         .flex_col()
-        .border_t_1()
+        .mx_2()
+        .mt_2()
+        .rounded_lg()
+        .border_1()
         .border_color(theme.border)
-        .bg(theme.panel)
+        .bg(theme.bg)
+        .shadow_xs()
+        .overflow_hidden()
 }
 
 /// One job: label on the left, progress bar filling the middle.

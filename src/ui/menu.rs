@@ -123,7 +123,7 @@ pub fn item(
     label: impl Into<SharedString>,
     danger: bool,
 ) -> Stateful<Div> {
-    let selected = theme.selected;
+    let hover = theme.hover;
     div()
         .id(id)
         .mx_1()
@@ -133,7 +133,7 @@ pub fn item(
         .cursor_pointer()
         .text_sm()
         .text_color(if danger { theme.warn } else { theme.text })
-        .hover(move |s| s.bg(selected))
+        .hover(move |s| s.bg(hover))
         .child(label.into())
 }
 
@@ -150,10 +150,17 @@ pub fn model_row(
     highlighted: bool,
 ) -> Stateful<Div> {
     let color = if item.danger { theme.warn } else { theme.text };
+    // Glyphs a step quieter than the label (Fluent menus do the same),
+    // except a destructive row, which stays warn throughout.
+    let glyph = if item.danger {
+        theme.warn
+    } else {
+        theme.text_dim
+    };
     let lead = if item.checked {
         Some(ui_icon("icons/check.svg", theme.accent))
     } else {
-        item.icon.map(|icon| ui_icon(icon, color))
+        item.icon.map(|icon| ui_icon(icon, glyph))
     };
     div()
         .id(id)
@@ -167,7 +174,7 @@ pub fn model_row(
         .cursor_pointer()
         .text_sm()
         .text_color(color)
-        .when(highlighted, |row| row.bg(theme.selected))
+        .when(highlighted, |row| row.bg(theme.hover))
         .child(
             div()
                 .w(px(16.))
@@ -225,7 +232,7 @@ pub fn icon_button(
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .when(highlighted, |button| button.bg(theme.selected))
+        .when(highlighted, |button| button.bg(theme.hover))
         .tooltip(super::tooltip::text_tooltip(item.label.to_string(), *theme))
         .children(item.icon.map(|icon| ui_icon(icon, color).size(px(16.))))
 }
@@ -234,12 +241,14 @@ pub fn icon_button(
 pub fn separator(theme: &Theme) -> Div {
     div()
         .h(px(SEPARATOR_HEIGHT))
+        .mx_3()
         .flex()
         .items_center()
         .child(div().w_full().h(px(1.)).bg(theme.border))
 }
 
-/// Dim, non-interactive heading (e.g. the file name the menu is for).
+/// Non-interactive heading (e.g. the file name the menu is for): small
+/// and medium-weight so it labels the menu without competing with rows.
 pub fn heading(theme: &Theme, label: impl Into<SharedString>) -> Div {
     div()
         .h(px(HEADING_HEIGHT))
@@ -248,8 +257,9 @@ pub fn heading(theme: &Theme, label: impl Into<SharedString>) -> Div {
         .flex()
         .items_center()
         .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_dim)
-        .child(div().truncate().child(label.into()))
+        .child(div().min_w_0().truncate().child(label.into()))
 }
 
 #[cfg(test)]

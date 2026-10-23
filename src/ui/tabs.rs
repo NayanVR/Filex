@@ -11,48 +11,60 @@ use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
 
 use super::theme::Theme;
 
-/// Height of the tab strip.
-pub const TAB_BAR_HEIGHT: f32 = 46.;
+/// Height of the tab strip (also the titlebar on Windows).
+pub const TAB_BAR_HEIGHT: f32 = 42.;
 
 /// The bar container. Children are the left tab group (tabs +
-/// the new-tab button) and the right icon group, separated by a
-/// flex spacer.
+/// the new-tab button), a draggable spacer, and the right icon group.
 ///
-/// This is now the topmost bar, so on macOS it — not the nav bar below —
-/// carries the inset traffic lights (the system titlebar is transparent);
-/// it pads left to clear them.
-pub fn tab_bar(theme: &Theme) -> Div {
+/// This is the topmost bar, so on macOS it carries the inset traffic
+/// lights (the system titlebar is transparent) and pads left to clear
+/// them; on Windows it is the titlebar and the caption buttons sit flush
+/// at its right edge. It shares the shell surface with the nav bar below
+/// — no divider, no fill of its own (the root paints the shell) — so the
+/// chrome reads as one piece.
+pub fn tab_bar() -> Div {
     let bar = div()
         .flex()
         .items_center()
         .gap_1()
         .h(px(TAB_BAR_HEIGHT))
         .flex_none()
-        .px_2()
-        .border_b_1()
-        .border_color(theme.border)
-        .bg(theme.panel);
+        .pl_2();
     // Clear the inset traffic lights: three buttons from x=12 spanning ~52px.
     #[cfg(target_os = "macos")]
     let bar = bar.pl(px(76.));
     bar
 }
 
-/// The left group that scrolls/clips its tabs without pushing the icon
-/// group off the bar's right edge.
+/// The left group: tabs plus the new-tab button. Shrinks (clipping its
+/// tabs) before it pushes the icon group off the bar, but doesn't grow —
+/// the space after it is the window's drag handle ([`drag_region`]).
 pub fn tab_group() -> Div {
     div()
         .flex()
-        .flex_1()
+        // Shrinks by default (flex-shrink: 1); `min_w_0` lets it go below
+        // its content width so tabs clip rather than overflow.
         .min_w_0()
         .items_center()
-        .gap(px(2.))
+        .gap_1()
         .overflow_hidden()
 }
 
-/// One tab: the active one gets the window background (reads as "raised
-/// into" the content), the rest sit flat on the panel with hover
-/// feedback. Callers add the label + close control and chain handlers.
+/// The empty run of the bar after the tabs. Tagged as the window's drag
+/// area, so where the system titlebar is hidden it moves the window and
+/// double-click maximizes (the OS handles both via the caption hit-test).
+pub fn drag_region() -> Div {
+    div()
+        .flex_1()
+        .h_full()
+        .window_control_area(gpui::WindowControlArea::Drag)
+}
+
+/// One tab: the active one is raised — canvas fill and a soft shadow, so
+/// it reads as the page the content below belongs to; the rest sit flat
+/// on the shell with hover feedback. Callers add the label + close
+/// control and chain handlers.
 pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
     let hover = theme.hover;
     let base = div()
@@ -61,15 +73,19 @@ pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Di
         .items_center()
         .gap_2()
         .h(px(30.))
-        .w(px(160.))
+        .w(px(180.))
         .min_w(px(64.))
-        .max_w(px(180.))
-        .px_3()
+        .max_w(px(200.))
+        .pl_3()
+        .pr_1()
         .rounded_lg()
         .cursor_pointer()
         .overflow_hidden();
     if active {
-        base.bg(theme.bg).text_color(theme.text)
+        base.bg(theme.bg)
+            .shadow_xs()
+            .text_color(theme.text)
+            .font_weight(gpui::FontWeight::MEDIUM)
     } else {
         base.text_color(theme.text_dim).hover(move |s| s.bg(hover))
     }

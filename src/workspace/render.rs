@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// Opacity of a toolbar glyph whose action isn't available right now.
+const DISABLED_ALPHA: f32 = 0.45;
+
 /// What a top-bar navigation button does. An enum rather than four
 /// near-identical `.child(toolbar_button(..).on_click(..))` blocks, so the
 /// buttons are a table and the wiring is written once.
@@ -26,6 +29,18 @@ impl NavAction {
 }
 
 impl Workspace {
+    /// A tooltip for a toolbar control: `label` plus the current binding
+    /// of shortcut `id` (from the live, user-remappable table).
+    pub(super) fn action_tip(
+        &self,
+        label: &'static str,
+        id: &str,
+        cx: &App,
+    ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+        let keys = shortcuts::hint(id, &self.settings.read(cx).settings().keyboard_shortcuts);
+        ui::tooltip::shortcut_tooltip(label, keys, *cx.theme())
+    }
+
     /// Flip the browse layout between list and grid (persisted).
     pub(super) fn toggle_view(&mut self, cx: &mut Context<Self>) {
         self.settings.update(cx, |store, cx| {
@@ -61,11 +76,14 @@ impl Workspace {
             !self.history_back.is_empty(),
             !self.history_forward.is_empty(),
         );
+        // Disabled keeps the glyph's shape legible (WCAG asks nothing of
+        // disabled controls, but a near-invisible arrow reads as missing):
+        // the dim ink at reduced opacity, not the border colour.
         let dim = |enabled: bool| {
             if enabled {
                 theme.text_dim
             } else {
-                theme.border
+                ui::theme::fixed::with_alpha(theme.text_dim, DISABLED_ALPHA)
             }
         };
         // Left: the navigation controls followed by the path, taking the
@@ -101,14 +119,14 @@ impl Workspace {
                     ),
                 ]
                 .map(|(id, icon, color, action)| {
-                    let label = match action {
-                        NavAction::Back => "Go back",
-                        NavAction::Forward => "Go forward",
-                        NavAction::Up => "Parent folder",
-                        NavAction::Reload => "Refresh folder",
+                    let (label, shortcut) = match action {
+                        NavAction::Back => ("Go back", "back"),
+                        NavAction::Forward => ("Go forward", "forward"),
+                        NavAction::Up => ("Parent folder", "parent"),
+                        NavAction::Reload => ("Refresh", "refresh"),
                     };
                     ui::top_bar::toolbar_button(&theme, id, icon, color)
-                        .tooltip(ui::tooltip::text_tooltip(label, theme))
+                        .tooltip(self.action_tip(label, shortcut, cx))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             action.run(this, cx)
                         }))
@@ -126,58 +144,60 @@ impl Workspace {
         // box's own `max_w` still caps it. The nav controls to the left
         // take the remaining space and shrink first on a narrow window.
         let search = div().flex_none().w(px(460.)).flex().justify_end().child(
-            ui::top_bar::search_box(&theme, !self.query.is_empty() || self.in_magic_view())
-                .child(
-                    ui::top_bar::scope_selector(
-                        &theme,
-                        self.search_scope.label(),
-                        self.scope_menu.is_some(),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            this.open_scope_menu(event.position, window, cx);
-                        }),
+            ui::top_bar::search_box(
+                &theme,
+                self.search_input.focus_handle(cx).is_focused(window)
+                    || !self.query.is_empty()
+                    || self.in_magic_view(),
+            )
+            .child(
+                ui::top_bar::scope_selector(
+                    &theme,
+                    self.search_scope.label(),
+                    self.scope_menu.is_some(),
+                )
+                .tooltip(ui::tooltip::text_tooltip("Where to search", theme))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        this.open_scope_menu(event.position, window, cx);
+                    }),
+                ),
+            )
+            .child(div().flex_1().min_w_0().child(self.search_input.clone()))
+            // The active search shortcut. Hidden once a
+            // query is present so it never crowds the typed text.
+            .children(self.query.is_empty().then(|| {
+                ui::kbd::keycap(
+                    &theme,
+                    shortcuts::hint(
+                        "search",
+                        &self.settings.read(cx).settings().keyboard_shortcuts,
                     ),
                 )
-                .child(div().flex_1().min_w_0().child(self.search_input.clone()))
-                // The active search shortcut. Hidden once a
-                // query is present so it never crowds the typed text.
-                .children(self.query.is_empty().then(|| {
-                    ui::kbd::keycap(
-                        &theme,
-                        shortcuts::hint(
-                            "search",
-                            &self.settings.read(cx).settings().keyboard_shortcuts,
-                        ),
-                    )
-                }))
-                .children((!self.query.is_empty()).then(|| {
-                    ui::top_bar::toolbar_button(
-                        &theme,
-                        "clear-search",
-                        "icons/x.svg",
-                        theme.text_dim,
-                    )
+            }))
+            .children((!self.query.is_empty()).then(|| {
+                ui::top_bar::toolbar_button(&theme, "clear-search", "icons/x.svg", theme.text_dim)
                     .size(px(22.))
-                    .tooltip(ui::tooltip::text_tooltip("Clear search", theme))
-                    .on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.clear_search(cx);
-                            this.focus_search(window, cx);
-                        },
+                    .tooltip(ui::tooltip::shortcut_tooltip("Clear search", "Esc", theme))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.clear_search(cx);
+                        this.focus_search(window, cx);
+                    }))
+            }))
+            .child(
+                ui::top_bar::magic_toggle(&theme, self.in_magic_view())
+                    .tooltip(ui::tooltip::text_tooltip(
+                        "Magic mode: describe a file action",
+                        theme,
                     ))
-                }))
-                .child(
-                    ui::top_bar::magic_toggle(&theme, self.in_magic_view()).on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.toggle_magic_mode(window, cx);
-                        },
-                    )),
-                ),
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.toggle_magic_mode(window, cx);
+                    })),
+            ),
         );
 
-        ui::top_bar::top_bar(&theme).child(left).child(search)
+        ui::top_bar::top_bar().child(left).child(search)
     }
 
     /// Give the current location and its layout controls one stable home.
@@ -203,7 +223,7 @@ impl Workspace {
         } else if this_pc {
             this_pc::drive_count(self.drives.len()).into()
         } else if browsing {
-            format!("{} items", self.entries.len()).into()
+            ui::status_bar::item_count(self.entries.len()).into()
         } else {
             format!(
                 "{} results · {}",
@@ -220,9 +240,7 @@ impl Workspace {
                 .gap_0p5()
                 .p_0p5()
                 .rounded_lg()
-                .bg(theme.panel)
-                .border_1()
-                .border_color(theme.border);
+                .bg(theme.field);
             for (id, icon, label, view) in [
                 ("view-list", "icons/list.svg", "List view", ViewMode::List),
                 (
@@ -240,8 +258,8 @@ impl Workspace {
                         icon,
                         if active { theme.accent } else { theme.text_dim },
                     )
-                    .when(active, |s| s.bg(theme.bg))
-                    .tooltip(ui::tooltip::text_tooltip(label, theme))
+                    .when(active, |s| s.bg(theme.bg).shadow_xs())
+                    .tooltip(self.action_tip(label, "view", cx))
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _window, cx| {
                             this.settings
@@ -279,7 +297,7 @@ impl Workspace {
                     },
                 )
                 .when(settings.preview_open, |s| s.bg(theme.selected))
-                .tooltip(ui::tooltip::text_tooltip("Toggle details", theme))
+                .tooltip(self.action_tip("Toggle details", "preview", cx))
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| this.toggle_preview(cx))),
             );
         }
@@ -453,14 +471,17 @@ impl Workspace {
         } else if !self.active_selection().is_empty() {
             let (n, total) = (self.active_selection().len(), self.active_list_len());
             // Combined size only in browse — search rows carry no size.
-            if self.query.is_empty() {
-                let bytes: u64 = self
-                    .selection
-                    .iter()
-                    .filter_map(|ix| self.entries.get(ix))
-                    .filter(|entry| !entry.is_dir)
-                    .map(|entry| entry.size)
-                    .sum();
+            // Folders carry no size of their own, so an all-folder
+            // selection shows just the count rather than "· 0 B".
+            let files: Vec<u64> = self
+                .selection
+                .iter()
+                .filter_map(|ix| self.entries.get(ix))
+                .filter(|entry| !entry.is_dir)
+                .map(|entry| entry.size)
+                .collect();
+            if self.query.is_empty() && !files.is_empty() {
+                let bytes: u64 = files.iter().sum();
                 format!("{n} of {total} selected · {}", format_size(bytes)).into()
             } else {
                 format!("{n} of {total} selected").into()
@@ -468,7 +489,7 @@ impl Workspace {
         } else if self.query.is_empty() && self.at_this_pc() {
             this_pc::drive_count(self.drives.len()).into()
         } else if self.query.is_empty() {
-            format!("{} items", self.entries.len()).into()
+            ui::status_bar::item_count(self.entries.len()).into()
         } else {
             format!(
                 "{} result{}",
@@ -477,12 +498,21 @@ impl Workspace {
             )
             .into()
         };
-        ui::status_bar::status_bar(theme, left, self.index_status_text())
+        ui::status_bar::status_bar(
+            theme,
+            left,
+            self.index_status_text(),
+            self.index_status_color(theme),
+        )
     }
 
     /// The topmost bar: location tabs, new tab, shortcuts, and settings.
     /// Layout and preview controls live beside the content heading.
-    pub(super) fn render_tab_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_tab_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = *cx.theme();
         // Only offer a close control when closing is meaningful (more than
         // one tab); a lone tab reads as the window's title, not a chip to
@@ -512,6 +542,7 @@ impl Workspace {
                         theme.text_dim,
                         ui::button::IconSize::Small,
                     )
+                    .tooltip(self.action_tip("Close tab", "close_tab", cx))
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _window, cx| {
                             cx.stop_propagation();
@@ -541,30 +572,73 @@ impl Workspace {
                 theme.text_dim,
                 ui::button::IconSize::Medium,
             )
+            .tooltip(self.action_tip("New tab", "new_tab", cx))
             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.open_tab(cwd.clone(), cx);
             })),
         );
 
-        let icons = div().flex().flex_none().items_center().gap_1().child(
-            ui::top_bar::toolbar_button(
-                &theme,
-                "settings",
-                "icons/settings.svg",
-                if self.settings_open {
-                    theme.accent
-                } else {
-                    theme.text_dim
-                },
+        let icons = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            // Feedback: opens the in-app dialog (sent to Sentry).
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "feedback",
+                    "icons/message-square.svg",
+                    theme.text_dim,
+                )
+                .tooltip(ui::tooltip::text_tooltip(
+                    "Send feedback or report an issue",
+                    theme,
+                ))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_feedback(window, cx);
+                })),
             )
-            .on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_settings(window, cx)),
-            ),
-        );
+            .child(
+                ui::top_bar::toolbar_button(
+                    &theme,
+                    "settings",
+                    "icons/settings.svg",
+                    if self.settings_open {
+                        theme.accent
+                    } else {
+                        theme.text_dim
+                    },
+                )
+                .tooltip(self.action_tip("Settings", "settings", cx))
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.toggle_settings(window, cx)
+                    }),
+                ),
+            );
 
-        ui::tabs::tab_bar(&theme)
+        // The app mark leads the strip wherever there are no traffic
+        // lights to sit there instead.
+        let mark = (!cfg!(target_os = "macos")).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .px_1()
+                .child(ui::icon::app_icon(&theme, 18.))
+        });
+        ui::tabs::tab_bar()
+            .children(mark)
             .child(tabs)
+            .child(ui::tabs::drag_region())
             .child(icons)
+            .children(
+                platform::draws_own_caption()
+                    .then(|| ui::window_controls::caption_buttons(&theme, window.is_maximized())),
+            )
+            // Without our own caption the icon group needs its own inset.
+            .when(!platform::draws_own_caption(), |bar| bar.pr_2())
             .into_any_element()
     }
 }
@@ -578,6 +652,11 @@ impl Render for Workspace {
         let reveal = self.reveal_time(window);
         let searching = !self.query.is_empty();
         let theme = *cx.theme();
+        let preview_open = self.settings.read(cx).settings().preview_open;
+        self.preview_frac = self.preview_motion.fraction(preview_open, window);
+        if self.settings_open {
+            self.settings_scroll.tick(window);
+        }
         div()
             .track_focus(&self.focus_handle)
             // Anchors the `!SearchInput` key bindings: single-key
@@ -635,6 +714,7 @@ impl Render for Workspace {
             // cmd-w closes the active tab; the last tab closes the window.
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 if this.tabs.len() <= 1 {
+                    tracing::info!("closing the window: last tab closed (Close Tab)");
                     window.remove_window();
                 } else {
                     this.close_tab(this.active_tab, cx);
@@ -701,13 +781,29 @@ impl Render for Workspace {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.handle_key(event, window, cx);
             }))
+            // A filex drag that leaves the window becomes an OS file drag.
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<DragItems>, window, cx| {
+                    if !platform::hands_off_drags() {
+                        return;
+                    }
+                    let paths = event.drag(cx).paths.clone();
+                    if platform::pointer_left_app(window, event.event.position) {
+                        this.hand_off_drag(paths, window, cx);
+                    } else {
+                        this.drag_in_flight = Some(paths);
+                    }
+                },
+            ))
             .flex()
             .flex_col()
             .size_full()
             .font_family(ui::fonts::UI_FONT_FAMILY)
-            .bg(theme.bg)
+            // The shell: every bar and the sidebar sit on this one surface;
+            // the content canvas below is raised on top of it.
+            .bg(theme.panel)
             .text_color(theme.text)
-            .child(self.render_tab_bar(cx))
+            .child(self.render_tab_bar(window, cx))
             .child(self.render_top_bar(window, cx))
             .children(self.path_error.as_ref().map(|error| {
                 div()
@@ -716,8 +812,7 @@ impl Render for Workspace {
                     .items_center()
                     .gap_2()
                     .px_4()
-                    .py_2()
-                    .bg(theme.panel)
+                    .pb_2()
                     .text_xs()
                     .text_color(theme.warn)
                     .child(ui::icon::ui_icon("icons/triangle-alert.svg", theme.warn).size(px(14.)))
@@ -735,25 +830,42 @@ impl Render for Workspace {
                     })
                     .child(self.render_sidebar(cx))
                     .child(
+                        // The canvas: the content heading, the active pane
+                        // and the details panel on one raised, rounded
+                        // surface, inset from the window edge.
                         div()
                             .flex()
-                            .flex_col()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            .child(self.render_content_header(cx))
-                            .child(if self.in_magic_view() {
-                                self.render_magic_pane(cx)
-                            } else if searching {
-                                self.render_search_pane(cx)
-                            } else {
-                                self.render_browse_pane(window, cx)
-                            }),
-                    )
-                    .children(
-                        (!self.in_magic_view())
-                            .then(|| self.render_details_panel(window, cx))
-                            .flatten(),
+                            .mr_2()
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.bg)
+                            .shadow(ui::soft_shadow(&theme))
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .child(self.render_content_header(cx))
+                                    .child(if self.in_magic_view() {
+                                        self.render_magic_pane(cx)
+                                    } else if searching {
+                                        self.render_search_pane(cx)
+                                    } else {
+                                        self.render_browse_pane(window, cx)
+                                    }),
+                            )
+                            .children(
+                                (!self.in_magic_view())
+                                    .then(|| self.render_details_panel(window, cx))
+                                    .flatten(),
+                            ),
                     ),
             )
             .children(self.render_jobs(cx))

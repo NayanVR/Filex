@@ -29,7 +29,9 @@ pub fn fitted_width(requested: f32, available: f32) -> f32 {
     clamp_width(requested).min((available - MIN_CONTENT_WIDTH).max(MIN_WIDTH))
 }
 
-/// A scrollable details column with a quiet heading and content background.
+/// A scrollable details column with a quiet heading. No fill of its own:
+/// it sits on the canvas, and painting one would square off the canvas's
+/// rounded right corners (gpui clips children to a box, not a radius).
 pub fn panel(theme: &Theme, width: f32) -> Stateful<Div> {
     div()
         .id("details-panel")
@@ -42,7 +44,6 @@ pub fn panel(theme: &Theme, width: f32) -> Stateful<Div> {
         .gap_3()
         .border_l_1()
         .border_color(theme.border)
-        .bg(theme.bg)
         .overflow_y_scroll()
         .child(section_label(theme, "Details"))
 }
@@ -56,7 +57,7 @@ pub fn preview_box(theme: &Theme) -> Div {
         .w_full()
         .h(px(180.))
         .flex_none()
-        .rounded_lg()
+        .rounded_xl()
         .bg(theme.panel)
         .overflow_hidden()
 }
@@ -102,6 +103,35 @@ pub fn meta_row(
                 .text_right()
                 .text_color(theme.text)
                 .child(div().w_full().line_clamp(3).text_ellipsis().child(value)),
+        )
+}
+
+/// A metadata row for long values (a folder path): the dim label above,
+/// the value below at full width and left-aligned, so it wraps as one
+/// readable block instead of ragged right-aligned fragments.
+pub fn meta_block(
+    theme: &Theme,
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+) -> Stateful<Div> {
+    let label = label.into();
+    let value = value.into();
+    div()
+        .id(label.clone())
+        .tooltip(super::tooltip::text_tooltip(value.clone(), *theme))
+        .flex()
+        .flex_col()
+        .flex_none()
+        .gap_1()
+        .text_xs()
+        .child(div().text_color(theme.text_dim).child(label))
+        .child(
+            div()
+                .w_full()
+                .text_color(theme.text)
+                .line_clamp(3)
+                .text_ellipsis()
+                .child(value),
         )
 }
 

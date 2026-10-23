@@ -23,6 +23,8 @@ app = [
   "windows/Win32_System_LibraryLoader", "windows/Win32_System_Threading", "windows/Win32_UI_Shell",
   "windows/Win32_UI_Shell_PropertiesSystem", "windows/Win32_UI_WindowsAndMessaging",
   "windows/Win32_UI_Input_KeyboardAndMouse",
+  # Drag-out: telling cloaked (other virtual desktop) windows apart.
+  "windows/Win32_Graphics_Dwm",
   # Context menu: the Share sheet (WinRT DataTransferManager) and the
   # Shell's Properties dialog.
   "dep:windows-collections", "windows/ApplicationModel_DataTransfer", "windows/Storage",
@@ -83,6 +85,9 @@ sha2 = "0.10"
 getrandom = "0.2"
 # Semver comparison for the update manifest's version field.
 semver = "1"
+# Local-time calendar labels for Modified/Created ("Yesterday", "Mar 4").
+# Already in the tree via other crates; `clock` reads the local zone.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"

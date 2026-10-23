@@ -262,7 +262,8 @@ impl Workspace {
                 .text_sm()
                 .child(input.clone())
         };
-        Some(
+        Some(ui::modal::present(
+            "feedback-backdrop-in",
             ui::modal::backdrop("feedback-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.cancel_feedback(window, cx);
@@ -297,9 +298,8 @@ impl Workspace {
                                         )),
                                 ),
                         ),
-                )
-                .into_any_element(),
-        )
+                ),
+        ))
     }
 
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -334,15 +334,12 @@ impl Workspace {
             .collect();
             content = content.children(places.into_iter().enumerate().map(
                 |(ix, (icon, label, path))| {
-                    ui::sidebar::sidebar_row(&theme, ("place", ix))
-                        .when(self.query.is_empty() && self.cwd == path, |s| {
-                            s.bg(theme.selected).text_color(theme.accent)
-                        })
-                        .child(ui::icon::ui_icon(icon, theme.text_dim).size(px(16.)))
-                        .child(ui::sidebar::sidebar_label(label))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    let active = self.query.is_empty() && self.cwd == path;
+                    ui::sidebar::sidebar_item(&theme, ("place", ix), icon, label, active).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.navigate(path.clone(), cx);
-                        }))
+                        }),
+                    )
                 },
             ));
         }
@@ -356,22 +353,24 @@ impl Workspace {
                     let label = filex::listing::location_label(&path);
                     let (nav, menu) = (path.clone(), path.clone());
                     let tip = display_path(&path);
-                    ui::sidebar::sidebar_row(&theme, ("favorite", ix))
-                        .when(self.query.is_empty() && self.cwd == path, |s| {
-                            s.bg(theme.selected).text_color(theme.accent)
-                        })
-                        .tooltip(ui::tooltip::text_tooltip(tip, theme))
-                        .child(ui::icon::ui_icon("icons/star.svg", theme.accent).size(px(14.)))
-                        .child(ui::sidebar::sidebar_label(label))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.navigate(nav.clone(), cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                this.open_favorite_menu(menu.clone(), event.position, window, cx);
-                            }),
-                        )
+                    let active = self.query.is_empty() && self.cwd == path;
+                    ui::sidebar::sidebar_item(
+                        &theme,
+                        ("favorite", ix),
+                        "icons/star.svg",
+                        label,
+                        active,
+                    )
+                    .tooltip(ui::tooltip::text_tooltip(tip, theme))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.navigate(nav.clone(), cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_favorite_menu(menu.clone(), event.position, window, cx);
+                        }),
+                    )
                 }));
             }
         }
@@ -386,18 +385,20 @@ impl Workspace {
                         let path = path.to_path_buf();
                         let label = filex::listing::location_label(&path);
                         let tip = display_path(&path);
-                        ui::sidebar::sidebar_row(&theme, ("recent", ix))
-                            .when(self.query.is_empty() && self.cwd == path, |s| {
-                                s.bg(theme.selected).text_color(theme.accent)
-                            })
-                            .tooltip(ui::tooltip::text_tooltip(tip, theme))
-                            .child(
-                                ui::icon::ui_icon("icons/clock.svg", theme.text_dim).size(px(14.)),
-                            )
-                            .child(ui::sidebar::sidebar_label(label))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        let active = self.query.is_empty() && self.cwd == path;
+                        ui::sidebar::sidebar_item(
+                            &theme,
+                            ("recent", ix),
+                            "icons/clock.svg",
+                            label,
+                            active,
+                        )
+                        .tooltip(ui::tooltip::text_tooltip(tip, theme))
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _window, cx| {
                                 this.open_recent(path.clone(), cx);
-                            }))
+                            },
+                        ))
                     }));
                 content = content.child(
                     ui::sidebar::sidebar_row(&theme, "recents-clear")
@@ -472,24 +473,7 @@ impl Workspace {
             }
         }
 
-        let sidebar = ui::sidebar::sidebar_panel(&theme)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .h(px(42.))
-                    .child(ui::icon::app_icon(&theme, 22.))
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("filex"),
-                    ),
-            )
-            .child(content);
+        let sidebar = ui::sidebar::sidebar_panel().child(content);
 
         // The FDA banner stays pinned below the scrollable sections.
         #[cfg(target_os = "macos")]
@@ -508,24 +492,6 @@ impl Workspace {
             sidebar
         };
 
-        // Feedback: opens the in-app dialog (sent to Sentry).
-        sidebar.child(
-            div().flex().flex_none().px_3().py_2().child(
-                ui::button::icon_button(
-                    &theme,
-                    "feedback",
-                    "icons/message-square.svg",
-                    theme.text_dim,
-                    ui::button::IconSize::Medium,
-                )
-                .tooltip(ui::tooltip::text_tooltip(
-                    "Send feedback or report an issue",
-                    theme,
-                ))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.open_feedback(window, cx);
-                })),
-            ),
-        )
+        sidebar
     }
 }

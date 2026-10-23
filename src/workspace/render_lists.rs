@@ -384,14 +384,12 @@ impl Workspace {
         let settings = self.settings.read(cx).settings();
         let size = ui::grid::card_size(settings.grid_zoom);
         let cell = ui::grid::cell_width(size);
-        let preview_w = if settings.preview_open {
-            ui::details::fitted_width(
-                settings.preview_width,
-                f32::from(window.viewport_size().width) - ui::sidebar::SIDEBAR_WIDTH,
-            )
-        } else {
-            0.
-        };
+        // The panel's *current* width, so columns reflow in step with its
+        // slide rather than jumping at the start or end of it.
+        let preview_w = ui::details::fitted_width(
+            settings.preview_width,
+            f32::from(window.viewport_size().width) - ui::sidebar::SIDEBAR_WIDTH,
+        ) * self.preview_frac;
         // Approximate content width: the window minus the sidebar, the
         // open details panel, and the grid's own inset. Off-by-one on the
         // odd frame just reflows.
@@ -460,14 +458,18 @@ impl Workspace {
         let icon_edge = if FileKind::of(&name, is_dir) == FileKind::Image {
             size
         } else {
-            size * 0.72
+            size * 0.8
         };
         let icon = self.render_icon_cell(&name, &path, is_dir, icon_edge, cx);
         let drag = self.drag_items(ix, *theme);
+        let (label, truncated) = ui::grid::card_name(theme, width, &name, cx);
         let card = ui::grid::card(theme, ("card", ix), size, width, is_selected)
-            .tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
+            // The full name only when the label had to cut it.
+            .when(truncated && self.context_menu.is_none(), |card| {
+                card.tooltip(ui::tooltip::text_tooltip(name_tip, *theme))
+            })
             .child(ui::grid::card_icon_area(size).child(icon))
-            .child(ui::grid::card_name(theme, width, &name, cx))
+            .child(label)
             .child(ui::list_row::tabular(
                 div()
                     .flex_none()
@@ -492,6 +494,7 @@ impl Workspace {
             card.on_drag(items, |items, position, _window, cx| {
                 cx.new(|_| items.clone().at(position))
             })
+            .external_drag_payload(|items: &DragItems, _, _| items.external_payload())
         });
         let card = if is_dir {
             self.folder_drop_target(card, path, *theme, cx)
@@ -525,6 +528,7 @@ impl Workspace {
                             .filter(|rename| rename.ix == ix)
                             .map(|rename| rename.input.clone());
                         let is_renaming = rename_input.is_some();
+                        let menu_closed = this.context_menu.is_none();
                         let name_cell = match rename_input {
                             Some(input) => div()
                                 .flex_1()
@@ -544,8 +548,10 @@ impl Workspace {
                         let drag = (!is_renaming).then(|| this.drag_items(ix, theme)).flatten();
                         let row = ui::list_row::list_row(&theme, ix, is_selected)
                             // Full name on hover (helps when it's truncated);
-                            // suppressed mid-rename so it doesn't cover the field.
-                            .when(!is_renaming, |row| {
+                            // suppressed mid-rename so it doesn't cover the
+                            // field, and while a menu is up so it doesn't
+                            // draw over the menu.
+                            .when(!is_renaming && menu_closed, |row| {
                                 row.tooltip(ui::tooltip::text_tooltip(name_tip, theme))
                             })
                             .child(icon)
@@ -558,8 +564,10 @@ impl Workspace {
                             .child(ui::list_row::detail_cell(
                                 &theme,
                                 ui::list_row::SIZE_COL_WIDTH,
+                                // Folders have no size of their own: leave
+                                // the cell empty, as Finder and Explorer do.
                                 if is_dir {
-                                    "—".to_string()
+                                    String::new()
                                 } else {
                                     format_size(size)
                                 },
@@ -582,6 +590,9 @@ impl Workspace {
                             row.on_drag(items, |items, position, _window, cx| {
                                 cx.new(|_| items.clone().at(position))
                             })
+                            .external_drag_payload(
+                                |items: &DragItems, _, _| items.external_payload(),
+                            )
                         });
                         let row = row.when(is_dir, |row| {
                             this.folder_drop_target(row, path.clone(), theme, cx)

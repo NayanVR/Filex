@@ -9,23 +9,54 @@ use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
 
 use super::button::IconSize;
 use super::icon;
-use super::theme::Theme;
+use super::theme::{Theme, fixed};
 
 /// Bar height.
-pub const TOP_BAR_HEIGHT: f32 = 56.;
+pub const TOP_BAR_HEIGHT: f32 = 48.;
 
-/// The bar container; children flow left-to-right.
-pub fn top_bar(theme: &Theme) -> Div {
+/// Height of the path and search fields.
+pub const FIELD_HEIGHT: f32 = 34.;
+
+/// The bar container; children flow left-to-right. Borderless and
+/// unfilled on the shell (the root paints it), continuous with the tab
+/// bar above and the sidebar below.
+pub fn top_bar() -> Div {
     div()
         .flex()
         .items_center()
         .gap_2()
         .h(px(TOP_BAR_HEIGHT))
         .flex_none()
-        .px_4()
-        .border_b_1()
-        .border_color(theme.border)
-        .bg(theme.panel)
+        .px_3()
+}
+
+/// The shared text-field frame (path and search): a filled, outline-free
+/// recess at rest; focus lifts it onto the canvas colour with an accent
+/// ring, and `error` rings it in the warn colour instead. Callers set
+/// the width and add the leading icon and input.
+pub fn field(theme: &Theme, focused: bool, error: bool) -> Div {
+    let ring = if error {
+        Some(theme.warn)
+    } else if focused {
+        Some(theme.accent)
+    } else {
+        None
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(px(FIELD_HEIGHT))
+        .px_3()
+        .rounded_lg()
+        // A transparent border at rest keeps the box the same size when
+        // the ring appears.
+        .border_1()
+        .border_color(ring.unwrap_or(fixed::with_alpha(theme.border, 0.)))
+        .bg(if focused { theme.bg } else { theme.field })
+        .when(focused, |s| s.shadow_xs())
+        .text_sm()
+        .text_color(theme.text)
 }
 
 /// A small icon button (`icon` is an asset path like
@@ -53,10 +84,7 @@ pub fn filter_chip_strip(theme: &Theme) -> Div {
         .items_center()
         .gap_1p5()
         .px_3()
-        .py(px(5.))
-        .bg(theme.panel)
-        .border_b_1()
-        .border_color(theme.border)
+        .pb(px(6.))
         .child(
             div()
                 .flex_none()
@@ -197,23 +225,12 @@ pub fn scope_selector(theme: &Theme, label: &'static str, open: bool) -> Statefu
 }
 
 pub fn search_box(theme: &Theme, active: bool) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
+    field(theme, active, false)
         // Fills its (centered) column but never gets absurdly wide, and
         // stays usable when the window is narrow.
         .w_full()
         .min_w(px(160.))
         .max_w(px(480.))
-        .px_3()
-        .h(px(36.))
-        .rounded_lg()
-        .border_1()
-        .border_color(if active { theme.accent } else { theme.border })
-        .bg(theme.bg)
-        .text_sm()
-        .text_color(theme.text)
         // Belt-and-suspenders: the input scrolls its own text, but this
         // guarantees a long query can never paint past the box edge.
         .overflow_hidden()

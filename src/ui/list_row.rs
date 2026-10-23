@@ -16,7 +16,7 @@ pub fn tabular(mut el: Div) -> Div {
 }
 
 /// Width of the Modified column (rows and header must agree).
-pub const MODIFIED_COL_WIDTH: f32 = 84.;
+pub const MODIFIED_COL_WIDTH: f32 = 112.;
 /// Width of the Size column (rows and header must agree).
 pub const SIZE_COL_WIDTH: f32 = 72.;
 
@@ -42,12 +42,13 @@ pub fn header_row(theme: &Theme, icon_col_width: f32) -> Div {
         .items_center()
         .gap_2()
         .px_3()
-        .h(px(34.))
+        .h(px(32.))
         .flex_none()
         .mb_1()
         .border_b_1()
         .border_color(theme.border)
         .text_xs()
+        .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_dim)
         .child(div().w(px(icon_col_width)).flex_none())
 }
@@ -83,7 +84,7 @@ pub fn header_cell(
         .items_center()
         .gap(px(2.))
         .cursor_pointer()
-        .rounded_sm()
+        .rounded_md()
         .hover(move |s| s.bg(hover))
         .when(active.is_some(), |s| s.text_color(text))
         .child(label.into())

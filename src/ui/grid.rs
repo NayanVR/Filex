@@ -20,7 +20,7 @@ const CARD_PAD: f32 = 8.;
 /// Height reserved under the icon for the (up to 2-line) name plus the
 /// detail line — see [`card_name`]. Fixed so every card is the same
 /// height and a long name can't push into the row below.
-const LABEL_HEIGHT: f32 = 74.;
+const LABEL_HEIGHT: f32 = 72.;
 /// Explicit metrics keep filename measurement and the two rendered lines in sync.
 const NAME_FONT_SIZE: f32 = 12.;
 const NAME_LINE_HEIGHT: f32 = 19.;
@@ -103,19 +103,22 @@ pub fn card(
         // grow the card and spill into the cards below it.
         .h(px(row_height(size) - CARD_GAP))
         .p(px(CARD_PAD))
-        .bg(theme.stripe)
-        .rounded_lg()
+        // No resting fill: a grid of filled tiles reads as a wall of
+        // boxes. Hover and selection supply the shape.
+        .rounded_xl()
         .cursor_pointer()
         .overflow_hidden()
         .when(is_selected, |s| s.bg(theme.selected))
         .when(!is_selected, move |s| s.hover(move |s| s.bg(hover)))
 }
 
-/// The square that holds a card's icon or thumbnail, centered.
+/// The square that holds a card's icon or thumbnail, centered across
+/// and seated at the bottom, so a glyph smaller than the square (folders,
+/// documents) hugs its label instead of floating above a gap.
 pub fn card_icon_area(size: f32) -> Div {
     div()
         .flex()
-        .items_center()
+        .items_end()
         .justify_center()
         .w(px(size))
         .h(px(size))
@@ -125,37 +128,48 @@ pub fn card_icon_area(size: f32) -> Div {
 /// Two independently bounded lines. GPUI 0.2's combined line-clamp/ellipsis
 /// truncates against twice the width before wrapping; a short first word can
 /// leave an over-wide final line whose beginning gets clipped when centered.
-pub fn card_name(theme: &Theme, width: f32, name: &str, cx: &App) -> Div {
+///
+/// Returns the label and whether the name had to be cut (it needs more
+/// than two lines), so callers only add a full-name tooltip when it adds
+/// something. A one-line name takes one line, so the detail line sits
+/// right under it rather than below an empty second line.
+pub fn card_name(theme: &Theme, width: f32, name: &str, cx: &App) -> (Div, bool) {
     let width = px((width - CARD_PAD * 2.).max(1.));
     // Filenames may contain line breaks; treat those as spaces in the label.
     let name = name.replace(['\n', '\r', '\t'], " ");
     let mut wrapper = cx
         .text_system()
         .line_wrapper(font(super::fonts::UI_FONT_FAMILY), px(NAME_FONT_SIZE));
-    let boundary = wrapper
-        .wrap_line(&[LineFragment::text(&name)], width)
-        .next()
-        .map_or(name.len(), |boundary| boundary.ix);
+    let fragments = [LineFragment::text(&name)];
+    let mut boundaries = wrapper.wrap_line(&fragments, width);
+    let boundary = boundaries.next().map_or(name.len(), |boundary| boundary.ix);
+    let truncated = boundaries.next().is_some();
     let (first, second) = split_filename(&name, boundary);
-    div()
+    let lines = if second.is_empty() {
+        vec![first]
+    } else {
+        vec![first, second]
+    };
+    let label = div()
         .flex()
         .flex_col()
         .w(width)
         .flex_none()
-        .h(px(NAME_HEIGHT))
+        .max_h(px(NAME_HEIGHT))
         .text_center()
         .font_family(super::fonts::UI_FONT_FAMILY)
         .text_size(px(NAME_FONT_SIZE))
         .line_height(px(NAME_LINE_HEIGHT))
         .text_color(theme.text)
-        .children([first, second].map(|line| {
+        .children(lines.into_iter().map(|line| {
             div()
                 .w(width)
                 .h(px(NAME_LINE_HEIGHT))
                 .flex_none()
                 .truncate()
                 .child(line.to_owned())
-        }))
+        }));
+    (label, truncated)
 }
 
 /// Keep the remainder intact for end truncation, without dividing a grapheme

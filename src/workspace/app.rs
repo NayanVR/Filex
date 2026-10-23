@@ -35,11 +35,22 @@ pub fn run() {
             // the workspace refines it against the real window appearance as
             // soon as a window exists (see the open-window closure below).
             cx.set_global(Theme::dark());
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_action(|_: &Quit, cx| {
+                tracing::info!("quit requested (Quit action)");
+                cx.quit();
+            });
+            // Every way the app can go away is logged, so "the window
+            // disappeared" can be told apart from a crash (no line at all).
             cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
+                let remaining = cx.windows().len();
+                tracing::info!(remaining, "window closed");
+                if remaining == 0 {
                     cx.quit();
                 }
+            })
+            .detach();
+            cx.on_app_quit(|_| async {
+                tracing::info!("filex exiting");
             })
             .detach();
 
@@ -69,6 +80,18 @@ pub fn run() {
                     workspace.update(cx, |ws, cx| {
                         ws.appearance = window.appearance();
                         ws.apply_theme(cx);
+                    });
+                    // Losing focus mid-drag (Alt+Tab) hands the drag to the
+                    // OS; focus changes log at debug (RUST_LOG=filex=debug).
+                    workspace.update(cx, |_, cx| {
+                        cx.observe_window_activation(window, |ws, window, cx| {
+                            let active = window.is_window_active();
+                            tracing::debug!(active, "window activation");
+                            if !active {
+                                ws.deactivated_mid_drag(window, cx);
+                            }
+                        })
+                        .detach();
                     });
                     window
                         .observe_window_appearance({

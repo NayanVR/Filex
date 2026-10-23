@@ -87,6 +87,16 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("terminal"),
     icon!("arrow-up-down"),
     icon!("clipboard"),
+    icon!("external-link"),
+    icon!("app-window"),
+    icon!("folder-search"),
+    icon!("palette"),
+    // Window caption buttons (Windows): hairline 10px glyphs drawn for
+    // filex in the Fluent caption style, not Lucide.
+    icon!("caption-minimize"),
+    icon!("caption-maximize"),
+    icon!("caption-restore"),
+    icon!("caption-close"),
 ];
 
 /// Serves the embedded [`ICONS`]. Registered via

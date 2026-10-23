@@ -152,6 +152,7 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
 impl Workspace {
     pub(super) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
+        self.settings_scroll.reset();
         self.recording_shortcut = None;
         self.shortcut_error = None;
         let handle = if self.settings_open {
@@ -166,6 +167,7 @@ impl Workspace {
     pub(super) fn open_keyboard_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = true;
         self.settings_section = SettingsSection::Keyboard;
+        self.settings_scroll.reset();
         self.recording_shortcut = None;
         self.shortcut_error = None;
         window.focus(&self.settings_focus, cx);
@@ -255,7 +257,11 @@ impl Workspace {
         let settings = self.settings.read(cx).settings().clone();
         let close =
             ui::top_bar::toolbar_button(&theme, "settings-close", "icons/x.svg", theme.text_dim)
-                .tooltip(ui::tooltip::text_tooltip("Close settings · Esc", theme))
+                .tooltip(ui::tooltip::shortcut_tooltip(
+                    "Close settings",
+                    "Esc",
+                    theme,
+                ))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)));
         let nav = ui::settings_pane::navigation(&theme).children(
             SettingsSection::ALL.into_iter().map(|item| {
@@ -267,6 +273,7 @@ impl Workspace {
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.settings_section = item;
+                    this.settings_scroll.reset();
                     this.recording_shortcut = None;
                     this.shortcut_error = None;
                     window.focus(&this.settings_focus, cx);
@@ -274,9 +281,18 @@ impl Workspace {
                 }))
             }),
         );
-        let mut page = ui::settings_pane::page(section.label()).child(
-            ui::settings_pane::page_heading(&theme, section.label(), section.description()),
-        );
+        let mut page = ui::settings_pane::page(section.label())
+            .track_scroll(&self.settings_scroll.handle)
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                if this.settings_scroll.wheel(event, window.line_height()) {
+                    cx.notify();
+                }
+            }))
+            .child(ui::settings_pane::page_heading(
+                &theme,
+                section.label(),
+                section.description(),
+            ));
         if section == SettingsSection::Appearance {
             page = page.child(
                 ui::settings_pane::group(&theme)
@@ -330,12 +346,12 @@ impl Workspace {
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(ui::settings_pane::shell_header(&theme, "Settings", close))
             .child(div().flex().flex_1().min_h_0().child(nav).child(page));
-        Some(
+        Some(ui::modal::present(
+            "settings-backdrop-in",
             ui::modal::backdrop("settings-backdrop")
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
-                .child(card)
-                .into_any_element(),
-        )
+                .child(card),
+        ))
     }
 
     /// "About": the running version and the welcome-tour replay.

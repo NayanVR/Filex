@@ -5,11 +5,12 @@ this page says where to look and what not to do.
 
 ## Colour — `src/ui/theme.rs`
 
-- **Semantic slots** on `Theme` (`bg`, `panel`, `hover`, `selected`,
-  `stripe`, `border`, `text`, `text_dim`, `accent`, `on_accent`,
-  `accent_selection`, `warn`, `success`). Read via `cx.theme()`. Dark,
-  light and OLED palettes; accent presets and custom hex are applied by
-  `Theme::resolve`.
+- **Semantic slots** on `Theme` (`bg`, `panel`, `elevated`, `hover`,
+  `field`, `shadow`, `selected`, `stripe`, `border`, `text`, `text_dim`,
+  `accent`, `on_accent`, `accent_selection`, `warn`, `success`). `hover` and
+  `field` are translucent, so one value reads on both surfaces below.
+  Read via `cx.theme()`. Dark, light and OLED palettes; accent presets
+  and custom hex are applied by `Theme::resolve`.
 - **Fixed palettes** in `theme::fixed`: identity colours that don't change
   with the theme (file-kind tints, Finder tag colours, paper artwork,
   modal scrim).
@@ -17,14 +18,85 @@ this page says where to look and what not to do.
   colour becomes a `Theme` slot if it differs per palette, otherwise a
   `fixed` fn.
 
+## Surfaces (2026-10 refresh)
+
+- **Shell** (`panel`): tab bar, nav bar, sidebar and status bar are one
+  continuous surface. No borders between them — don't add `border_b`
+  to a bar.
+- **Canvas** (`bg`): the content heading, the file pane and the details
+  panel sit on one raised card (`rounded_xl`, hairline `border`,
+  `ui::soft_shadow`) inset from the window edge. Children of the canvas
+  don't paint their own `bg` — gpui clips to the box, not the radius, so
+  a filled child squares off the canvas corners.
+- **No window translucency** (Mica, vibrancy): gpui-ce turns off
+  ClearType text for the *whole window* whenever its background isn't
+  `Opaque` (`Window::should_use_subpixel_rendering`), which visibly
+  softens every label. Tried with Mica Alt in 2026-10 and rejected;
+  revisit only if gpui-ce keeps ClearType on opaque regions. Dividers *inside* the canvas
+  (column header, details panel edge) are fine.
+- **Fields** (`top_bar::field`): filled `field` recess at rest, no
+  outline; focus lifts to `bg` with an accent ring, errors ring in `warn`.
+- **Elevated** (`elevated`): menus, dialogs and tooltips (`ui::card`)
+  sit one step above the canvas — white on light, lighter graphite on
+  dark. Never use `panel` for something that floats.
+- **Raised selection** (active tab, active segment): `bg` fill +
+  `shadow_xs` on a `field`/`panel` track.
+
+## Window chrome
+
+- Windows: the system titlebar is hidden; the tab bar is the titlebar.
+  `tabs::drag_region` fills the gap after the tabs and
+  `window_controls::caption_buttons` draws min/max/close tagged with
+  `WindowControlArea`, so the OS still handles drag, double-click and
+  Snap Layouts. Gate on `platform::draws_own_caption()`.
+- macOS: transparent titlebar, traffic lights inset into the tab bar.
+- Linux: native decorations for now (client-side decorations need their
+  own resize edges).
+
+## Motion — `src/ui/motion.rs`
+
+- **Animate what doesn't make the user wait:** panels sliding, dialogs
+  settling, menus/tooltips fading, the drag preview lifting, a wheel
+  notch gliding. **Never** animate what they're waiting *for*: search
+  results, a folder's contents, list rows (and never animate inside a
+  virtualized list).
+- Durations: `motion::PANEL` (180ms) for panels, `motion::FADE` (140ms)
+  for fades; ease-out curves. Everything is interactive from the first
+  frame — motion is decoration, not a gate.
+- Panels: `motion::Toggle` gives a per-frame openness; clip the panel to
+  `width × openness` so its content keeps its full-width layout.
+- Dialogs: wrap the finished backdrop in `modal::present`.
+- Scroll containers that feel jumpy on a mouse wheel: `overflow_hidden`
+  + `track_scroll` + `motion::SmoothScroll` (touchpad deltas pass 1:1).
+
+## Tooltips
+
+- Every icon-only control has a tooltip. If the action has a shortcut,
+  use `Workspace::action_tip(label, shortcut_id)` so the tooltip shows
+  the live (user-remappable) binding, formatted per platform by
+  `shortcuts::label` ("Ctrl+Shift+C" / "⇧⌘C").
+
+## Drag and drop
+
+- Rows and cards attach `external_drag_payload` alongside `on_drag`, so
+  a drag leaving the window becomes an OS file drag: natively on macOS
+  (gpui-ce), via the Shell's drag source on Windows
+  (`platform::start_os_drag`). The Windows drag loop is modal: it runs
+  on the UI thread but from a top-level thread timer, never inside a GPUI
+  handler or task, or GPUI drops every window message during the drag
+  ("RefCell already borrowed") and the window stops painting. Code on a
+  GPUI handler's stack must not send messages to our own window either
+  (e.g. `WindowFromPoint` → `WM_NCHITTEST`), for the same reason. Linux drags stay in-app for now.
+
 ## Metrics
 
 - Row height and list icon size live on `Theme` (density-driven).
 - Spacing: use GPUI's `gap_N` / `p_N` / `m_N` scale. Use `px(…)` only for a
   component's own fixed dimensions (bar heights, panel widths), and keep
   those next to the component.
-- Radius: `rounded_md` for controls, `rounded_lg` for cards and
-  regular-size buttons, `rounded_full` for dots and pills.
+- Radius: `rounded_md` for controls, `rounded_lg` for regular-size
+  buttons and fields, `rounded_xl` for the canvas and floating
+  cards, `rounded_full` for dots and pills.
 - Type: Inter (`ui::fonts`), sizes from `text_xs` / `text_sm`. Per-size
   tokens are deferred until a third size is actually needed.
 
@@ -41,6 +113,8 @@ this page says where to look and what not to do.
 | Tooltip | `tooltip::text_tooltip` |
 | Key hint | `kbd::keycap` |
 | Icon glyph | `icon::ui_icon` (always pass an explicit colour) |
+| Text field frame | `top_bar::field(theme, focused, error)` |
+| Window caption buttons | `window_controls::caption_buttons` |
 
 **Button variants:** `Primary` (accent fill, the Enter-key choice),
 `Secondary` (outlined), `Danger` (warn fill, for irreversible actions).

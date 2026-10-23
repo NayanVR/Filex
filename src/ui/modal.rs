@@ -4,7 +4,10 @@
 //! covers the window, paints above everything, and soaks up clicks so
 //! nothing behind it is interactive while the dialog is open.
 
-use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px};
+use gpui::{
+    Animation, AnimationExt as _, AnyElement, Div, ElementId, SharedString, Stateful, div,
+    ease_out_quint, prelude::*, px,
+};
 
 use super::button::{Size, Variant};
 use super::theme::{Theme, fixed};
@@ -23,6 +26,26 @@ pub fn backdrop(id: impl Into<ElementId>) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
+}
+
+/// Present a finished [`backdrop`] (with its dialog inside): the scrim
+/// and dialog fade in together while the dialog settles up into place.
+/// Purely decorative — the dialog is interactive from the first frame.
+/// `id` keys the animation, so it replays each time the dialog opens.
+pub fn present(id: &'static str, backdrop: Stateful<Div>) -> AnyElement {
+    backdrop
+        .with_animation(
+            id,
+            Animation::new(super::motion::FADE).with_easing(ease_out_quint()),
+            |backdrop, t| {
+                // The dialog is centred, so padding the top by 2× lifts
+                // it by 1×.
+                backdrop
+                    .opacity(t)
+                    .pt(px(2. * super::motion::DIALOG_RISE * (1. - t)))
+            },
+        )
+        .into_any_element()
 }
 
 /// The dialog card.

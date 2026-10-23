@@ -8,18 +8,22 @@ use gpui::{Div, SharedString, div, prelude::*, px};
 
 use super::theme::Theme;
 
-/// The banner container: a slim, accent-tinted bar with a top border,
-/// laid out as message | action | dismiss. Callers add the children.
+/// The banner container: a slim card on the shell under the canvas, laid
+/// out as message | action | dismiss. Callers add the children.
 pub fn update_banner(theme: &Theme) -> Div {
     div()
         .flex()
         .items_center()
         .gap_2()
-        .h(px(28.))
+        .h(px(32.))
+        .mx_2()
+        .mt_2()
         .px_3()
-        .border_t_1()
+        .rounded_lg()
+        .border_1()
         .border_color(theme.border)
-        .bg(theme.panel)
+        .bg(theme.bg)
+        .shadow_xs()
         .text_xs()
 }
 

@@ -78,9 +78,17 @@ impl Workspace {
             .overflow_y_scroll()
             .children(self.drives.iter().enumerate().map(|(ix, drive)| {
                 let path = drive.path.clone();
-                drive_tile(&theme, ix, drive).on_click(cx.listener(
-                    move |this, _: &ClickEvent, _window, cx| {
-                        this.navigate(path.clone(), cx);
+                let selected = self.this_pc_selected == Some(ix);
+                // Explorer's model: a click selects the drive, a double
+                // click opens it.
+                drive_tile(&theme, ix, drive, selected).on_click(cx.listener(
+                    move |this, event: &ClickEvent, _window, cx| {
+                        if event.click_count() >= 2 {
+                            this.navigate(path.clone(), cx);
+                        } else {
+                            this.this_pc_selected = Some(ix);
+                            cx.notify();
+                        }
                     },
                 ))
             }))
@@ -89,7 +97,12 @@ impl Workspace {
 }
 
 /// One drive: icon, name, capacity bar, and free space, Explorer-style.
-fn drive_tile(theme: &Theme, ix: usize, drive: &Drive) -> gpui::Stateful<gpui::Div> {
+fn drive_tile(
+    theme: &Theme,
+    ix: usize,
+    drive: &Drive,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
     let hover = theme.hover;
     let free = format!(
         "{} free of {}",
@@ -103,10 +116,16 @@ fn drive_tile(theme: &Theme, ix: usize, drive: &Drive) -> gpui::Stateful<gpui::D
         .gap_3()
         .w(px(TILE_WIDTH))
         .p_3()
-        .rounded_lg()
-        .bg(theme.stripe)
+        .rounded_xl()
+        .border_1()
+        .border_color(if selected { theme.accent } else { theme.border })
+        .bg(if selected {
+            theme.selected
+        } else {
+            theme.stripe
+        })
         .cursor_pointer()
-        .hover(move |s| s.bg(hover))
+        .when(!selected, move |s| s.hover(move |s| s.bg(hover)))
         .tooltip(ui::tooltip::text_tooltip(display_path(&drive.path), *theme))
         .child(ui::icon::ui_icon("icons/hard-drive.svg", theme.text_dim).size(px(32.)))
         .child(

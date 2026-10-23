@@ -337,7 +337,8 @@ impl Workspace {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        Some(
+        Some(ui::modal::present(
+            "conflict-backdrop-in",
             ui::modal::backdrop("conflict-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.resolve_conflict(false, cx);
@@ -373,9 +374,8 @@ impl Workspace {
                                         )),
                                 ),
                         ),
-                )
-                .into_any_element(),
-        )
+                ),
+        ))
     }
 
     /// The right-hand details/preview panel for the lead item. `None`
@@ -383,34 +383,57 @@ impl Workspace {
     /// browse view rather than replacing it, so the panel stays put
     /// underneath.) Uses `&mut self` because the preview image may
     /// schedule a thumbnail decode, exactly like a list row.
+    /// The details panel, clipped to its animated width: it slides open
+    /// and shut while its contents keep their full-width layout (no
+    /// reflow mid-slide).
     pub(super) fn render_details_panel(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let settings = self.settings.read(cx).settings();
-        if !settings.preview_open {
+        let frac = self.preview_frac;
+        if frac <= 0. {
             return None;
         }
+        let width = ui::details::fitted_width(
+            self.settings.read(cx).settings().preview_width,
+            f32::from(window.viewport_size().width) - ui::sidebar::SIDEBAR_WIDTH,
+        );
+        let panel = self.render_details_content(window, cx);
+        Some(
+            div()
+                .flex_none()
+                .h_full()
+                .w(px(width * frac))
+                .overflow_hidden()
+                .opacity(frac)
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    fn render_details_content(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let settings = self.settings.read(cx).settings();
         let width = ui::details::fitted_width(
             settings.preview_width,
             f32::from(window.viewport_size().width) - ui::sidebar::SIDEBAR_WIDTH,
         );
         let theme = *cx.theme();
         let Some((path, name, is_dir)) = self.lead_item() else {
-            return Some(
-                ui::details::panel(&theme, width)
-                    .child(ui::details::empty(
-                        &theme,
-                        "Select a file to see its preview and details.",
-                    ))
-                    .into_any_element(),
-            );
+            return ui::details::panel(&theme, width)
+                .child(ui::details::empty(
+                    &theme,
+                    "Select a file to see its preview and details.",
+                ))
+                .into_any_element();
         };
         let kind = FileKind::of(&name, is_dir);
         let preview = self.render_icon_cell(&name, &path, is_dir, 160., cx);
         let meta = self.preview_meta.as_ref().filter(|m| m.path == path);
-        let now = std::time::SystemTime::now();
 
         let size_value: SharedString = if is_dir {
             "—".into()
@@ -421,11 +444,11 @@ impl Workspace {
             }
         };
         let modified_value: SharedString = match meta {
-            Some(m) => format_modified(m.modified, now).into(),
+            Some(m) => format_timestamp(m.modified).into(),
             None => "…".into(),
         };
         let created_value: SharedString = match meta {
-            Some(m) => format_modified(m.created, now).into(),
+            Some(m) => format_timestamp(m.created).into(),
             None => "…".into(),
         };
         let where_value: SharedString = path.parent().map(display_path).unwrap_or_default().into();
@@ -447,10 +470,10 @@ impl Workspace {
         }
         let panel = panel
             .child(ui::details::divider(&theme))
-            .child(ui::details::meta_row(&theme, "Where", where_value))
+            .child(ui::details::meta_block(&theme, "Where", where_value))
             .child(ui::details::divider(&theme))
             .child(self.render_tags_section(&path, &theme, cx));
-        Some(panel.into_any_element())
+        panel.into_any_element()
     }
 
     /// The details-panel "Tags" section: the item's chips (each opens the

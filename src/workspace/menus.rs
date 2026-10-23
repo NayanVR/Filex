@@ -91,7 +91,12 @@ impl Workspace {
         }
         let count = self.active_selection().len();
         let facts = menu_model::EntryFacts {
-            heading: describe_items(&self.selected_paths()).unwrap_or(name),
+            // The bare name (no quotes — unlike a dialog sentence, the
+            // menu heading needs no punctuation to set the name apart).
+            heading: match count {
+                1 => name,
+                n => format!("{n} items"),
+            },
             count,
             is_dir,
             from_search,
