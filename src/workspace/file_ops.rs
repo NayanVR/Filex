@@ -282,10 +282,29 @@ impl Workspace {
         }
     }
 
-    /// Build the drag payload for a browse row/card, or `None` when the
-    /// index has no path. `theme` rides along so the drag pill can paint
-    /// itself without a context.
-    pub(super) fn drag_items(&self, ix: usize, theme: Theme) -> Option<DragItems> {
+    /// Make `el` (a list row, grid card or search result) a drag source for
+    /// row `ix` of the active list — the whole selection when `ix` is part
+    /// of it. In-app it's a gpui drag; leaving filex it becomes an OS file
+    /// drag. Rows with no path are returned untouched.
+    pub(super) fn drag_source(
+        &self,
+        el: gpui::Stateful<gpui::Div>,
+        ix: usize,
+        theme: Theme,
+    ) -> gpui::Stateful<gpui::Div> {
+        let Some(items) = self.drag_items(ix, theme) else {
+            return el;
+        };
+        el.on_drag(items, |items, position, _window, cx| {
+            cx.new(|_| items.clone().at(position))
+        })
+        .external_drag_payload(|items: &DragItems, _, _| items.external_payload())
+    }
+
+    /// Build the drag payload for row `ix` of the active list (browse or
+    /// search), or `None` when the index has no path. `theme` rides along
+    /// so the drag preview can paint itself without a context.
+    fn drag_items(&self, ix: usize, theme: Theme) -> Option<DragItems> {
         let paths = self.drag_source_paths(ix);
         if paths.is_empty() {
             return None;

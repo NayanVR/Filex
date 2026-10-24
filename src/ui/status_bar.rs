@@ -41,10 +41,19 @@ pub fn status_bar(
 
 /// "1 item" / "N items" — the count line for a folder.
 pub fn item_count(n: usize) -> String {
+    counted(n, "item")
+}
+
+/// "1 result" / "N results" — the count line for a search.
+pub fn result_count(n: usize) -> String {
+    counted(n, "result")
+}
+
+fn counted(n: usize, noun: &str) -> String {
     if n == 1 {
-        "1 item".to_owned()
+        format!("1 {noun}")
     } else {
-        format!("{n} items")
+        format!("{n} {noun}s")
     }
 }
 
@@ -57,5 +66,12 @@ mod tests {
         assert_eq!(item_count(0), "0 items");
         assert_eq!(item_count(1), "1 item");
         assert_eq!(item_count(2), "2 items");
+    }
+
+    /// Regression: the search heading read "1 results".
+    #[test]
+    fn result_count_is_singular_only_for_one() {
+        assert_eq!(result_count(1), "1 result");
+        assert_eq!(result_count(100), "100 results");
     }
 }

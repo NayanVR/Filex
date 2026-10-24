@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::{Div, ElementId, FontFeatures, SharedString, Stateful, div, prelude::*, px};
 
 use super::icon;
-use super::theme::Theme;
+use super::theme::{Theme, fixed};
 
 /// Enable tabular (fixed-width) figures on a text element, so a column of
 /// sizes and dates aligns digit-for-digit instead of jittering.
@@ -53,42 +53,57 @@ pub fn header_row(theme: &Theme, icon_col_width: f32) -> Div {
         .child(div().w(px(icon_col_width)).flex_none())
 }
 
-/// One clickable column header. `active` carries the sort direction
-/// when this column is the current sort key (`Some(ascending)`).
-/// Callers size it (`.flex_1()` or a fixed width) and chain
-/// `.on_click`; clicking is expected to select-or-flip the sort.
+/// Which edge a column header aligns to — its values' alignment.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum HeaderAlign {
+    /// Text columns (Name): label at the left, chevron after it.
+    Start,
+    /// Number/date columns: label flush right over the right-aligned
+    /// values, chevron before it so it never pushes the label inward.
+    End,
+}
+
 /// One clickable column header. `active` carries the sort direction
 /// when this column is the current sort key (`Some(ascending)`), shown
-/// as a chevron. The cell is a flex row; callers size it (`.flex_1()`
-/// or a fixed width) and choose alignment (`.justify_end()` for the
-/// right-hand columns), then chain `.on_click`.
+/// as a chevron. Callers size it (`.flex_1()` or a fixed width) and
+/// chain `.on_click`; clicking is expected to select-or-flip the sort.
+///
+/// No hover fill: a stretched column (Name) would light up as a
+/// full-width bar. Hover brightens the label instead, and an unsorted
+/// column shows a faint chevron so it reads as sortable.
 pub fn header_cell(
     theme: &Theme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     active: Option<bool>,
+    align: HeaderAlign,
 ) -> Stateful<Div> {
-    let hover = theme.hover;
-    let text = theme.text;
-    let chevron = active.map(|ascending| {
-        let path = if ascending {
-            "icons/chevron-up.svg"
-        } else {
-            "icons/chevron-down.svg"
-        };
-        icon::ui_icon(path, text).size(px(12.))
-    });
-    div()
+    let id: ElementId = id.into();
+    let (text, dim) = (theme.text, theme.text_dim);
+    let (glyph, rest) = match active {
+        Some(true) => ("icons/chevron-up.svg", text),
+        Some(false) => ("icons/chevron-down.svg", text),
+        // Hidden until hover; the direction a click would sort.
+        None => ("icons/chevron-up.svg", fixed::with_alpha(dim, 0.)),
+    };
+    let chevron = icon::ui_icon(glyph, rest)
+        .size(px(12.))
+        .when(active.is_none(), |chevron| {
+            chevron.group_hover("header-cell", move |s| s.text_color(dim))
+        });
+    let cell = div()
         .id(id)
+        .group("header-cell")
         .flex()
         .items_center()
         .gap(px(2.))
         .cursor_pointer()
-        .rounded_md()
-        .hover(move |s| s.bg(hover))
         .when(active.is_some(), |s| s.text_color(text))
-        .child(label.into())
-        .children(chevron)
+        .hover(move |s| s.text_color(text));
+    match align {
+        HeaderAlign::Start => cell.child(label.into()).child(chevron),
+        HeaderAlign::End => cell.justify_end().child(chevron).child(label.into()),
+    }
 }
 
 /// Search results put the path below the name so both remain readable
