@@ -202,12 +202,20 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
     rows.push(Row::Icons(icons));
 
     if single {
-        rows.push(Row::Item(Item::new(Command::Open, "Open").shortcut("open")));
+        rows.push(Row::Item(
+            Item::new(Command::Open, "Open")
+                .icon("icons/external-link.svg")
+                .shortcut("open"),
+        ));
         if !facts.is_dir {
-            rows.push(Row::Item(Item::submenu("Open With", Submenu::OpenWith)));
+            rows.push(Row::Item(
+                Item::submenu("Open With", Submenu::OpenWith).icon("icons/app-window.svg"),
+            ));
         }
         if facts.from_search {
-            rows.push(Row::Item(Item::new(Command::Reveal, "Reveal in Folder")));
+            rows.push(Row::Item(
+                Item::new(Command::Reveal, "Reveal in Folder").icon("icons/folder.svg"),
+            ));
         }
         rows.push(Row::Separator);
     }
@@ -228,11 +236,12 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
             .shortcut("copy_path"),
     ));
     if single && facts.is_dir {
-        rows.push(Row::Item(Item::new(
-            Command::IndexFolder,
-            "Index This Folder",
-        )));
-        rows.push(Row::Item(Item::new(Command::FolderIcon, "Folder Icon…")));
+        rows.push(Row::Item(
+            Item::new(Command::IndexFolder, "Index This Folder").icon("icons/folder-search.svg"),
+        ));
+        rows.push(Row::Item(
+            Item::new(Command::FolderIcon, "Folder Icon…").icon("icons/palette.svg"),
+        ));
     }
     if single && facts.is_dir && caps.terminal && !facts.from_search {
         rows.push(Row::Item(
@@ -519,6 +528,31 @@ mod tests {
             is_dir: false,
             from_search: false,
             favorite: false,
+        }
+    }
+
+    /// Every entry-menu row carries a glyph, so labels line up and no
+    /// row reads as an indented afterthought next to its neighbours.
+    #[test]
+    fn every_entry_menu_row_has_an_icon() {
+        let variants = [
+            file(1),
+            file(3),
+            EntryFacts {
+                is_dir: true,
+                ..file(1)
+            },
+            EntryFacts {
+                from_search: true,
+                ..file(1)
+            },
+        ];
+        for facts in variants {
+            for row in entry_menu(&facts, ALL) {
+                if let Row::Item(item) = row {
+                    assert!(item.icon.is_some(), "{:?} has no icon", item.label);
+                }
+            }
         }
     }
 

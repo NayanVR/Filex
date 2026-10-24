@@ -1869,6 +1869,7 @@ version = "0.4.2"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "chrono",
  "criterion",
  "dirs 6.0.0",
  "ed25519-dalek",

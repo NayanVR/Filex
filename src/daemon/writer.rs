@@ -419,7 +419,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                         replacement = Some(next_view.clone());
                                         owner.status.write().unwrap().error = if built.skipped > 0 {
                                             Some(format!(
-                                                "{} inaccessible entries/subtrees were omitted",
+                                                "{} unreadable items skipped",
                                                 built.skipped
                                             ))
                                         } else {

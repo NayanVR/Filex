@@ -19,6 +19,7 @@ pub mod list_row;
 pub mod magic_card;
 pub mod menu;
 pub mod modal;
+pub mod motion;
 pub mod onboarding;
 pub mod pane;
 pub mod scrollbar;
@@ -31,18 +32,26 @@ pub mod theme;
 pub mod tooltip;
 pub mod top_bar;
 pub mod update_banner;
+pub mod window_controls;
 
-use gpui::{Div, div, prelude::*};
+use gpui::{BoxShadow, Div, div, prelude::*, px};
+
+/// One soft, wide, low-opacity layer for the content canvas: enough to lift
+/// it off the shell without the hard bottom edge of gpui's stacked
+/// `shadow_sm`.
+pub fn soft_shadow(theme: &theme::Theme) -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(1.), gpui::rgb_to_hsla(theme.shadow)).blur_radius(px(6.))]
+}
 
 /// The shared look of every surface that floats above the browse view —
 /// context menu, modal dialog, settings and shortcuts cards. Callers chain
 /// their own `.id()`, width, padding and gap.
 pub fn card(theme: &theme::Theme) -> Div {
     div()
-        .rounded_lg()
+        .rounded_xl()
         .border_1()
         .border_color(theme.border)
-        .bg(theme.panel)
+        .bg(theme.elevated)
         .shadow_lg()
         .flex()
         .flex_col()

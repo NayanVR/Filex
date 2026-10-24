@@ -79,10 +79,24 @@ fn blend(base: Rgba, over: Rgba, t: f32) -> Rgba {
 pub struct Theme {
     /// Window / main content background.
     pub bg: Rgba,
-    /// Chrome panels: top bar, sidebar, status bar, menus, dialogs.
+    /// The window shell: the root paints it once and the title/tab bar,
+    /// nav bar, sidebar and status bar sit on it unfilled, with the
+    /// content canvas ([`Theme::bg`]) raised on top.
     pub panel: Rgba,
-    /// Hover background for interactive rows and buttons.
+    /// Colour of the canvas's soft drop shadow ([`super::soft_shadow`]):
+    /// a faint cool tint on light, deeper on dark where it has to read
+    /// against a near-black shell.
+    pub shadow: Rgba,
+    /// Floating surfaces — menus, dialogs, tooltips: one step *above* the
+    /// canvas (white on light, lighter graphite on dark), so they read as
+    /// raised rather than as holes cut into the content.
+    pub elevated: Rgba,
+    /// Hover background for interactive rows and buttons. Translucent, so
+    /// the same slot reads on both the shell and the canvas.
     pub hover: Rgba,
+    /// Fill of text fields (path, search) and segmented-control tracks:
+    /// a translucent recess, so fields need no outline at rest.
+    pub field: Rgba,
     /// Background of a selected list row (accent-tinted, Finder-style).
     pub selected: Rgba,
     /// Subtle inset surfaces, such as unselected grid cards.
@@ -117,21 +131,25 @@ pub struct Theme {
 impl Global for Theme {}
 
 impl Theme {
-    /// Cool charcoal content with subtly recessed chrome.
+    /// Neutral graphite: a deep shell with the content canvas lifted one
+    /// step above it.
     pub fn dark() -> Self {
         Self {
-            bg: rgb(0x181b20),
-            panel: rgb(0x14171b),
-            hover: rgb(0x252b33),
-            selected: rgb(0x233e50),
-            stripe: rgb(0x1b1f25),
-            border: rgb(0x2b313a),
-            text: rgb(0xe8edf3),
-            text_dim: rgb(0x9aa5b3),
+            bg: rgb(0x1c1d21),
+            panel: rgb(0x131416),
+            elevated: rgb(0x26272c),
+            shadow: rgba(0x00000052),
+            hover: rgba(0xffffff12),
+            field: rgba(0xffffff0d),
+            selected: rgb(0x203a4a),
+            stripe: rgb(0x222328),
+            border: rgb(0x2a2c31),
+            text: rgb(0xececef),
+            text_dim: rgb(0x8f939c),
             accent: rgb(0x5ac8fa),
             // The light-cyan accent reads as a "light" fill, so dark ink
             // sits on it (this was the old `BG` the primary button used).
-            on_accent: rgb(0x181b20),
+            on_accent: rgb(0x131416),
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
@@ -140,19 +158,21 @@ impl Theme {
         }
     }
 
-    /// The light palette, derived from the Atlas reference mockup: white
-    /// content, soft grey chrome, and a cyan-blue accent deepened enough
-    /// to carry white text on a fill.
+    /// The light palette: a white canvas raised on a cool grey shell, and
+    /// a cyan-blue accent deepened enough to carry white text on a fill.
     pub fn light() -> Self {
         Self {
             bg: rgb(0xffffff),
-            panel: rgb(0xf4f6f8),
-            hover: rgb(0xe9edf2),
+            panel: rgb(0xedf0f4),
+            elevated: rgb(0xffffff),
+            shadow: rgba(0x1018280f),
+            hover: rgba(0x1018280f),
+            field: rgba(0x1018280b),
             selected: rgb(0xe0effa),
-            stripe: rgb(0xf9fafc),
-            border: rgb(0xe2e7ee),
-            text: rgb(0x202936),
-            text_dim: rgb(0x697586),
+            stripe: rgb(0xf7f8fa),
+            border: rgb(0xdfe3e9),
+            text: rgb(0x1a2230),
+            text_dim: rgb(0x667085),
             accent: rgb(0x087eaf),
             on_accent: rgb(0xffffff),
             accent_selection: rgba(0x087eaf3d),
@@ -169,8 +189,11 @@ impl Theme {
     pub fn oled() -> Self {
         Self {
             bg: rgb(0x000000),
-            panel: rgb(0x0a0a0c),
-            hover: rgb(0x1a1b1e),
+            panel: rgb(0x000000),
+            elevated: rgb(0x151517),
+            shadow: rgba(0x00000000),
+            hover: rgba(0xffffff14),
+            field: rgba(0xffffff0f),
             selected: rgb(0x1f3a4d),
             stripe: rgb(0x070708),
             border: rgb(0x242529),
@@ -266,6 +289,17 @@ pub mod fixed {
     pub fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
         color.alpha = alpha;
         color
+    }
+
+    /// The close caption button's hover fill — the system red every
+    /// Windows 11 window uses, so it stays fixed across themes.
+    pub fn caption_close() -> Rgba {
+        rgb(0xc42b1c)
+    }
+
+    /// Glyph ink on [`caption_close`].
+    pub fn white() -> Rgba {
+        rgb(0xffffff)
     }
 
     /// The full-window dim behind a modal dialog.
@@ -391,6 +425,18 @@ mod tests {
     #[test]
     fn oled_background_is_pure_black() {
         assert_eq!(Theme::oled().bg, rgb(0x000000));
+    }
+
+    /// Floating surfaces must sit above the canvas, not below it: on a
+    /// dark base that means lighter, on a light base at least as light.
+    #[test]
+    fn elevated_surfaces_rise_above_the_canvas() {
+        for theme in [Theme::dark(), Theme::oled()] {
+            assert!(luminance(theme.elevated) > luminance(theme.bg));
+        }
+        let light = Theme::light();
+        assert!(luminance(light.elevated) >= luminance(light.bg));
+        assert!(luminance(light.elevated) > luminance(light.panel));
     }
 
     #[test]

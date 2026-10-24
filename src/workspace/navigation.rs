@@ -415,6 +415,16 @@ impl Workspace {
         }
     }
 
+    /// Whether row `ix` of the active list is a directory (from the
+    /// listing — never a disk stat).
+    pub(super) fn is_dir_at(&self, ix: usize) -> bool {
+        if self.query.is_empty() {
+            self.entries.get(ix).is_some_and(|entry| entry.is_dir)
+        } else {
+            self.results.get(ix).is_some_and(|row| row.is_dir)
+        }
+    }
+
     /// Every selected item's (path, name), in list order.
     pub(super) fn selected_paths(&self) -> Vec<(PathBuf, String)> {
         self.active_selection()
@@ -439,12 +449,17 @@ impl Workspace {
     /// Toggle the details panel (top-bar button / cmd-i). Opening it
     /// kicks off the metadata fetch for the current item.
     pub(super) fn toggle_preview(&mut self, cx: &mut Context<Self>) {
+        let open = !self.settings.read(cx).settings().preview_open;
         self.settings.update(cx, |store, cx| {
-            store.update(cx, |settings| {
-                settings.preview_open = !settings.preview_open
-            });
+            store.update(cx, |settings| settings.preview_open = open);
         });
-        self.refresh_preview(cx);
+        self.preview_motion.start(open);
+        // Closing keeps the current details so the panel slides out with
+        // its content intact; they're dropped on the next selection change.
+        if open {
+            self.refresh_preview(cx);
+        }
+        cx.notify();
     }
 
     /// Ensure `preview_meta` describes the current lead item, fetching it

@@ -266,17 +266,19 @@ impl Workspace {
     /// current selection when the dragged item is part of it (so a
     /// multi-select drags as a group), otherwise just that one item.
     pub(super) fn drag_source_paths(&self, ix: usize) -> Vec<PathBuf> {
+        self.drag_source_indices(ix)
+            .into_iter()
+            .filter_map(|i| self.path_at(i).map(|(p, _)| p))
+            .collect()
+    }
+
+    /// The rows a drag starting on `ix` carries: the whole selection when
+    /// `ix` is part of a multi-selection, else just `ix`.
+    fn drag_source_indices(&self, ix: usize) -> Vec<usize> {
         if self.active_selection().contains(ix) && self.active_selection().iter().count() > 1 {
-            self.active_selection()
-                .iter()
-                .filter_map(|i| self.path_at(i).map(|(p, _)| p))
-                .collect()
+            self.active_selection().iter().collect()
         } else {
-            self.path_at(ix)
-                .map(|(p, _)| vec![p])
-                .into_iter()
-                .flatten()
-                .collect()
+            vec![ix]
         }
     }
 
@@ -288,6 +290,15 @@ impl Workspace {
         if paths.is_empty() {
             return None;
         }
+        let dirs: Vec<bool> = self
+            .drag_source_indices(ix)
+            .into_iter()
+            .map(|i| self.is_dir_at(i))
+            .collect();
+        let (name, lead_dir) = self
+            .path_at(ix)
+            .map(|(_, name)| (name, self.is_dir_at(ix)))
+            .unwrap_or_default();
         let label: SharedString = match paths.as_slice() {
             [one] => one
                 .file_name()
@@ -299,10 +310,51 @@ impl Workspace {
         };
         Some(DragItems {
             paths,
+            dirs,
             label,
+            kind: FileKind::of(&name, lead_dir),
+            name,
             theme,
             position: Point::default(),
         })
+    }
+
+    /// A filex drag left for another app: end the in-app drag and hand
+    /// its files to the OS so they can be dropped there (Windows — see
+    /// `platform::hands_off_drags`). The OS drag starts once this handler
+    /// has returned (`platform::start_os_drag`).
+    pub(super) fn hand_off_drag(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        tracing::info!(items = paths.len(), "drag left filex; handing it to the OS");
+        self.drag_in_flight = None;
+        cx.stop_active_drag(window);
+        platform::start_os_drag(paths);
+    }
+
+    /// The window lost focus. Mid-drag (Alt+Tab with the button held),
+    /// filex stops receiving mouse moves — Windows takes capture away — so
+    /// the move-driven hand-off never fires and the drag would be stranded
+    /// in a background window. Hand it to the OS now instead: its drag loop
+    /// tracks the mouse itself, so the user can drop into the app they
+    /// switched to, as with Explorer.
+    pub(super) fn deactivated_mid_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !platform::hands_off_drags() || !cx.has_active_drag() {
+            return;
+        }
+        if !platform::primary_button_down() {
+            return;
+        }
+        if let Some(paths) = self.drag_in_flight.take() {
+            tracing::info!("filex lost focus mid-drag");
+            self.hand_off_drag(paths, window, cx);
+        }
     }
 
     /// Handle a drop of in-app items or OS files onto `dest_dir`. Internal

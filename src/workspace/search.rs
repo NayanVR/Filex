@@ -706,6 +706,18 @@ impl Workspace {
             && (!self.daemon_status.building
                 || self.daemon_status.roots.iter().any(|r| r.files > 0))
     }
+    /// The status bar's index dot: attention when search is unavailable
+    /// or the index reported a problem, accent while building, else ready.
+    pub(super) fn index_status_color(&self, theme: &Theme) -> gpui::Rgba {
+        if self.service.is_none() || self.daemon_status.error.is_some() {
+            theme.warn
+        } else if self.daemon_status.building {
+            theme.accent
+        } else {
+            theme.success
+        }
+    }
+
     pub(super) fn index_status_text(&self) -> SharedString {
         if self.service.is_none() {
             return "Search unavailable — browsing is available".into();

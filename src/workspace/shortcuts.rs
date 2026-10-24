@@ -489,50 +489,44 @@ pub fn install(overrides: &BTreeMap<String, String>, cx: &mut App) {
     search_input::keymap::bind_keys(cx);
 }
 
+/// A chord as the platform writes it: "Ctrl+Shift+C" on Windows and
+/// Linux, "⌘⇧C" on macOS (modifier symbols run together, in Apple's
+/// ⌃⌥⇧⌘ order).
 pub fn label(chord: &str) -> String {
+    label_for(chord, cfg!(target_os = "macos"))
+}
+
+fn label_for(chord: &str, mac: bool) -> String {
     let Ok(key) = gpui::Keystroke::parse(chord) else {
         return chord.to_owned();
     };
-    let mut parts = vec![];
-    if key.modifiers.control {
-        parts.push("Ctrl".to_owned());
-    }
-    if key.modifiers.alt {
-        parts.push(
-            if cfg!(target_os = "macos") {
-                "⌥"
-            } else {
-                "Alt"
-            }
-            .to_owned(),
-        );
-    }
-    if key.modifiers.shift {
-        parts.push("⇧".to_owned());
-    }
-    if key.modifiers.platform {
-        parts.push(
-            if cfg!(target_os = "macos") {
-                "⌘"
-            } else {
-                "Super"
-            }
-            .to_owned(),
-        );
+    let mut parts: Vec<String> = vec![];
+    let m = &key.modifiers;
+    let mods: [(bool, &str, &str); 4] = [
+        (m.control, "⌃", "Ctrl"),
+        (m.alt, "⌥", "Alt"),
+        (m.shift, "⇧", "Shift"),
+        (m.platform, "⌘", "Super"),
+    ];
+    for (held, mac_sym, name) in mods {
+        if held {
+            parts.push(if mac { mac_sym } else { name }.to_owned());
+        }
     }
     parts.push(match key.key.as_str() {
         "up" => "↑".into(),
         "down" => "↓".into(),
         "left" => "←".into(),
         "right" => "→".into(),
-        "enter" => "↵".into(),
-        "backspace" => "⌫".into(),
+        "enter" => if mac { "↩" } else { "Enter" }.into(),
+        "backspace" => if mac { "⌫" } else { "Backspace" }.into(),
+        "escape" => "Esc".into(),
         "tab" => "Tab".into(),
         "delete" => "Delete".into(),
         "space" => "Space".into(),
         _ => key.key.to_uppercase(),
     });
-    parts.join(" ")
+    parts.join(if mac { "" } else { "+" })
 }
 
 pub fn hint(id: &str, overrides: &BTreeMap<String, String>) -> String {
@@ -565,6 +559,17 @@ mod tests {
         assert!(validate("quick_look", "space", &overrides).is_ok());
         assert!(validate("search", "space", &overrides).is_err());
         assert_eq!(label("space"), "Space");
+    }
+
+    #[test]
+    fn labels_follow_each_platforms_convention() {
+        assert_eq!(label_for("ctrl-shift-c", false), "Ctrl+Shift+C");
+        assert_eq!(label_for("alt-left", false), "Alt+←");
+        assert_eq!(label_for("ctrl-i", false), "Ctrl+I");
+        assert_eq!(label_for("cmd-shift-c", true), "⇧⌘C");
+        assert_eq!(label_for("alt-enter", true), "⌥↩");
+        assert_eq!(label_for("alt-enter", false), "Alt+Enter");
+        assert_eq!(label_for("space", false), "Space");
     }
 
     #[cfg(any(target_os = "macos", windows))]

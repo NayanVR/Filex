@@ -7,14 +7,17 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _, KeyBinding,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, ScrollStrategy, SharedString,
-    UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, size, uniform_list,
+    AnimationExt as _, App, Bounds, ClickEvent, Context, ExternalPaths, FocusHandle,
+    Focusable as _, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point,
+    ScrollStrategy, ScrollWheelEvent, SharedString, UniformListScrollHandle, Window,
+    WindowAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
+    uniform_list,
 };
 
 use filex::drives::Drive;
-use filex::listing::{Entry, display_path, format_modified, format_size, read_dir_sorted};
+use filex::listing::{
+    Entry, display_path, format_modified, format_size, format_timestamp, read_dir_sorted,
+};
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
 use filex::search::filter::Filter;
@@ -83,7 +86,13 @@ actions!(
 #[derive(Clone)]
 struct DragItems {
     paths: Vec<PathBuf>,
+    /// Whether each of `paths` is a directory (known from the listing, so
+    /// building the drag never stats the disk).
+    dirs: Vec<bool>,
     label: SharedString,
+    /// The lead item's kind and name, for the preview's icon.
+    kind: FileKind,
+    name: String,
     theme: Theme,
     position: Point<Pixels>,
 }
@@ -93,26 +102,89 @@ impl DragItems {
         self.position = position;
         self
     }
+
+    /// The payload for a drag that leaves the window, handed to the OS
+    /// as a real file drag where gpui-ce supports one (macOS today).
+    fn external_payload(&self) -> Option<gpui::ExternalDragPayload> {
+        Some(gpui::ExternalDragPayload::Files(gpui::FileDragPaths::new(
+            self.paths.iter().cloned().zip(self.dirs.iter().copied()),
+        )))
+    }
 }
+
+/// Size of the drag preview card; the stacked cards behind it for a
+/// multi-item drag share it.
+const DRAG_CARD: (f32, f32) = (220., 44.);
 
 impl gpui::Render for DragItems {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        div()
-            .pl(self.position.x + px(12.))
-            .pt(self.position.y + px(8.))
+        let count = self.paths.len();
+        let (w, h) = DRAG_CARD;
+        let card = || {
+            div()
+                .w(px(w))
+                .h(px(h))
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.elevated)
+        };
+        // Up to two offset cards behind the lead one: a stack, so a
+        // multi-item drag reads as "these" before the badge is read.
+        let stack = (1..count.min(3)).rev().map(move |depth| {
+            let offset = px(5. * depth as f32);
+            card().absolute().top(offset).left(offset).shadow_sm()
+        });
+        let lead = card()
+            .relative()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .shadow_lg()
+            .text_sm()
+            .text_color(theme.text)
+            .child(ui::icon::file_icon(&theme, self.kind, &self.name, 22.))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .bg(theme.accent)
-                    .text_color(theme.on_accent)
-                    .text_xs()
-                    .shadow_md()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .child(self.label.clone()),
+            )
+            .when(count > 1, |lead| {
+                lead.child(
+                    div()
+                        .flex_none()
+                        .min_w(px(20.))
+                        .h(px(20.))
+                        .px_1p5()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.accent)
+                        .text_color(theme.on_accent)
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(count.to_string()),
+                )
+            });
+        div()
+            .pl(self.position.x + px(14.))
+            .pt(self.position.y + px(10.))
+            .child(
+                div()
+                    .relative()
+                    .children(stack)
+                    .child(lead)
+                    // Lifts off the row as the drag starts.
+                    .with_animation(
+                        "drag-preview-in",
+                        gpui::Animation::new(ui::motion::FADE).with_easing(gpui::ease_out_quint()),
+                        |card, t| card.opacity(0.4 + 0.55 * t).mt(px(6. * (1. - t))),
+                    ),
             )
     }
 }
@@ -279,6 +351,19 @@ struct Workspace {
     /// mode can be re-resolved when settings change without a window in
     /// hand. Updated at startup and by the appearance observer.
     appearance: WindowAppearance,
+    /// The details panel's slide in/out, and its openness this frame
+    /// (0..=1) — read by the panel and by the grid's column math so both
+    /// move together.
+    preview_motion: ui::motion::Toggle,
+    preview_frac: f32,
+    /// The settings page's eased wheel scrolling.
+    settings_scroll: ui::motion::SmoothScroll,
+    /// The files of the filex drag in progress (refreshed on each drag
+    /// move), so losing focus mid-drag can still hand them to the OS.
+    drag_in_flight: Option<Vec<PathBuf>>,
+    /// The drive tile last clicked in This PC (a click selects, a double
+    /// click opens).
+    this_pc_selected: Option<usize>,
     /// Transient user-facing message (e.g. why a root couldn't be added).
     notice: Option<SharedString>,
     /// The auto-updater's UI state, a slim banner above the status bar.
@@ -592,6 +677,11 @@ impl Workspace {
             // Corrected the moment a window exists (main's open-window
             // closure) and kept current by the appearance observer.
             appearance: WindowAppearance::Dark,
+            preview_motion: Default::default(),
+            preview_frac: 0.,
+            settings_scroll: Default::default(),
+            this_pc_selected: None,
+            drag_in_flight: None,
             notice: None,
             #[cfg(target_os = "macos")]
             fda_missing: false,

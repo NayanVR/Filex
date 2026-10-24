@@ -328,9 +328,71 @@ pub(super) const UPDATE_MANIFEST_URL: &str =
 pub(super) const UPDATE_MANIFEST_URL: &str =
     "https://github.com/NayanVR/filex/releases/latest/download/filex-linux.json";
 
+/// Whether a drag leaving the window must be handed to the OS by filex
+/// itself. macOS: no — gpui-ce promotes it natively from
+/// `external_drag_payload`. Windows: yes, via the Shell's drag source
+/// ([`start_os_drag`]). Linux: not yet (no XDND/Wayland source in gpui-ce
+/// or here), so drags stay in-app.
+pub(super) fn hands_off_drags() -> bool {
+    cfg!(target_os = "windows")
+}
+
+/// Whether a drag's pointer has left filex for another app, so the drag
+/// should become an OS file drag.
+///
+/// Windows: the cursor is outside filex's window, or another app's window
+/// covers it there. The rectangle alone isn't enough — with filex
+/// maximized (or simply underneath), the drop target sits *on top of*
+/// filex, inside its rectangle. Elsewhere: outside the window's bounds.
+#[cfg(target_os = "windows")]
+pub(super) fn pointer_left_app(
+    window: &gpui::Window,
+    _position: gpui::Point<gpui::Pixels>,
+) -> bool {
+    native_window(window).is_some_and(super::shell_windows::pointer_over_other_app)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn pointer_left_app(window: &gpui::Window, position: gpui::Point<gpui::Pixels>) -> bool {
+    !gpui::Bounds::new(gpui::Point::default(), window.viewport_size()).contains(&position)
+}
+
+/// Whether the primary mouse button is still held (a drag in progress).
+#[cfg(target_os = "windows")]
+pub(super) fn primary_button_down() -> bool {
+    super::shell_windows::primary_button_down()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn primary_button_down() -> bool {
+    false
+}
+
+/// Begin the OS file drag for `paths` (see [`hands_off_drags`]). Returns
+/// at once: the drag starts after the calling handler has returned.
+#[cfg(target_os = "windows")]
+pub(super) fn start_os_drag(paths: Vec<PathBuf>) {
+    super::shell_windows::drag_out_soon(paths);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn start_os_drag(_paths: Vec<PathBuf>) {}
+
+/// Whether the main window hides the system titlebar and the tab bar
+/// draws the minimize/maximize/close buttons itself
+/// ([`ui::window_controls`]). Windows only: gpui-ce maps our control
+/// areas onto the native caption hit-tests there, so Snap Layouts and
+/// drag-to-move keep working. macOS keeps its own traffic lights (inset,
+/// see [`titlebar_options`]). Linux keeps server-side decorations until
+/// client-side resize edges and a Wayland/X11 decoration story exist.
+pub(super) fn draws_own_caption() -> bool {
+    cfg!(target_os = "windows")
+}
+
 /// Main-window titlebar. macOS: unified titlebar — the system bar goes
 /// transparent and the traffic lights inset into our top bar, which pads
-/// left to clear them. Elsewhere the native titlebar stays.
+/// left to clear them. Windows: the system bar is hidden and the tab bar
+/// is the titlebar ([`draws_own_caption`]). Linux keeps the native bar.
 pub(super) fn titlebar_options() -> TitlebarOptions {
     #[cfg(target_os = "macos")]
     {
@@ -345,7 +407,16 @@ pub(super) fn titlebar_options() -> TitlebarOptions {
             )),
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        TitlebarOptions {
+            // Still the taskbar / Alt-Tab title.
+            title: Some("filex".into()),
+            appears_transparent: true,
+            ..Default::default()
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         TitlebarOptions {
             title: Some("filex".into()),

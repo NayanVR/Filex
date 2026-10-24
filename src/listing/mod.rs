@@ -319,33 +319,61 @@ pub fn path_segments(path: &Path) -> Vec<(String, PathBuf)> {
     segments
 }
 
-/// Compact relative age for the Modified column ("just now", "5m",
-/// "3h", "2d", "4w", "7mo", "2y"); "—" when the mtime is unknown.
-/// Relative beats absolute here: no date-formatting dependency, and a
-/// future mtime (clock skew, restored backups) degrades to "just now"
-/// instead of a nonsense date.
+/// The Modified column label, in the local time zone: the time for
+/// today ("3:04 PM"), "Yesterday", the weekday within the past week,
+/// "Mar 4" earlier this year, else "Mar 4, 2024". "Just now" under a
+/// minute and for a future mtime (clock skew, restored backups) rather
+/// than a nonsense date; "—" when the mtime is unknown.
 pub fn format_modified(modified: Option<SystemTime>, now: SystemTime) -> String {
+    format_modified_in(modified, now, &chrono::Local)
+}
+
+/// [`format_modified`] against an explicit time zone (tests pin UTC).
+fn format_modified_in<Tz: chrono::TimeZone>(
+    modified: Option<SystemTime>,
+    now: SystemTime,
+    tz: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::{DateTime, Datelike as _, Utc};
     let Some(modified) = modified else {
         return "—".to_string();
     };
-    let Ok(age) = now.duration_since(modified) else {
-        return "just now".to_string(); // modified in the future
-    };
-    let secs = age.as_secs();
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    const WEEK: u64 = 7 * DAY;
-    const MONTH: u64 = 30 * DAY;
-    const YEAR: u64 = 365 * DAY;
-    match secs {
-        0..MINUTE => "just now".to_string(),
-        MINUTE..HOUR => format!("{}m", secs / MINUTE),
-        HOUR..DAY => format!("{}h", secs / HOUR),
-        DAY..WEEK => format!("{}d", secs / DAY),
-        WEEK..MONTH => format!("{}w", secs / WEEK),
-        MONTH..YEAR => format!("{}mo", secs / MONTH),
-        _ => format!("{}y", secs / YEAR),
+    if now
+        .duration_since(modified)
+        .map_or(true, |age| age.as_secs() < 60)
+    {
+        return "Just now".to_string();
+    }
+    let then = DateTime::<Utc>::from(modified).with_timezone(tz);
+    let today = DateTime::<Utc>::from(now).with_timezone(tz);
+    match (today.date_naive() - then.date_naive()).num_days() {
+        0 => then.format("%-I:%M %p").to_string(),
+        1 => "Yesterday".to_string(),
+        2..=6 => then.format("%A").to_string(),
+        _ if then.year() == today.year() => then.format("%b %-d").to_string(),
+        _ => then.format("%b %-d, %Y").to_string(),
+    }
+}
+
+/// A full local timestamp for the details panel ("Mar 4, 2024 at
+/// 3:04 PM"), where there's room for the exact moment; "—" if unknown.
+pub fn format_timestamp(time: Option<SystemTime>) -> String {
+    format_timestamp_in(time, &chrono::Local)
+}
+
+fn format_timestamp_in<Tz: chrono::TimeZone>(time: Option<SystemTime>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match time {
+        Some(time) => chrono::DateTime::<chrono::Utc>::from(time)
+            .with_timezone(tz)
+            .format("%b %-d, %Y at %-I:%M %p")
+            .to_string(),
+        None => "—".to_string(),
     }
 }
 
@@ -750,24 +778,50 @@ mod tests {
     }
 
     #[test]
-    fn formats_modified_ages_compactly() {
-        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10 * 365 * 24 * 3600);
-        let ago = |secs: u64| Some(now - std::time::Duration::from_secs(secs));
-        assert_eq!(format_modified(None, now), "—");
-        assert_eq!(format_modified(ago(0), now), "just now");
-        assert_eq!(format_modified(ago(59), now), "just now");
-        assert_eq!(format_modified(ago(60), now), "1m");
-        assert_eq!(format_modified(ago(59 * 60), now), "59m");
-        assert_eq!(format_modified(ago(3600), now), "1h");
-        assert_eq!(format_modified(ago(24 * 3600), now), "1d");
-        assert_eq!(format_modified(ago(7 * 24 * 3600), now), "1w");
-        assert_eq!(format_modified(ago(30 * 24 * 3600), now), "1mo");
-        assert_eq!(format_modified(ago(365 * 24 * 3600), now), "1y");
+    fn formats_modified_as_calendar_labels() {
+        use chrono::{TimeZone as _, Utc};
+        let at = |y, mo, d, h, mi| {
+            Some(SystemTime::from(
+                Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap(),
+            ))
+        };
+        // Thursday 2026-10-22, 15:30 UTC.
+        let now = at(2026, 10, 22, 15, 30).unwrap();
+        let label = |t| format_modified_in(t, now, &Utc);
+        assert_eq!(label(None), "—");
+        assert_eq!(label(at(2026, 10, 22, 15, 30)), "Just now");
+        assert_eq!(label(at(2026, 10, 22, 9, 5)), "9:05 AM");
+        assert_eq!(label(at(2026, 10, 22, 0, 0)), "12:00 AM");
+        assert_eq!(label(at(2026, 10, 21, 23, 59)), "Yesterday");
+        assert_eq!(label(at(2026, 10, 19, 8, 0)), "Monday");
+        // Six days back is still "this week"; seven falls to a date.
+        assert_eq!(label(at(2026, 10, 16, 8, 0)), "Friday");
+        assert_eq!(label(at(2026, 10, 15, 8, 0)), "Oct 15");
+        assert_eq!(label(at(2026, 3, 4, 8, 0)), "Mar 4");
+        assert_eq!(label(at(2025, 12, 31, 8, 0)), "Dec 31, 2025");
         // Future mtime (clock skew) degrades gracefully.
-        assert_eq!(
-            format_modified(Some(now + std::time::Duration::from_secs(60)), now),
-            "just now"
-        );
+        assert_eq!(label(at(2026, 10, 23, 8, 0)), "Just now");
+    }
+
+    #[test]
+    fn calendar_days_follow_the_time_zone() {
+        use chrono::{FixedOffset, TimeZone as _, Utc};
+        // 01:00 UTC on the 22nd is still the 21st five hours west.
+        let now = SystemTime::from(Utc.with_ymd_and_hms(2026, 10, 22, 3, 0, 0).unwrap());
+        let then = Some(SystemTime::from(
+            Utc.with_ymd_and_hms(2026, 10, 22, 1, 0, 0).unwrap(),
+        ));
+        let west = FixedOffset::west_opt(5 * 3600).unwrap();
+        assert_eq!(format_modified_in(then, now, &Utc), "1:00 AM");
+        assert_eq!(format_modified_in(then, now, &west), "8:00 PM");
+    }
+
+    #[test]
+    fn formats_full_timestamps() {
+        use chrono::{TimeZone as _, Utc};
+        let t = SystemTime::from(Utc.with_ymd_and_hms(2024, 3, 4, 15, 4, 0).unwrap());
+        assert_eq!(format_timestamp_in(Some(t), &Utc), "Mar 4, 2024 at 3:04 PM");
+        assert_eq!(format_timestamp_in(None, &Utc), "—");
     }
 
     #[test]

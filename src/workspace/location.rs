@@ -138,27 +138,11 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         let theme = *cx.theme();
         let focused = self.path_input.focus_handle(cx).is_focused(window);
-        div()
+        ui::top_bar::field(&theme, focused, self.path_error.is_some())
             .id("location-field")
             .key_context("PathInput")
-            .flex()
             .flex_1()
             .min_w_0()
-            .items_center()
-            .gap_2()
-            .h(px(36.))
-            .px_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(if self.path_error.is_some() {
-                theme.warn
-            } else if focused {
-                theme.accent
-            } else {
-                theme.border
-            })
-            .bg(theme.bg)
-            .text_sm()
             .child(if self.path_loading {
                 ui::icon::spinner(
                     "icons/loader-circle.svg",
@@ -172,10 +156,7 @@ impl Workspace {
                     .into_any_element()
             })
             .child(div().flex_1().min_w_0().child(self.path_input.clone()))
-            .tooltip(ui::tooltip::text_tooltip(
-                "Edit the path, then press Enter to go",
-                theme,
-            ))
+            .tooltip(self.action_tip("Edit the path, then press Enter", "location", cx))
     }
 }
 

@@ -20,7 +20,7 @@ pub fn settings_card(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
     super::card(theme)
         .id(id)
         .w(px(780.))
-        .bg(theme.bg)
+        .bg(theme.elevated)
         .overflow_hidden()
 }
 
@@ -116,30 +116,36 @@ pub fn segmented(theme: &Theme) -> Div {
         .items_center()
         .gap(px(2.))
         .p(px(2.))
-        .rounded_md()
-        .bg(theme.hover)
+        .rounded_lg()
+        .bg(theme.field)
 }
 
-/// One choice in a [`segmented`] control; `selected` fills it with the
-/// accent. Callers chain `.on_click`.
+/// One choice in a [`segmented`] control; `selected` raises it out of the
+/// track (elevated fill + soft shadow), matching the list/grid toggle.
+/// Callers chain `.on_click`.
 pub fn segment(
     theme: &Theme,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     selected: bool,
 ) -> Stateful<Div> {
+    let text = theme.text;
     let base = div()
         .id(id)
-        .px_2()
-        .py(px(2.))
-        .rounded_sm()
+        .px_2p5()
+        .py(px(3.))
+        .rounded_md()
         .cursor_pointer()
         .text_xs()
         .child(label.into());
     if selected {
-        base.bg(theme.accent).text_color(theme.on_accent)
+        base.bg(theme.elevated)
+            .shadow_xs()
+            .text_color(theme.text)
+            .font_weight(gpui::FontWeight::MEDIUM)
     } else {
         base.text_color(theme.text_dim)
+            .hover(move |s| s.text_color(text))
     }
 }
 
@@ -221,6 +227,9 @@ pub fn navigation(theme: &Theme) -> Div {
         .w(px(176.))
         .p_3()
         .gap_1()
+        // gpui clips children to the card's box but not its radius, so the
+        // tinted column rounds its own outer corner to match the card.
+        .rounded_bl_xl()
         .bg(theme.panel)
         .border_r_1()
         .border_color(theme.border)
@@ -261,7 +270,9 @@ pub fn page(id: &'static str) -> Stateful<Div> {
         .flex_1()
         .min_w_0()
         .min_h_0()
-        .overflow_y_scroll()
+        // Scrolled by the workspace's `motion::SmoothScroll` (tracked
+        // handle + wheel listener), not gpui's instant line jumps.
+        .overflow_hidden()
         .p_5()
         .gap_5()
 }
