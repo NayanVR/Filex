@@ -552,7 +552,14 @@ impl Workspace {
                         this.phrases_literal = literal_won.then(|| this.query.clone());
                         let kept = refresh.then(|| this.selected_result_paths());
                         this.results_key = Some(key);
-                        record_latency(&mut this.search_latency, &this.query, issued.elapsed());
+                        let took = issued.elapsed();
+                        tracing::debug!(
+                            chars = this.query.chars().count(),
+                            hits = hits.len(),
+                            ms = took.as_secs_f64() * 1000.,
+                            "search answered"
+                        );
+                        record_latency(&mut this.search_latency, &this.query, took);
                         this.search_page_query = query.map(|mut q| {
                             q.epoch_hint = Some(epoch);
                             q

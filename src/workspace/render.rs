@@ -680,6 +680,8 @@ impl Render for Workspace {
                 cx.listener(|this, _: &ExtendPrevious, _, cx| this.move_selection(-1, true, cx)),
             )
             .on_action(cx.listener(|this, _: &ExtendNext, _, cx| this.move_selection(1, true, cx)))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.page_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page_selection(1, cx)))
             .on_action(cx.listener(|this, _: &OpenSelected, window, cx| {
                 if this.conflict.is_some() {
                     this.resolve_conflict(true, cx);

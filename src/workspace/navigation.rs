@@ -216,6 +216,27 @@ impl Workspace {
         cx.notify();
     }
 
+    /// PageUp / PageDown (`direction` ±1): move by one screen of rows, in
+    /// both the list and the grid.
+    pub(super) fn page_selection(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let (handle, cols) = if self.query.is_empty() {
+            (&self.browse_scroll, self.browse_cols)
+        } else {
+            (&self.results_scroll, 1)
+        };
+        let rows = self.active_list_len().div_ceil(cols.max(1));
+        let step = match handle.0.borrow().last_item_size {
+            Some(size) => page_items(
+                f32::from(size.item.height),
+                f32::from(size.contents.height),
+                rows,
+                cols,
+            ),
+            None => 1,
+        };
+        self.move_selection(direction * step as isize, false, cx);
+    }
+
     /// Enter / double-click: directories navigate, files open with the
     /// platform's default application.
     pub(super) fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -511,9 +532,29 @@ fn browse_row(ix: usize, cols: usize) -> usize {
     ix / cols.max(1)
 }
 
+/// Entries in one screen: whole rows visible in `viewport_h`, given the
+/// list's `content_h` spread over `rows` uniform rows of `cols` entries.
+fn page_items(viewport_h: f32, content_h: f32, rows: usize, cols: usize) -> usize {
+    if rows == 0 || content_h <= 0. {
+        return 1;
+    }
+    let row_h = content_h / rows as f32;
+    ((viewport_h / row_h).floor() as usize).max(1) * cols.max(1)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::browse_row;
+    use super::{browse_row, page_items};
+
+    /// Regression (FIL-27 §3): PageDown did nothing; a page is the rows that
+    /// fit on screen, times the grid's columns.
+    #[test]
+    fn page_is_visible_rows_times_columns() {
+        assert_eq!(page_items(500., 2800., 100, 1), 17); // 28 px rows
+        assert_eq!(page_items(500., 2000., 10, 6), 12); // 200 px cards, 2.5 rows
+        assert_eq!(page_items(100., 2000., 10, 6), 6); // card taller than view
+        assert_eq!(page_items(500., 0., 0, 1), 1);
+    }
 
     /// Regression: reveal/arrow keys in grid view scrolled to row `ix`
     /// (an entry index), landing far below the selected card.

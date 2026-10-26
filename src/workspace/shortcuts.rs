@@ -123,6 +123,24 @@ pub fn catalog() -> Vec<Shortcut> {
             ExtendNext
         ),
         entry!(
+            "page_up",
+            "Page up",
+            "Selection & files",
+            "pageup",
+            &[],
+            true,
+            PageUp
+        ),
+        entry!(
+            "page_down",
+            "Page down",
+            "Selection & files",
+            "pagedown",
+            &[],
+            true,
+            PageDown
+        ),
+        entry!(
             "open",
             "Open selected item",
             "Selection & files",
@@ -427,7 +445,10 @@ pub fn bindings(overrides: &BTreeMap<String, String>) -> Vec<KeyBinding> {
             let text_key = !stroke.modifiers.control
                 && !stroke.modifiers.platform
                 && !stroke.modifiers.alt
-                && !matches!(stroke.key.as_str(), "up" | "down" | "enter" | "f5");
+                && !matches!(
+                    stroke.key.as_str(),
+                    "up" | "down" | "pageup" | "pagedown" | "enter" | "f5"
+                );
             let context = if !spec.in_editor || text_key {
                 "Workspace && !Settings && !SearchInput"
             } else if matches!(
@@ -516,6 +537,8 @@ fn label_for(chord: &str, mac: bool) -> String {
     parts.push(match key.key.as_str() {
         "up" => "↑".into(),
         "down" => "↓".into(),
+        "pageup" => "Page Up".into(),
+        "pagedown" => "Page Down".into(),
         "left" => "←".into(),
         "right" => "→".into(),
         "enter" => if mac { "↩" } else { "Enter" }.into(),

@@ -243,7 +243,9 @@ impl Workspace {
                     .await;
                 if this
                     .update(cx, |this, cx| {
-                        match outcome {
+                        // Polled at 10 Hz; repainting on every poll kept the
+                        // idle window awake (FIL-27 §2).
+                        let repaint = match outcome {
                             Ok((client, status)) => {
                                 // A Magic plan keeps its captured epoch while the
                                 // filesystem changes. Refresh it on initial recovery,
@@ -254,6 +256,12 @@ impl Workspace {
                                 let changed = this.service.is_none()
                                     || status.epoch != this.daemon_status.epoch
                                     || status.building != this.daemon_status.building;
+                                let repaint = needs_repaint(
+                                    this.service.is_some(),
+                                    &this.daemon_status,
+                                    true,
+                                    &status,
+                                );
                                 this.service = Some(client);
                                 this.roots =
                                     status.roots.iter().map(IndexedRoot::from_status).collect();
@@ -266,15 +274,26 @@ impl Workspace {
                                 if changed && refresh && !this.query.is_empty() {
                                     this.update_search(cx);
                                 }
+                                repaint
                             }
                             Err(_) => {
-                                this.service = None;
-                                this.daemon_status.error = Some(
+                                let mut next = this.daemon_status.clone();
+                                next.error = Some(
                                     "Search unavailable — reconnecting to filex-indexd".into(),
                                 );
+                                let repaint = needs_repaint(
+                                    this.service.take().is_some(),
+                                    &this.daemon_status,
+                                    false,
+                                    &next,
+                                );
+                                this.daemon_status = next;
+                                repaint
                             }
+                        };
+                        if repaint {
+                            cx.notify();
                         }
-                        cx.notify();
                     })
                     .is_err()
                 {
@@ -348,5 +367,42 @@ impl Workspace {
                 }
             })
             .detach();
+    }
+}
+
+/// Whether a daemon poll changed anything the window shows: connecting,
+/// disconnecting, or a different status. The probe polls at 10 Hz, so
+/// repainting unconditionally kept an idle window awake (FIL-27 §2).
+fn needs_repaint(
+    was_connected: bool,
+    prev: &filex::daemon::ipc::Status,
+    connected: bool,
+    next: &filex::daemon::ipc::Status,
+) -> bool {
+    was_connected != connected || prev != next
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_repaint;
+    use filex::daemon::ipc::Status;
+
+    /// Regression (FIL-27 §2): an unchanged poll must not repaint.
+    #[test]
+    fn repaints_only_on_change() {
+        let idle = Status::default();
+        let building = Status {
+            building: true,
+            ..Status::default()
+        };
+        let down = Status {
+            error: Some("reconnecting".into()),
+            ..Status::default()
+        };
+        assert!(!needs_repaint(true, &idle, true, &idle));
+        assert!(needs_repaint(true, &idle, true, &building));
+        assert!(needs_repaint(false, &idle, true, &idle)); // connected
+        assert!(needs_repaint(true, &idle, false, &down)); // dropped
+        assert!(!needs_repaint(false, &down, false, &down)); // still down
     }
 }

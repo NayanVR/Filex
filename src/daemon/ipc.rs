@@ -53,14 +53,14 @@ pub struct Hit {
     pub identity: Identity,
     pub tier: Tier,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootStatus {
     #[serde(with = "crate::catalog::path_codec")]
     pub path: PathBuf,
     pub files: u64,
     pub state: String,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub epoch: u64,
     pub roots: Vec<RootStatus>,
