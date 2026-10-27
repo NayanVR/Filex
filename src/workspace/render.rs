@@ -226,8 +226,8 @@ impl Workspace {
             ui::status_bar::item_count(self.entries.len()).into()
         } else {
             format!(
-                "{} results · {}",
-                self.results.len(),
+                "{} · {}",
+                ui::status_bar::result_count(self.results.len()),
                 self.search_scope.label()
             )
             .into()
@@ -331,9 +331,15 @@ impl Workspace {
         };
         ui::list_row::header_row(&theme, theme.icon_size)
             .child(
-                ui::list_row::header_cell(&theme, "sort-name", "Name", active(SortBy::Name))
-                    .flex_1()
-                    .on_click(on_sort(SortBy::Name)),
+                ui::list_row::header_cell(
+                    &theme,
+                    "sort-name",
+                    "Name",
+                    active(SortBy::Name),
+                    ui::list_row::HeaderAlign::Start,
+                )
+                .flex_1()
+                .on_click(on_sort(SortBy::Name)),
             )
             .child(
                 ui::list_row::header_cell(
@@ -341,18 +347,23 @@ impl Workspace {
                     "sort-modified",
                     "Modified",
                     active(SortBy::Modified),
+                    ui::list_row::HeaderAlign::End,
                 )
                 .w(px(ui::list_row::MODIFIED_COL_WIDTH))
                 .flex_none()
-                .justify_end()
                 .on_click(on_sort(SortBy::Modified)),
             )
             .child(
-                ui::list_row::header_cell(&theme, "sort-size", "Size", active(SortBy::Size))
-                    .w(px(ui::list_row::SIZE_COL_WIDTH))
-                    .flex_none()
-                    .justify_end()
-                    .on_click(on_sort(SortBy::Size)),
+                ui::list_row::header_cell(
+                    &theme,
+                    "sort-size",
+                    "Size",
+                    active(SortBy::Size),
+                    ui::list_row::HeaderAlign::End,
+                )
+                .w(px(ui::list_row::SIZE_COL_WIDTH))
+                .flex_none()
+                .on_click(on_sort(SortBy::Size)),
             )
     }
 
@@ -491,12 +502,7 @@ impl Workspace {
         } else if self.query.is_empty() {
             ui::status_bar::item_count(self.entries.len()).into()
         } else {
-            format!(
-                "{} result{}",
-                self.results.len(),
-                if self.results.len() == 1 { "" } else { "s" }
-            )
-            .into()
+            ui::status_bar::result_count(self.results.len()).into()
         };
         ui::status_bar::status_bar(
             theme,

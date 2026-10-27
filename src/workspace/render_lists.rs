@@ -461,7 +461,6 @@ impl Workspace {
             size * 0.8
         };
         let icon = self.render_icon_cell(&name, &path, is_dir, icon_edge, cx);
-        let drag = self.drag_items(ix, *theme);
         let (label, truncated) = ui::grid::card_name(theme, width, &name, cx);
         let card = ui::grid::card(theme, ("card", ix), size, width, is_selected)
             // The full name only when the label had to cut it.
@@ -490,12 +489,7 @@ impl Workspace {
                     this.open_entry_menu(ix, false, event.position, window, cx);
                 }),
             );
-        let card = card.when_some(drag, |card, items| {
-            card.on_drag(items, |items, position, _window, cx| {
-                cx.new(|_| items.clone().at(position))
-            })
-            .external_drag_payload(|items: &DragItems, _, _| items.external_payload())
-        });
+        let card = self.drag_source(card, ix, *theme);
         let card = if is_dir {
             self.folder_drop_target(card, path, *theme, cx)
         } else {
@@ -545,7 +539,6 @@ impl Workspace {
                                 .child(div().w_full().text_sm().truncate().child(name))
                                 .into_any_element(),
                         };
-                        let drag = (!is_renaming).then(|| this.drag_items(ix, theme)).flatten();
                         let row = ui::list_row::list_row(&theme, ix, is_selected)
                             // Full name on hover (helps when it's truncated);
                             // suppressed mid-rename so it doesn't cover the
@@ -585,15 +578,13 @@ impl Workspace {
                                     this.open_entry_menu(ix, false, event.position, window, cx);
                                 }),
                             );
-                        // Any row can be a drag source; only folders accept a drop.
-                        let row = row.when_some(drag, |row, items| {
-                            row.on_drag(items, |items, position, _window, cx| {
-                                cx.new(|_| items.clone().at(position))
-                            })
-                            .external_drag_payload(
-                                |items: &DragItems, _, _| items.external_payload(),
-                            )
-                        });
+                        // Any row can be a drag source (not mid-rename); only
+                        // folders accept a drop.
+                        let row = if is_renaming {
+                            row
+                        } else {
+                            this.drag_source(row, ix, theme)
+                        };
                         let row = row.when(is_dir, |row| {
                             this.folder_drop_target(row, path.clone(), theme, cx)
                         });
@@ -634,28 +625,35 @@ impl Workspace {
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
                         let icon = this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
-                        Some(
-                            ui::list_row::list_row(&theme, ix, is_selected)
-                                .h(px((theme.row_height + 16.).max(44.)))
-                                .tooltip(ui::tooltip::text_tooltip(path_label.clone(), theme))
-                                .child(icon)
-                                .child(ui::list_row::search_label(&theme, name, path_label))
-                                .on_click(cx.listener(
-                                    move |this, event: &ClickEvent, _window, cx| {
-                                        if event.click_count() >= 2 {
-                                            this.activate(ix, cx);
-                                        } else {
-                                            this.select_click(ix, event.modifiers(), cx);
-                                        }
-                                    },
-                                ))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                        this.open_entry_menu(ix, true, event.position, window, cx);
-                                    }),
-                                ),
-                        )
+                        let menu_closed = this.context_menu.is_none();
+                        let row = ui::list_row::list_row(&theme, ix, is_selected)
+                            .h(px((theme.row_height + 16.).max(44.)))
+                            .when(menu_closed, |row| {
+                                row.tooltip(ui::tooltip::text_tooltip(path_label.clone(), theme))
+                            })
+                            .child(icon)
+                            .child(ui::list_row::search_label(&theme, name, path_label))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                                if event.click_count() >= 2 {
+                                    this.activate(ix, cx);
+                                } else {
+                                    this.select_click(ix, event.modifiers(), cx);
+                                }
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.open_entry_menu(ix, true, event.position, window, cx);
+                                }),
+                            );
+                        // Results drag like browse rows (into folders, other
+                        // apps); folder results accept drops.
+                        let row = this.drag_source(row, ix, theme);
+                        Some(if is_dir {
+                            this.folder_drop_target(row, path, theme, cx)
+                        } else {
+                            row
+                        })
                     })
                     .collect()
             }),
