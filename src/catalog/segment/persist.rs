@@ -31,10 +31,15 @@ struct Image {
 
 impl Segment {
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.save_image(path, crate::catalog::normalize::VERSION)
+    }
+    /// Split from `save` so tests can write an image stamped with another
+    /// name-normalization version.
+    fn save_image(&self, path: &Path, normalization: u32) -> Result<()> {
         let mut w = Writer::create(path)?;
         let image = Image {
             root_files: self.root_files.clone(),
-            normalization: crate::catalog::normalize::VERSION,
+            normalization,
             roots: self.roots.clone(),
             sequence: self.sequence,
             search: self.search.save(&mut w)?,
@@ -307,5 +312,250 @@ impl Segment {
             "unsorted native lookup"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two roots: `/a/sub/deep/f` (IDs 1-4) and `/b/g` (IDs 5-6); slot = ID - 1.
+    fn fixture() -> Segment {
+        let record = |id: u64, parent: u64, root: u32, name: &str, dir: bool| Record {
+            id,
+            parent,
+            root,
+            name: name.as_bytes().to_vec(),
+            flags: u8::from(dir),
+            identity: Identity {
+                device: 1,
+                key: id,
+                birth: 1,
+            },
+            size: Some(id),
+            mtime: Some(1_700_000_000),
+        };
+        let records = [
+            record(1, 0, 1, "a", true),
+            record(2, 1, 1, "sub", true),
+            record(3, 2, 1, "deep", true),
+            record(4, 3, 1, "f", false),
+            record(5, 0, 2, "b", true),
+            record(6, 5, 2, "g", false),
+        ];
+        let roots = [(1, "/a"), (2, "/b")]
+            .map(|(id, path)| Root {
+                id,
+                path: path.into(),
+                device: 1,
+            })
+            .to_vec();
+        Segment::build(records, roots, 9).unwrap()
+    }
+
+    fn with_parent(segment: &mut Segment, slot: usize, parent: u64) {
+        let mut parents: Vec<u64> = segment.parents.iter().collect();
+        parents[slot] = parent;
+        segment.parents = parents.into();
+    }
+
+    fn assert_rejects(segment: &Segment, message: &str) {
+        let error = format!("{:#}", segment.validate().unwrap_err());
+        assert!(
+            error.contains(message),
+            "expected {message:?}, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_fixture() {
+        fixture().validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_column_length_mismatch() {
+        let mut segment = fixture();
+        segment.births = vec![1u64; 5].into();
+        assert_rejects(&segment, "catalog column mismatch");
+    }
+
+    #[test]
+    fn rejects_unsorted_or_zero_file_ids() {
+        let mut segment = fixture();
+        segment.ids = vec![1u64, 2, 2, 4, 5, 6].into();
+        assert_rejects(&segment, "invalid file IDs");
+        let mut segment = fixture();
+        segment.ids = vec![0u64, 2, 3, 4, 5, 6].into();
+        assert_rejects(&segment, "invalid file IDs");
+    }
+
+    #[test]
+    fn rejects_inconsistent_raw_name_offsets() {
+        let mut segment = fixture();
+        let mut offsets: Vec<u32> = segment.raw_offsets.iter().collect();
+        offsets[0] = 1;
+        segment.raw_offsets = offsets.into();
+        assert_rejects(&segment, "invalid raw names");
+    }
+
+    #[test]
+    fn rejects_out_of_range_references() {
+        let mut segment = fixture();
+        segment.names = vec![0u32, 1, 2, 3, 4, 99].into();
+        assert_rejects(&segment, "invalid catalog references");
+        let mut segment = fixture();
+        segment.children = vec![0u32, 4, 1, 2, 3, 6].into();
+        assert_rejects(&segment, "invalid catalog references");
+        let mut segment = fixture();
+        segment.native_order = vec![0u32, 1, 2, 3, 4, 6].into();
+        assert_rejects(&segment, "invalid catalog references");
+    }
+
+    #[test]
+    fn rejects_zero_or_unsorted_tombstones() {
+        let mut segment = fixture();
+        segment.tombstones = Some(vec![0, 7]);
+        assert_rejects(&segment, "invalid tombstones");
+        let mut segment = fixture();
+        segment.tombstones = Some(vec![8, 7]);
+        assert_rejects(&segment, "invalid tombstones");
+    }
+
+    #[test]
+    fn rejects_duplicate_or_zero_root_ids() {
+        let mut segment = fixture();
+        let duplicate = segment.roots[0].clone();
+        segment.roots.push(duplicate);
+        assert_rejects(&segment, "duplicate or zero root ID");
+        let mut segment = fixture();
+        segment.roots[0].id = 0;
+        assert_rejects(&segment, "duplicate or zero root ID");
+    }
+
+    #[test]
+    fn rejects_record_under_unknown_root() {
+        let mut segment = fixture();
+        segment.roots.pop();
+        assert_rejects(&segment, "unknown root");
+    }
+
+    #[test]
+    fn rejects_root_record_that_is_not_a_directory() {
+        let mut segment = fixture();
+        let mut flags: Vec<u8> = segment.flags.to_vec();
+        flags[4] &= !Record::DIRECTORY;
+        segment.flags = flags.into();
+        assert_rejects(&segment, "root record is not a directory");
+    }
+
+    #[test]
+    fn rejects_missing_parent_unless_delta() {
+        let mut segment = fixture();
+        with_parent(&mut segment, 5, 99);
+        assert_rejects(&segment, "missing parent");
+        // A delta's parent may live in an older level.
+        segment.tombstones = Some(Vec::new());
+        segment.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_parent_that_is_a_file() {
+        let mut segment = fixture();
+        with_parent(&mut segment, 5, 4);
+        assert_rejects(&segment, "missing parent");
+    }
+
+    #[test]
+    fn rejects_parent_in_another_root() {
+        let mut segment = fixture();
+        with_parent(&mut segment, 5, 3);
+        assert_rejects(&segment, "parent crosses roots");
+    }
+
+    #[test]
+    fn rejects_parent_cycles() {
+        let mut segment = fixture();
+        with_parent(&mut segment, 1, 2);
+        assert_rejects(&segment, "parent cycle");
+        let mut segment = fixture();
+        // sub -> deep -> sub
+        with_parent(&mut segment, 1, 3);
+        assert_rejects(&segment, "parent cycle");
+    }
+
+    #[test]
+    fn rejects_invalid_metadata_keys() {
+        let mut segment = fixture();
+        segment.meta_keys.push("~extra".into());
+        assert_rejects(&segment, "invalid metadata keys");
+    }
+
+    #[test]
+    fn rejects_root_lookup_to_non_root_record() {
+        let mut segment = fixture();
+        segment.root_files[0] = (1, 2);
+        assert_rejects(&segment, "invalid root records");
+        let mut segment = fixture();
+        segment.root_files[0] = (2, 1);
+        assert_rejects(&segment, "invalid root records");
+    }
+
+    #[test]
+    fn rejects_incomplete_or_duplicate_root_lookup() {
+        let mut segment = fixture();
+        segment.root_files.pop();
+        assert_rejects(&segment, "incomplete or duplicate root lookup");
+        let mut segment = fixture();
+        segment.root_files = vec![(1, 1), (1, 1)];
+        assert_rejects(&segment, "incomplete or duplicate root lookup");
+    }
+
+    #[test]
+    fn rejects_duplicate_lookup_ordinals() {
+        let mut segment = fixture();
+        let mut children: Vec<u32> = segment.children.iter().collect();
+        children[1] = children[0];
+        segment.children = children.into();
+        assert_rejects(&segment, "duplicate child ordinal");
+        let mut segment = fixture();
+        segment.native_order = vec![0u32, 0, 2, 3, 4, 5].into();
+        assert_rejects(&segment, "duplicate native ordinal");
+    }
+
+    #[test]
+    fn rejects_unsorted_lookups() {
+        let mut segment = fixture();
+        let mut children: Vec<u32> = segment.children.iter().collect();
+        children.reverse();
+        segment.children = children.into();
+        assert_rejects(&segment, "unsorted child lookup");
+        let mut segment = fixture();
+        segment.native_order = vec![1u32, 0, 2, 3, 4, 5].into();
+        assert_rejects(&segment, "unsorted native lookup");
+    }
+
+    #[test]
+    fn open_roundtrip_preserves_root_counts() {
+        let segment = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("segment.fx2");
+        segment.save(&path).unwrap();
+        let reopened = unsafe { Segment::open(&path) }.unwrap();
+        assert_eq!(reopened.sequence, 9);
+        assert_eq!(reopened.root_files, segment.root_files);
+        for root in [1, 2, 3] {
+            assert_eq!(reopened.root_count(root), segment.root_count(root));
+        }
+        assert_eq!((reopened.root_count(1), reopened.root_count(2)), (3, 1));
+    }
+
+    #[test]
+    fn open_rejects_other_normalization_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("segment.fx2");
+        let version = crate::catalog::normalize::VERSION.wrapping_add(1);
+        fixture().save_image(&path, version).unwrap();
+        let error = unsafe { Segment::open(&path) }.err().unwrap();
+        assert!(format!("{error:#}").contains("normalization mismatch"));
     }
 }

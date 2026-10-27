@@ -848,3 +848,123 @@ impl Workspace {
         .detach();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filex::settings::{FolderIcon, Settings};
+    use std::collections::BTreeSet;
+
+    fn with_icons(entries: &[(&str, FolderIcon)]) -> Settings {
+        let mut settings = Settings::default();
+        for (path, icon) in entries {
+            settings.folder_icons.insert(PathBuf::from(path), *icon);
+        }
+        settings
+    }
+
+    fn icon_paths(settings: &Settings) -> BTreeSet<PathBuf> {
+        settings.folder_icons.keys().cloned().collect()
+    }
+
+    fn paths(list: &[&str]) -> BTreeSet<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
+    }
+
+    fn assert_move_like_round_trips(op: ops::AppliedOp) {
+        let mut settings = with_icons(&[
+            ("/a/Photos", FolderIcon::Pictures),
+            ("/a/Photos/Raw", FolderIcon::Code),
+            ("/a/Music", FolderIcon::Music),
+        ]);
+        apply_folder_icon_op(&mut settings, &op, false);
+        assert_eq!(
+            icon_paths(&settings),
+            paths(&["/a/Music", "/b/Photos", "/b/Photos/Raw"])
+        );
+        assert_eq!(
+            settings.folder_icons.get(Path::new("/b/Photos/Raw")),
+            Some(&FolderIcon::Code)
+        );
+
+        apply_folder_icon_op(&mut settings, &op, true);
+        assert_eq!(
+            icon_paths(&settings),
+            paths(&["/a/Music", "/a/Photos", "/a/Photos/Raw"])
+        );
+        assert_eq!(
+            settings.folder_icons.get(Path::new("/a/Photos")),
+            Some(&FolderIcon::Pictures)
+        );
+    }
+
+    #[test]
+    fn folder_icon_moved_choices_follow_and_undo_returns_them() {
+        assert_move_like_round_trips(ops::AppliedOp::Moved {
+            from: "/a/Photos".into(),
+            to: "/b/Photos".into(),
+        });
+    }
+
+    #[test]
+    fn folder_icon_renamed_choices_follow_and_undo_returns_them() {
+        assert_move_like_round_trips(ops::AppliedOp::Renamed {
+            from: "/a/Photos".into(),
+            to: "/b/Photos".into(),
+        });
+    }
+
+    #[test]
+    fn folder_icon_copied_gains_choices_and_undo_clears_only_the_copy() {
+        let mut settings = with_icons(&[
+            ("/a/Photos", FolderIcon::Pictures),
+            ("/a/Photos/Raw", FolderIcon::Code),
+        ]);
+        let op = ops::AppliedOp::Copied {
+            from: "/a/Photos".into(),
+            to: "/a/Photos 2".into(),
+        };
+        apply_folder_icon_op(&mut settings, &op, false);
+        assert_eq!(
+            icon_paths(&settings),
+            paths(&[
+                "/a/Photos",
+                "/a/Photos 2",
+                "/a/Photos 2/Raw",
+                "/a/Photos/Raw"
+            ])
+        );
+
+        apply_folder_icon_op(&mut settings, &op, true);
+        assert_eq!(
+            icon_paths(&settings),
+            paths(&["/a/Photos", "/a/Photos/Raw"])
+        );
+        assert_eq!(
+            settings.folder_icons.get(Path::new("/a/Photos")),
+            Some(&FolderIcon::Pictures)
+        );
+    }
+
+    #[test]
+    fn folder_icon_deleted_and_created_leave_choices_alone_both_ways() {
+        let before = with_icons(&[("/a/Photos", FolderIcon::Pictures)]);
+        let ops = [
+            ops::AppliedOp::Deleted {
+                original: "/a/Photos".into(),
+                restore: ops::TrashRestore::Unknown,
+                removed_tags: Vec::new(),
+            },
+            ops::AppliedOp::Created {
+                path: "/a/Photos".into(),
+            },
+        ];
+        for op in &ops {
+            for undo in [false, true] {
+                let mut settings = before.clone();
+                apply_folder_icon_op(&mut settings, op, undo);
+                assert_eq!(settings, before, "{op:?} undo={undo}");
+            }
+        }
+    }
+}

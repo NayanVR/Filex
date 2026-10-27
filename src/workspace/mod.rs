@@ -65,6 +65,8 @@ actions!(
         SelectNext,
         ExtendPrevious,
         ExtendNext,
+        PageUp,
+        PageDown,
         OpenSelected,
         ToggleShortcuts,
         ToggleView,
