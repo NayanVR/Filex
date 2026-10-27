@@ -362,6 +362,14 @@ multi-step plan built from the existing `search_filter`/`phrases.rs`
 grammar and `ops::FileOp`/`Journal`. No embeddings, no model on the
 keystroke path. Not started.
 
+## Phase 2g — Drop-in replacement (started 2026-10-27)
+
+Filex as the default file explorer (folders, drives, Win+E) and in place
+of other apps' Open/Save dialogs, both opt-in under Settings ›
+Integration. This deliberately opens two pieces of Phase 3's "shell
+integration"; Explorer plugins stay out. Design, limits and per-OS plan:
+**docs/design-default-explorer.md**.
+
 ## Phase 3 — Future (unchanged, still out of scope)
 
 Semantic search / embeddings, content extraction (OCR, PDF), local ML
