@@ -212,17 +212,25 @@ fn covered_by_other_app(stack: &[WindowFacts], (x, y): (i32, i32)) -> bool {
 /// painting. A one-shot thread timer's callback is invoked by GPUI's own
 /// top-level `GetMessage`/`DispatchMessage` loop, with nothing of GPUI's
 /// on the stack.
-pub(super) fn drag_out_soon(paths: Vec<PathBuf>) {
-    PENDING_DRAG.with(|pending| *pending.borrow_mut() = Some(paths));
+///
+/// The returned receiver resolves once the drag is over (dropped,
+/// cancelled or failed), so the caller can refresh what it moved.
+pub(super) fn drag_out_soon(paths: Vec<PathBuf>) -> futures::channel::oneshot::Receiver<()> {
+    let (done, finished) = futures::channel::oneshot::channel();
+    PENDING_DRAG.with(|pending| *pending.borrow_mut() = Some((paths, done)));
     // SAFETY: a one-shot thread timer (no window); the callback kills it.
     if unsafe { SetTimer(None, 0, 0, Some(run_pending_drag)) } == 0 {
         tracing::warn!("file drag to another app: could not schedule the drag");
+        // Dropping the queued sender resolves the receiver as cancelled.
+        PENDING_DRAG.with(|pending| pending.borrow_mut().take());
     }
+    finished
 }
 
 thread_local! {
-    /// The paths [`drag_out_soon`] queued for [`run_pending_drag`].
-    static PENDING_DRAG: std::cell::RefCell<Option<Vec<PathBuf>>> =
+    /// The paths [`drag_out_soon`] queued for [`run_pending_drag`], with
+    /// the sender that reports the drag finished.
+    static PENDING_DRAG: std::cell::RefCell<Option<(Vec<PathBuf>, futures::channel::oneshot::Sender<()>)>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -230,7 +238,7 @@ thread_local! {
 unsafe extern "system" fn run_pending_drag(_: HWND, _: u32, id: usize, _: u32) {
     // SAFETY: kills the thread timer this callback was invoked for.
     let _ = unsafe { KillTimer(None, id) };
-    let Some(paths) = PENDING_DRAG.with(|pending| pending.borrow_mut().take()) else {
+    let Some((paths, done)) = PENDING_DRAG.with(|pending| pending.borrow_mut().take()) else {
         tracing::debug!("drag timer fired with nothing queued");
         return;
     };
@@ -238,6 +246,7 @@ unsafe extern "system" fn run_pending_drag(_: HWND, _: u32, id: usize, _: u32) {
     if let Err(err) = drag_out(&paths) {
         tracing::warn!("file drag to another app failed: {err:#}");
     }
+    let _ = done.send(());
 }
 
 /// Runs the OLE drag loop until the user drops or cancels (Esc). Assumes

@@ -509,6 +509,7 @@ impl Workspace {
             left,
             self.index_status_text(),
             self.index_status_color(theme),
+            self.index_status_tip(),
         )
     }
 

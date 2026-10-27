@@ -369,14 +369,18 @@ pub(super) fn primary_button_down() -> bool {
 }
 
 /// Begin the OS file drag for `paths` (see [`hands_off_drags`]). Returns
-/// at once: the drag starts after the calling handler has returned.
+/// at once: the drag starts after the calling handler has returned. The
+/// receiver resolves `Ok` once the drag is over; it's cancelled where
+/// there is no OS drag.
 #[cfg(target_os = "windows")]
-pub(super) fn start_os_drag(paths: Vec<PathBuf>) {
-    super::shell_windows::drag_out_soon(paths);
+pub(super) fn start_os_drag(paths: Vec<PathBuf>) -> futures::channel::oneshot::Receiver<()> {
+    super::shell_windows::drag_out_soon(paths)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn start_os_drag(_paths: Vec<PathBuf>) {}
+pub(super) fn start_os_drag(_paths: Vec<PathBuf>) -> futures::channel::oneshot::Receiver<()> {
+    futures::channel::oneshot::channel().1
+}
 
 /// Whether the main window hides the system titlebar and the tab bar
 /// draws the minimize/maximize/close buttons itself
