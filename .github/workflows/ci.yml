@@ -103,8 +103,10 @@ jobs:
         # Don't apply our `-D warnings` to a third-party tool's own build.
         env:
           RUSTFLAGS: ""
-      - name: Build release binaries (app + daemon)
-        run: cargo build --release --locked
+      - name: Build release binaries (app + daemon + dialog shim)
+        run: |
+          cargo build --release --locked
+          cargo build --release --locked -p filex-dialog-shim
       - name: Build the MSI
         run: cargo wix --no-build -v
       - name: Smoke test (install, verify binaries, uninstall)
@@ -124,6 +126,7 @@ jobs:
           # V2 uses a per-user daemon, not an elevated machine-wide endpoint.
           if (-not (Test-Path "C:\Program Files\Filex\filex.exe")) { throw "UI was not installed" }
           if (-not (Test-Path "C:\Program Files\Filex\filex-updater.exe")) { throw "filex-updater.exe not installed" }
+          if (-not (Test-Path "C:\Program Files\Filex\filex_dialog_shim.dll")) { throw "filex_dialog_shim.dll not installed" }
           # The update service: demand start, LocalSystem.
           $qc = (sc.exe qc filex-updater) -join "`n"
           if ($LASTEXITCODE -ne 0) { throw "filex-updater service not registered:`n$qc" }
@@ -145,9 +148,24 @@ jobs:
           # unattended FILEX_CRASH_REPORTS=0 opts out (checked below).
           $crash = (Get-ItemProperty "HKLM:\Software\Filex").CrashReports
           if ($crash -ne 1) { throw "CrashReports should default to 1, got '$crash'" }
+          # Settings > Integration, both switches on, as this user. Uninstall
+          # must undo them so folders and file dialogs never point at
+          # deleted files (docs/design-default-explorer.md).
+          foreach ($flag in '--register-default', '--register-dialogs') {
+            $p = Start-Process "C:\Program Files\Filex\filex.exe" -ArgumentList $flag -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "filex $flag failed (exit $($p.ExitCode))" }
+          }
+          $verb = (Get-ItemProperty "HKCU:\Software\Classes\Directory\shell").'(default)'
+          if ($verb -ne 'filex') { throw "Directory default verb should be filex, got '$verb'" }
+          $openDialog = 'HKCU:\Software\Classes\CLSID\{DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7}\InprocServer32'
+          if (-not (Test-Path $openDialog)) { throw "dialog shim was not registered" }
           Write-Host "Uninstalling"
           $p = Start-Process msiexec -ArgumentList "/x `"$($msi.FullName)`" /quiet /norestart /l*v uninstall.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content uninstall.log -Tail 60; throw "uninstall failed (exit $($p.ExitCode))" }
+          if (Test-Path "HKCU:\Software\Classes\Directory\shell\filex") { throw "uninstall left the folder verb registered" }
+          if (Test-Path $openDialog) { throw "uninstall left the dialog shim registered" }
+          $verb = (Get-ItemProperty "HKCU:\Software\Classes\Directory\shell" -ErrorAction SilentlyContinue).'(default)'
+          if ($verb -eq 'filex') { throw "uninstall left filex as the Directory default verb" }
           $p = Start-Process msiexec -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart FILEX_CRASH_REPORTS=0 /l*v optout.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content optout.log -Tail 60; throw "opt-out install failed (exit $($p.ExitCode))" }
           $crash = (Get-ItemProperty "HKLM:\Software\Filex").CrashReports

@@ -70,6 +70,7 @@ jobs:
           cargo build --release --locked --no-default-features --bin filex-indexd
           cargo build --release --locked --no-default-features --features updater --bin filex-updater
           cargo build --release --locked --features observability --bin filex
+          cargo build --release --locked -p filex-dialog-shim
       - name: Build the MSI
         run: cargo wix --no-build -v
       - name: Build filex-sign
