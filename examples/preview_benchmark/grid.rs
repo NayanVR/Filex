@@ -163,18 +163,19 @@ impl Render for Grid {
                                 .to_string_lossy()
                                 .into_owned();
                             let image = view.image(index, edge, cx);
-                            strip =
-                                strip.child(
-                                    ui::grid::card(
-                                        &theme,
-                                        ElementId::Integer(index as u64),
-                                        edge,
-                                        column_width,
-                                        false,
-                                    )
-                                    .child(ui::grid::card_icon_area(edge).child(image))
-                                    .child(ui::grid::card_name(&theme, column_width, &name, cx)),
-                                );
+                            strip = strip.child(
+                                ui::grid::card(
+                                    &theme,
+                                    ElementId::Integer(index as u64),
+                                    edge,
+                                    column_width,
+                                    false,
+                                )
+                                .child(ui::grid::card_icon_area(edge).child(image))
+                                // The benchmark draws no tooltips, so the
+                                // "was truncated" flag is unused.
+                                .child(ui::grid::card_name(&theme, column_width, &name, cx).0),
+                            );
                         }
                         strip
                     })
