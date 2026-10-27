@@ -33,10 +33,12 @@ use crate::ui::theme::{ActiveTheme as _, Theme};
 pub use app::run;
 use filex::context_menu as menu_model;
 use filex::listing::FileKind;
+pub use picker::run_picker;
 pub(crate) use platform::open_with_default_app;
 use platform::{
     AppChoice, OPEN_WITH_OTHER, open_terminal, open_with_app, open_with_choices, open_with_dialog,
 };
+pub use startup::{hand_to_system_explorer, run_shell_command};
 use state::*;
 
 actions!(
@@ -395,6 +397,10 @@ struct Workspace {
     search_client_id: u64,
     /// Mirror of the search input's content (the input entity owns it).
     query: String,
+    /// Set in picker mode (`filex --pick`): another app's Open/Save request.
+    picker: Option<picker::PickerState>,
+    /// What OS integration is registered; `None` until first read.
+    integration_status: Option<filex::shell_integration::Status>,
     search_input: gpui::Entity<SearchInput>,
     path_input: gpui::Entity<SearchInput>,
     _path_subscription: gpui::Subscription,
@@ -544,6 +550,7 @@ struct Workspace {
 mod app;
 mod file_ops;
 mod input;
+mod integration;
 mod location;
 mod menus;
 mod navigation;
@@ -552,6 +559,7 @@ mod onboarding;
 mod open_with_linux;
 #[cfg(target_os = "windows")]
 mod open_with_windows;
+mod picker;
 mod platform;
 mod preferences;
 mod quick_look;
@@ -565,6 +573,7 @@ mod services;
 mod shell_windows;
 mod shortcuts;
 mod sidebar;
+mod startup;
 mod state;
 mod tabs;
 mod tags;
@@ -701,6 +710,8 @@ impl Workspace {
                 .map_or(0, |d| d.as_nanos() as u64)
                 ^ u64::from(std::process::id()),
             query: String::new(),
+            picker: None,
+            integration_status: None,
             search_input,
             path_input,
             _path_subscription: path_subscription,
@@ -770,16 +781,27 @@ impl Workspace {
             update_status: filex::update::UpdateStatus::default(),
             exiting_for_update: false,
         };
-        this.load_dir(&cwd, cx);
-        if this.settings.read(cx).settings().onboarding_pending {
+        // A picker process (`filex --pick`) is a short errand for another
+        // app: it browses and searches, but runs none of the app-lifetime
+        // chores — no welcome tour, no network (update check, crash
+        // upload), no housekeeping. It skips `load_dir` too: the picker
+        // lands on the requested folder itself.
+        let picker_process = cx.has_global::<picker::PickerProcess>();
+        if !picker_process {
+            this.load_dir(&cwd, cx);
+        }
+        if !picker_process && this.settings.read(cx).settings().onboarding_pending {
             this.start_onboarding(cx);
         }
-        this.spawn_tag_prune(cx);
         this.refresh_sidebar_tags(cx);
-        this.spawn_crash_upload(cx);
         this.spawn_service_probe(cx);
         this.spawn_fda_check(cx);
         this.spawn_drive_refresh(cx);
+        if picker_process {
+            return this;
+        }
+        this.spawn_tag_prune(cx);
+        this.spawn_crash_upload(cx);
         #[cfg(feature = "observability")]
         this.spawn_resource_sampling(cx);
         // Update discovery belongs to the UI on every platform.

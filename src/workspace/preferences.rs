@@ -9,15 +9,17 @@ pub(super) enum SettingsSection {
     Browsing,
     Search,
     Keyboard,
+    Integration,
     Privacy,
     About,
 }
 impl SettingsSection {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Appearance,
         Self::Browsing,
         Self::Search,
         Self::Keyboard,
+        Self::Integration,
         Self::Privacy,
         Self::About,
     ];
@@ -27,6 +29,7 @@ impl SettingsSection {
             Self::Browsing => "Files & folders",
             Self::Search => "Search",
             Self::Keyboard => "Keyboard",
+            Self::Integration => "Integration",
             Self::Privacy => "Privacy",
             Self::About => "About",
         }
@@ -37,6 +40,7 @@ impl SettingsSection {
             Self::Browsing => "icons/folder.svg",
             Self::Search => "icons/search.svg",
             Self::Keyboard => "icons/keyboard.svg",
+            Self::Integration => "icons/app-window.svg",
             Self::Privacy => "icons/shield.svg",
             Self::About => "icons/info.svg",
         }
@@ -47,6 +51,7 @@ impl SettingsSection {
             Self::Browsing => "Choose how your files are displayed and handled.",
             Self::Search => "Choose which folders search covers, and what it skips inside them.",
             Self::Keyboard => "Click a shortcut, then press your preferred combination.",
+            Self::Integration => "Let your system open folders and file dialogs in filex.",
             Self::Privacy => "Choose what you share with filex.",
             Self::About => "Your version of filex, and the welcome tour.",
         }
@@ -273,6 +278,11 @@ impl Workspace {
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.settings_section = item;
+                    if item == SettingsSection::Integration {
+                        // The OS may have changed under us (installer,
+                        // another app taking over folders): re-read.
+                        this.refresh_integration_status(cx);
+                    }
                     this.settings_scroll.reset();
                     this.recording_shortcut = None;
                     this.shortcut_error = None;
@@ -319,6 +329,8 @@ impl Workspace {
             page = page.child(self.render_about(&theme, cx));
         } else if section == SettingsSection::Keyboard {
             page = page.child(self.render_keyboard_preferences(&theme, cx));
+        } else if section == SettingsSection::Integration {
+            page = page.child(self.render_integration(&theme, cx));
         } else if section == SettingsSection::Search {
             page = page
                 .child(self.render_search_locations(&theme, cx))

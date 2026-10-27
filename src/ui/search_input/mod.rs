@@ -130,6 +130,23 @@ impl SearchInput {
         cx.notify();
     }
 
+    /// Select `range` (byte offsets, clamped to the text and snapped down
+    /// to char boundaries), e.g. a file name's stem so typing replaces the
+    /// name but keeps the extension.
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let snap = |mut i: usize| {
+            i = i.min(self.content.len());
+            while !self.content.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let (start, end) = (snap(range.start), snap(range.end));
+        self.selected_range = start.min(end)..end.max(start);
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     /// Replace the whole content programmatically (e.g. clearing after a
     /// result is activated). Emits Changed like any edit.
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {

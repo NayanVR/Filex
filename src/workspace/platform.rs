@@ -44,6 +44,43 @@ pub(crate) fn open_with_default_app(path: &Path) -> std::io::Result<()> {
     command.spawn().map(drop)
 }
 
+/// Let process `pid` (the running Filex) take the foreground. Windows only
+/// lets the foreground app hand focus on, and a launch from Explorer or
+/// Win+E is that app, so the forwarding process grants it before sending.
+pub(super) fn allow_foreground(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+        // SAFETY: plain call; failure only means focus is not granted.
+        let _ = unsafe { AllowSetForegroundWindow(pid) };
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = pid;
+}
+
+/// Run the OS's own file manager with Explorer-style `args` (targets
+/// Filex cannot show). Windows runs `explorer.exe` by full path — never
+/// through the shell's folder verbs, which point back at Filex once it is
+/// the default. Elsewhere there is no equivalent syntax to pass on.
+pub(super) fn launch_system_file_manager(args: &[String]) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+        std::process::Command::new(Path::new(&windir).join("explorer.exe"))
+            .args(args)
+            .spawn()
+            .map(drop)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = args;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no system file manager hand-off on this platform",
+        ))
+    }
+}
+
 /// The sidebar's whole-machine place as (icon, label, location). Windows
 /// has no single root, so it opens the This PC drives page; macOS and
 /// Linux go to `/`.
@@ -284,6 +321,92 @@ fn terminal_candidates(env_terminal: Option<String>) -> Vec<String> {
     out
 }
 
+/// A deferred action that makes `window` an owned window of another app's
+/// `owner` (an HWND), as the system file dialog is: it stays above the
+/// owner and opens centered over it, kept inside the owner's monitor.
+/// Cross-process ownership is supported by Windows for this kind of
+/// helper window; an owner that no longer exists is ignored. `None`
+/// elsewhere.
+///
+/// The returned closure must run *outside* any GPUI update (spawn it):
+/// moving the window sends messages straight into GPUI's window proc,
+/// which panics with "RefCell already borrowed" if the window is
+/// mid-update.
+pub(super) fn owner_attacher(window: &gpui::Window, owner: u64) -> Option<impl FnOnce() + use<>> {
+    #[cfg(target_os = "windows")]
+    {
+        let ours = native_window(window)?;
+        Some(move || attach_to_owner(ours, owner))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, owner);
+        None::<fn()>
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn attach_to_owner(ours: isize, owner: u64) {
+    {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWLP_HWNDPARENT, GetWindowRect, IsWindow, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+            SetWindowLongPtrW, SetWindowPos,
+        };
+        let ours = HWND(ours as *mut _);
+        let owner = HWND(owner as usize as *mut _);
+        // SAFETY: plain Win32 calls on handles validated with IsWindow; the
+        // out-structs are initialised and sized.
+        unsafe {
+            if !IsWindow(Some(owner)).as_bool() {
+                return;
+            }
+            SetWindowLongPtrW(ours, GWLP_HWNDPARENT, owner.0 as isize);
+            let (mut host, mut me) = (RECT::default(), RECT::default());
+            if GetWindowRect(owner, &mut host).is_err() || GetWindowRect(ours, &mut me).is_err() {
+                return;
+            }
+            let mut monitor = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let _ = GetMonitorInfoW(
+                MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST),
+                &mut monitor,
+            );
+            let (x, y) = centered_in(host, me, monitor.rcWork);
+            let _ = SetWindowPos(
+                ours,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+/// Top-left that centers `inner` over `outer`, clamped into `work`.
+#[cfg(target_os = "windows")]
+fn centered_in(
+    outer: windows::Win32::Foundation::RECT,
+    inner: windows::Win32::Foundation::RECT,
+    work: windows::Win32::Foundation::RECT,
+) -> (i32, i32) {
+    let (w, h) = (inner.right - inner.left, inner.bottom - inner.top);
+    let x = outer.left + ((outer.right - outer.left) - w) / 2;
+    let y = outer.top + ((outer.bottom - outer.top) - h) / 2;
+    (
+        x.clamp(work.left, (work.right - w).max(work.left)),
+        y.clamp(work.top, (work.bottom - h).max(work.top)),
+    )
+}
+
 /// The window's native handle (HWND) for Shell APIs that parent a
 /// dialog or sheet to it.
 #[cfg(target_os = "windows")]
@@ -469,6 +592,35 @@ mod tests {
         assert_eq!(
             terminal_candidates(Some("  ".into())),
             terminal_candidates(None)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn owned_picker_centers_over_its_owner_and_stays_on_screen() {
+        use windows::Win32::Foundation::RECT;
+        let rect = |left, top, right, bottom| RECT {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let work = rect(0, 0, 1920, 1040);
+        let me = rect(0, 0, 960, 620);
+        // Centered over a 1200x800 owner at (100, 100).
+        assert_eq!(
+            super::centered_in(rect(100, 100, 1300, 900), me, work),
+            (220, 190)
+        );
+        // An owner hanging off the left/top edge: kept inside the work area.
+        assert_eq!(
+            super::centered_in(rect(-900, -500, 100, 100), me, work),
+            (0, 0)
+        );
+        // Off the right/bottom edge.
+        assert_eq!(
+            super::centered_in(rect(1800, 900, 2400, 1300), me, work),
+            (960, 420)
         );
     }
 }

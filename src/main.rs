@@ -15,5 +15,13 @@ fn main() {
     if filex::platform_preview::dispatch_helper() {
         return;
     }
-    workspace::run();
+    use filex::launch::{Browse, Launch};
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match filex::launch::parse(&args, &cwd, filex::launch::known_folder) {
+        Launch::Shell(command) => std::process::exit(workspace::run_shell_command(command)),
+        Launch::Pick => workspace::run_picker(),
+        Launch::Browse(Browse::Foreign(args)) => workspace::hand_to_system_explorer(&args),
+        Launch::Browse(browse) => workspace::run(browse),
+    }
 }

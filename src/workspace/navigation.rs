@@ -104,6 +104,7 @@ impl Workspace {
         if !show_hidden {
             entries.retain(|entry| !entry.is_hidden);
         }
+        self.picker_filter_entries(&mut entries);
         // Compare against what was on screen, not `cwd`: a load sets
         // `cwd` up front, so it already equals `path` here.
         let changed = self.listed_dir != path;
@@ -270,6 +271,9 @@ impl Workspace {
                 self.clear_search(cx);
             }
         } else {
+            if self.picker_activate_file(&path, None, cx) {
+                return;
+            }
             if let Err(err) = open_with_default_app(&path) {
                 self.notice = Some(format!("couldn't open {}: {err}", path.display()).into());
             }
@@ -333,6 +337,10 @@ impl Workspace {
         }
         if let Some(ix) = self.active_selection().lead() {
             self.activate(ix, cx);
+        } else if self.picker.is_some() {
+            // Picking with nothing selected: Enter accepts the current
+            // folder (Select Folder), as the confirm button does.
+            self.picker_confirm(None, cx);
         }
     }
 
@@ -351,6 +359,9 @@ impl Workspace {
             self.active_selection_mut().range_to(ix);
         } else {
             self.active_selection_mut().select_one(ix);
+            if let Some(path) = self.picker_clicked_file(ix) {
+                self.picker_set_name(&path, cx);
+            }
         }
         self.refresh_preview(cx);
         cx.notify();
