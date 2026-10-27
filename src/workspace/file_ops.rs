@@ -342,6 +342,11 @@ impl Workspace {
     /// its files to the OS so they can be dropped there (Windows — see
     /// `platform::hands_off_drags`). The OS drag starts once this handler
     /// has returned (`platform::start_os_drag`).
+    ///
+    /// The target may have *moved* the files, and the browse listing has
+    /// no live watcher, so the folder is reloaded once the drag is over —
+    /// whatever the reported effect, since Explorer reports an optimized
+    /// same-volume move as "none".
     pub(super) fn hand_off_drag(
         &mut self,
         paths: Vec<PathBuf>,
@@ -354,7 +359,13 @@ impl Workspace {
         tracing::info!(items = paths.len(), "drag left filex; handing it to the OS");
         self.drag_in_flight = None;
         cx.stop_active_drag(window);
-        platform::start_os_drag(paths);
+        let finished = platform::start_os_drag(paths);
+        cx.spawn(async move |this, cx| {
+            if finished.await.is_ok() {
+                this.update(cx, |this, cx| this.reload_dir(cx)).ok();
+            }
+        })
+        .detach();
     }
 
     /// The window lost focus. Mid-drag (Alt+Tab with the button held),

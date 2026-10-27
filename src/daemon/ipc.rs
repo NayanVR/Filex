@@ -65,7 +65,15 @@ pub struct Status {
     pub epoch: u64,
     pub roots: Vec<RootStatus>,
     pub building: bool,
+    /// A real problem with the index. Unreadable entries are *not* errors —
+    /// see [`Status::skipped`].
     pub error: Option<String>,
+    /// Entries (files or whole subtrees) the last full walk couldn't read,
+    /// usually for lack of permission — their contents aren't searchable.
+    /// Expected on most machines, so it's reported apart from `error`.
+    /// Absent from daemons before v0.4.3 (they put it in `error`).
+    #[serde(default)]
+    pub skipped: u64,
     /// Set while a full walk runs. Absent from daemons before v0.3.4.
     #[serde(default)]
     pub progress: Option<Progress>,
@@ -445,6 +453,7 @@ mod tests {
                 }],
                 building: true,
                 error: Some("disk gone".into()),
+                skipped: 71,
                 progress: Some(Progress {
                     scanned: 99,
                     indexing: true,
@@ -529,6 +538,16 @@ mod tests {
         for response in responses() {
             roundtrip(&response);
         }
+    }
+
+    /// Daemons before v0.4.3 send no `skipped` (they reported unreadable
+    /// entries in `error`); a newer UI must still read their status.
+    #[test]
+    fn status_without_skipped_decodes_as_zero() {
+        let old = r#"{"epoch":1,"roots":[],"building":false,"error":null}"#;
+        let status: Status = serde_json::from_str(old).expect("decode");
+        assert_eq!(status.skipped, 0);
+        assert!(status.error.is_none());
     }
 
     #[test]

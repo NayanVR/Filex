@@ -708,6 +708,8 @@ impl Workspace {
     }
     /// The status bar's index dot: attention when search is unavailable
     /// or the index reported a problem, accent while building, else ready.
+    /// Skipped (unreadable) entries are expected, not a problem: still
+    /// ready.
     pub(super) fn index_status_color(&self, theme: &Theme) -> gpui::Rgba {
         if self.service.is_none() || self.daemon_status.error.is_some() {
             theme.warn
@@ -729,16 +731,15 @@ impl Workspace {
             return "Building index".into();
         }
         let files: u64 = self.daemon_status.roots.iter().map(|r| r.files).sum();
-        format!(
-            "{} files indexed{}",
-            files,
-            if self.search_more {
-                " · more matches available"
-            } else {
-                ""
-            }
-        )
-        .into()
+        ui::status_bar::index_summary(files, self.daemon_status.skipped, self.search_more).into()
+    }
+
+    /// Hover text for the index status: what "N skipped" means.
+    pub(super) fn index_status_tip(&self) -> Option<SharedString> {
+        if self.service.is_none() || self.daemon_status.error.is_some() {
+            return None;
+        }
+        ui::status_bar::skipped_explanation(self.daemon_status.skipped).map(Into::into)
     }
 }
 

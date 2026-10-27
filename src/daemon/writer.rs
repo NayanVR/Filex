@@ -120,6 +120,7 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
             roots: Vec::new(),
             building: !roots.is_empty(),
             error: None,
+            skipped: 0,
             progress: None,
         }),
         stop: Arc::new(AtomicBool::new(false)),
@@ -417,14 +418,14 @@ pub(crate) fn start(directory: &Path, configured: Vec<PathBuf>) -> Result<Handle
                                         });
                                         counts = next_view.root_counts();
                                         replacement = Some(next_view.clone());
-                                        owner.status.write().unwrap().error = if built.skipped > 0 {
-                                            Some(format!(
-                                                "{} unreadable items skipped",
-                                                built.skipped
-                                            ))
-                                        } else {
-                                            None
-                                        };
+                                        {
+                                            // A completed build clears any
+                                            // earlier error; unreadable
+                                            // entries are reported apart.
+                                            let mut status = owner.status.write().unwrap();
+                                            status.error = None;
+                                            status.skipped = built.skipped as u64;
+                                        }
                                         deltas.push(Delta::Roots(roots.clone()));
                                         let current = next_view;
                                         let (changes, degraded) = normalize_batch(
