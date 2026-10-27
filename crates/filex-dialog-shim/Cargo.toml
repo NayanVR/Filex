@@ -1,0 +1,31 @@
+[package]
+name = "filex-dialog-shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "In-proc COM server that shows Filex in place of the Windows Open/Save dialogs"
+publish = false
+
+# Loaded into every app that opens a file dialog once the user turns the
+# feature on, so it stays tiny: no GPUI, no filex lib, just the Win32
+# bindings and a JSON codec. See docs/design-default-explorer.md.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json = "1.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Ole",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_UI_WindowsAndMessaging",
+] }
