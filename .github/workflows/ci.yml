@@ -108,7 +108,9 @@ jobs:
           cargo build --release --locked
           cargo build --release --locked -p filex-dialog-shim
       - name: Build the MSI
-        run: cargo wix --no-build -v
+        # The repo is a Cargo workspace (the dialog shim crate), so cargo-wix
+        # needs to be told which package's wix/main.wxs to build.
+        run: cargo wix --no-build -v --package filex
       - name: Smoke test (install, verify binaries, uninstall)
         shell: pwsh
         run: |

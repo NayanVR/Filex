@@ -72,7 +72,9 @@ jobs:
           cargo build --release --locked --features observability --bin filex
           cargo build --release --locked -p filex-dialog-shim
       - name: Build the MSI
-        run: cargo wix --no-build -v
+        # The repo is a Cargo workspace (the dialog shim crate), so cargo-wix
+        # needs to be told which package's wix/main.wxs to build.
+        run: cargo wix --no-build -v --package filex
       - name: Build filex-sign
         run: cargo build --release --locked --no-default-features --bin filex-sign
       - name: Sign artifact + write manifest
