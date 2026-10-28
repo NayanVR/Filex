@@ -22,10 +22,12 @@ screens. Few choices, all reversible, every step skippable.
 | Bring your favorites | Folders pinned in the OS file manager, ticked by default | Hidden when nothing new is found. |
 | Try it | Live file counter, then a real search box (placeholder "resume pdf") with top 6 hits and measured latency | Uses the real search pipeline and `search_latency`. |
 | Just say it → Your turn | A scripted Magic run played once ("move pdfs older than 30 days to Archive": command types out, chips pop, plan cascades, Apply glows), held 5 s, then the real thing: the search input in forced Magic mode over the app's own plan pane | The demo touches no files; a test runs its command through `magic::parse_with_gate`. "Try it yourself" skips ahead. Applying a real plan finishes onboarding first, so the job, conflict dialog and undo run in the app. |
+| Open your folders here? | One checkbox, ticked by default: "Make Filex my default file explorer" | Shown only where Filex can be the default (Windows today) and isn't already; a background registry check decides. Applied on finish, never on Skip. See docs/design-default-explorer.md. |
 | You're all set | Search / Quick Look / shortcuts keycaps (user's actual bindings) | |
 
 Keys: Enter continues, Esc goes back (in the search box, Esc clears text
-first). "Skip" finishes without importing. Finishing writes
+first). "Skip" finishes without importing or changing the default file
+explorer. Finishing writes
 `onboarding_pending = false` and appends ticked folders to `favorites`.
 
 ## Decisions
@@ -36,6 +38,12 @@ first). "Skip" finishes without importing. Finishing writes
 - **New installs only.** `onboarding_pending` is true only in
   `Settings::first_run`; an existing settings file lacks the key and
   defaults to false. Settings → Appearance → "Welcome tour" replays it.
+- **Default explorer is asked, ticked by default (2026-10-28).** The step
+  sits after Magic, once the user has seen what Filex does. Its box
+  starts ticked (owner's call, like the favorites' ticks), so finishing
+  the tour makes Filex the default; unticking it or Skip keeps File
+  Explorer. It is the one onboarding choice that reaches outside Filex,
+  so it is stated plainly with where to undo it.
 - **No permissions step** (decided with the user). The sidebar's Full Disk
   Access banner stays the macOS prompt.
 - **"Indexed in N s" only for a build we watched.** If the index was

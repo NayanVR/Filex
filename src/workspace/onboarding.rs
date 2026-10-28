@@ -4,6 +4,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::integration::Integration;
 use super::*;
 
 /// One screen of the flow, in order.
@@ -17,31 +18,46 @@ pub(super) enum Step {
     Favorites,
     Search,
     Magic,
+    /// "Open your folders here?": offered where the OS lets Filex be the
+    /// default file manager and it isn't already.
+    DefaultApp,
     Ready,
 }
 
+/// Which of the conditional steps are shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) struct Optional {
+    /// Favorites: there is something to import.
+    favorites: bool,
+    /// DefaultApp: the platform supports it and Filex isn't the default.
+    default_app: bool,
+}
+
 impl Step {
-    const ALL: [Step; 6] = [
+    const ALL: [Step; 7] = [
         Step::Welcome,
         Step::Theme,
         Step::Favorites,
         Step::Search,
         Step::Magic,
+        Step::DefaultApp,
         Step::Ready,
     ];
 
-    /// The steps actually shown: Favorites only when there is something
-    /// to import.
-    fn visible(has_imports: bool) -> impl Iterator<Item = Step> {
-        Self::ALL
-            .into_iter()
-            .filter(move |step| has_imports || *step != Step::Favorites)
+    /// The steps actually shown: the conditional ones only when `optional`
+    /// says so.
+    fn visible(optional: Optional) -> impl Iterator<Item = Step> {
+        Self::ALL.into_iter().filter(move |step| match step {
+            Step::Favorites => optional.favorites,
+            Step::DefaultApp => optional.default_app,
+            _ => true,
+        })
     }
 
     /// The step `offset` places away among the visible ones, or `None`
     /// past either end.
-    fn shifted(self, offset: isize, has_imports: bool) -> Option<Step> {
-        let steps: Vec<Step> = Self::visible(has_imports).collect();
+    fn shifted(self, offset: isize, optional: Optional) -> Option<Step> {
+        let steps: Vec<Step> = Self::visible(optional).collect();
         // A step hidden after the fact (imports emptied) counts from the
         // step before it.
         let at = steps.iter().position(|s| *s == self).unwrap_or(1) as isize;
@@ -66,6 +82,13 @@ pub(super) struct Onboarding {
     saw_building: bool,
     indexed_in: Option<Duration>,
     loading: Loading,
+    /// Offer the DefaultApp step. False until a background check finds the
+    /// platform supports it and Filex isn't the default already.
+    offer_default: bool,
+    /// The DefaultApp step's tick. Starts on (decided 2026-10-28, like the
+    /// favorites' ticks); unticking it or skipping the tour keeps File
+    /// Explorer.
+    make_default: bool,
 }
 
 /// The first index as the loading step follows it.
@@ -115,7 +138,23 @@ impl Onboarding {
                 shown: 0.,
                 shown_at: now,
             },
+            offer_default: false,
+            make_default: true,
         }
+    }
+
+    fn optional(&self) -> Optional {
+        Optional {
+            favorites: !self.imports.is_empty(),
+            default_app: self.offer_default,
+        }
+    }
+
+    /// Whether leaving the flow should make Filex the default file
+    /// manager: only when the user finished (not skipped) with the
+    /// DefaultApp step offered and ticked.
+    fn applies_default(&self, finished: bool) -> bool {
+        finished && self.offer_default && self.make_default
     }
 
     /// Fold one daemon status in for the loading step: the walk's count,
@@ -255,6 +294,7 @@ impl Workspace {
             .filter_map(|name| self.user_dirs.get(name).map(Path::to_path_buf))
             .collect();
         known.extend(self.settings.read(cx).settings().favorites.iter().cloned());
+        self.check_default_offer(cx);
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
@@ -286,8 +326,7 @@ impl Workspace {
             }
             return;
         }
-        let has_imports = !onboarding.imports.is_empty();
-        let Some(step) = onboarding.step.shifted(offset, has_imports) else {
+        let Some(step) = onboarding.step.shifted(offset, onboarding.optional()) else {
             if offset > 0 {
                 self.finish_onboarding(true, window, cx);
             }
@@ -338,6 +377,9 @@ impl Workspace {
         self.settings.update(cx, |store, cx| {
             store.update(cx, |settings| finish_settings(settings, imports));
         });
+        if onboarding.applies_default(import) {
+            self.set_integration(Integration::DefaultExplorer, true, cx);
+        }
         self.set_search_placeholder(search_input::DEFAULT_PLACEHOLDER, cx);
         if !cx.reduce_motion() {
             self.reveal = Some(Reveal {
@@ -436,6 +478,36 @@ impl Workspace {
         }
     }
 
+    /// Read, off the UI thread, whether to offer the DefaultApp step:
+    /// supported here and not already the default. It lands long before
+    /// the user reaches that step (it sits after Magic).
+    fn check_default_offer(&mut self, cx: &mut Context<Self>) {
+        if !filex::shell_integration::support().default_explorer {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async { filex::shell_integration::status() })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(onboarding) = &mut this.onboarding {
+                    onboarding.offer_default = !status.default_explorer;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn toggle_make_default(&mut self, cx: &mut Context<Self>) {
+        if let Some(onboarding) = &mut self.onboarding {
+            onboarding.make_default = !onboarding.make_default;
+            cx.notify();
+        }
+    }
+
     pub(super) fn render_onboarding(
         &mut self,
         window: &mut Window,
@@ -468,9 +540,10 @@ impl Workspace {
             Step::Favorites => self.render_favorites_step(&theme, cx),
             Step::Search => self.render_search_step(&theme),
             Step::Magic => self.render_magic_step(&theme, t, cx),
+            Step::DefaultApp => self.render_default_step(&theme, cx),
             Step::Ready => self.render_ready_step(&theme, t, cx),
         };
-        let steps: Vec<Step> = Step::visible(!onboarding.imports.is_empty()).collect();
+        let steps: Vec<Step> = Step::visible(onboarding.optional()).collect();
         let footer = ui::onboarding::footer((step == Step::Welcome).then_some(t))
             .child(ui::onboarding::progress_dots(
                 &theme,
@@ -761,6 +834,7 @@ impl Workspace {
                         ui::onboarding::check_row(
                             theme,
                             ("import", ix),
+                            "icons/star.svg",
                             name,
                             display_path(&path),
                             on,
@@ -771,6 +845,35 @@ impl Workspace {
                             },
                         ))
                     })),
+            )
+            .into_any_element()
+    }
+
+    fn render_default_step(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let on = self.onboarding.as_ref().is_some_and(|o| o.make_default);
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(ui::onboarding::hero(theme, "Open your folders here?"))
+            .child(ui::onboarding::lede(
+                theme,
+                "Make Filex your default file explorer: folders and drives you open \
+                 anywhere in Windows land in Filex. Places it can’t show, like Control \
+                 Panel, still open in File Explorer.",
+            ))
+            .child(
+                ui::onboarding::check_row(
+                    theme,
+                    "onboarding-make-default",
+                    "icons/folder.svg",
+                    "Make Filex my default file explorer",
+                    "Change it any time in Settings › Integration.",
+                    on,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.toggle_make_default(cx);
+                })),
             )
             .into_any_element()
     }
@@ -953,21 +1056,66 @@ impl Workspace {
 mod tests {
     use super::*;
 
+    const NONE: Optional = Optional {
+        favorites: false,
+        default_app: false,
+    };
+    const FAVORITES: Optional = Optional {
+        favorites: true,
+        default_app: false,
+    };
+    const DEFAULT_APP: Optional = Optional {
+        favorites: false,
+        default_app: true,
+    };
+
     #[test]
     fn favorites_step_only_appears_with_something_to_import() {
-        assert_eq!(Step::Theme.shifted(1, true), Some(Step::Favorites));
-        assert_eq!(Step::Theme.shifted(1, false), Some(Step::Search));
-        assert_eq!(Step::Search.shifted(-1, false), Some(Step::Theme));
-        assert_eq!(Step::Search.shifted(1, false), Some(Step::Magic));
-        assert_eq!(Step::Magic.shifted(1, false), Some(Step::Ready));
-        assert_eq!(Step::Welcome.shifted(-1, true), None);
-        assert_eq!(Step::Ready.shifted(1, true), None);
+        assert_eq!(Step::Theme.shifted(1, FAVORITES), Some(Step::Favorites));
+        assert_eq!(Step::Theme.shifted(1, NONE), Some(Step::Search));
+        assert_eq!(Step::Search.shifted(-1, NONE), Some(Step::Theme));
+        assert_eq!(Step::Search.shifted(1, NONE), Some(Step::Magic));
+        assert_eq!(Step::Magic.shifted(1, NONE), Some(Step::Ready));
+        assert_eq!(Step::Welcome.shifted(-1, FAVORITES), None);
+        assert_eq!(Step::Ready.shifted(1, FAVORITES), None);
+    }
+
+    #[test]
+    fn default_app_step_sits_before_ready_only_when_offered() {
+        assert_eq!(Step::Magic.shifted(1, DEFAULT_APP), Some(Step::DefaultApp));
+        assert_eq!(Step::DefaultApp.shifted(1, DEFAULT_APP), Some(Step::Ready));
+        assert_eq!(Step::Ready.shifted(-1, DEFAULT_APP), Some(Step::DefaultApp));
+        assert_eq!(Step::Ready.shifted(-1, NONE), Some(Step::Magic));
+        assert_eq!(Step::visible(NONE).count(), 5);
+        assert_eq!(
+            Step::visible(Optional {
+                favorites: true,
+                default_app: true
+            })
+            .count(),
+            7
+        );
     }
 
     #[test]
     fn a_step_hidden_after_the_fact_still_moves() {
         // On Favorites when its imports vanish: forward goes on, not back.
-        assert_eq!(Step::Favorites.shifted(1, false), Some(Step::Search));
+        assert_eq!(Step::Favorites.shifted(1, NONE), Some(Step::Search));
+    }
+
+    #[test]
+    fn default_app_is_applied_only_when_offered_ticked_and_finished() {
+        let mut onboarding = Onboarding::new(Instant::now(), true);
+        assert!(onboarding.make_default, "ticked by default");
+        assert!(
+            !onboarding.applies_default(true),
+            "not offered (unsupported, or already the default)"
+        );
+        onboarding.offer_default = true;
+        assert!(onboarding.applies_default(true));
+        assert!(!onboarding.applies_default(false), "Skip changes nothing");
+        onboarding.make_default = false;
+        assert!(!onboarding.applies_default(true), "unticked");
     }
 
     #[test]

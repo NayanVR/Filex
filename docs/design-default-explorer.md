@@ -40,7 +40,10 @@ Explorer.
 
 Both features are **opt-in toggles, off by default, fully reversible**,
 and live in Settings › Integration. Nothing is registered by the
-installer.
+installer. First-run onboarding also asks about the default explorer
+(a checkbox, ticked by default, applied only on finish, never on Skip;
+docs/design-onboarding.md). The Settings switches themselves stay off by
+default.
 
 ## Shared groundwork
 

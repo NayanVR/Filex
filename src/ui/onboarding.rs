@@ -927,10 +927,12 @@ pub fn sample_rows(theme: &Theme) -> Div {
         }))
 }
 
-/// A checkbox row: name over its full path. The whole row toggles.
+/// A checkbox row: `icon`, then a name over its detail line (a folder's
+/// full path, an option's explanation). The whole row toggles.
 pub fn check_row(
     theme: &Theme,
     id: impl Into<ElementId>,
+    icon: &'static str,
     name: impl Into<SharedString>,
     path: impl Into<SharedString>,
     on: bool,
@@ -960,7 +962,7 @@ pub fn check_row(
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .child(tick)
-        .child(ui_icon("icons/star.svg", theme.accent).size(px(14.)))
+        .child(ui_icon(icon, theme.accent).size(px(14.)))
         .child(
             div()
                 .flex()

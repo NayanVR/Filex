@@ -7,7 +7,7 @@ use super::*;
 use filex::shell_integration::{self as shell, Status};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Integration {
+pub(super) enum Integration {
     DefaultExplorer,
     Dialogs,
 }
@@ -30,7 +30,7 @@ impl Workspace {
         .detach();
     }
 
-    fn set_integration(&mut self, which: Integration, on: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_integration(&mut self, which: Integration, on: bool, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
