@@ -49,6 +49,17 @@
                 KeyPath="yes" />
           </Component>
 
+          <!-- The Open/Save dialog shim. Inert until the user turns on
+               Settings > Integration, which registers it per user (HKCU)
+               as the in-proc server for the system file dialogs. -->
+          <Component Id="FilexDialogShim" Guid="*" Win64="yes">
+            <File
+                Id="FilexDialogShimDll"
+                Name="filex_dialog_shim.dll"
+                Source="$(var.CargoTargetBinDir)\filex_dialog_shim.dll"
+                KeyPath="yes" />
+          </Component>
+
           <!-- The privacy page's crash-report choice. The app reads it once,
                when it creates its settings file (settings::installer), so
                silent updates rewriting the default never override a later
@@ -145,6 +156,7 @@
       <ComponentRef Id="FilexCrashReportsChoice" />
       <ComponentRef Id="FilexIndexd" />
       <ComponentRef Id="FilexUpdater" />
+      <ComponentRef Id="FilexDialogShim" />
       <ComponentRef Id="FilexStartMenuShortcut" />
     </Feature>
 
@@ -177,6 +189,24 @@
         BinaryKey="WixCA"
         DllEntry="WixShellExec"
         Impersonate="yes" />
+
+    <!-- Uninstall: undo Settings > Integration for the uninstalling user,
+         so folders and file dialogs never point at deleted files. Deferred
+         + impersonated runs it as that user (their HKCU), before the
+         binaries go. Not on upgrades: the paths stay valid and the user's
+         choice carries over. Return="ignore": cleanup must never block an
+         uninstall. Other users who enabled it keep a dangling entry (see
+         docs/design-default-explorer.md). -->
+    <CustomAction
+        Id="UnregisterShellIntegration"
+        FileKey="FilexExe"
+        ExeCommand="--unregister-shell"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="UnregisterShellIntegration" Before="RemoveFiles"><![CDATA[REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE]]></Custom>
+    </InstallExecuteSequence>
 
     <UI Id="FilexUI">
       <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />

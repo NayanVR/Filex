@@ -569,8 +569,9 @@ impl Workspace {
                         this.search_more = more;
                         this.search_hits =
                             hits.iter().map(|h| (h.path.clone(), h.clone())).collect();
-                        this.results = hits
+                        let rows: Vec<SearchRow> = hits
                             .into_iter()
+                            .filter(|hit| this.picker_shows(&hit.name, hit.is_dir))
                             .map(|hit| SearchRow {
                                 name: hit.name.into(),
                                 path_label: display_path(&hit.path).into(),
@@ -578,6 +579,7 @@ impl Workspace {
                                 target: hit.path,
                             })
                             .collect();
+                        this.results = rows;
                         if let (Some(state), Some(plan)) = (&mut this.magic, plan) {
                             state.install_plan(plan);
                         } else if let Some((selected, lead)) = kept {
@@ -634,7 +636,9 @@ impl Workspace {
                     Ok(page) => {
                         this.search_more = page.more && !page.hits.is_empty();
                         for hit in page.hits {
-                            if this.search_hits.contains_key(&hit.path) {
+                            if this.search_hits.contains_key(&hit.path)
+                                || !this.picker_shows(&hit.name, hit.is_dir)
+                            {
                                 continue;
                             }
                             this.results.push(SearchRow {

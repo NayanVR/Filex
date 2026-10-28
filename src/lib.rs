@@ -12,13 +12,17 @@ pub mod favorites_import;
 pub mod frecency;
 #[cfg(feature = "index-v2-lab")]
 pub mod index_lab;
+pub mod launch;
 pub mod listing;
 pub mod magic;
 pub mod ops;
+pub mod picker;
 pub mod recents;
 pub mod search;
 pub mod selection;
 pub mod settings;
+pub mod shell_integration;
+pub mod single_instance;
 pub mod tags;
 pub mod update;
 pub mod updater;

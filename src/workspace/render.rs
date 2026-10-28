@@ -779,6 +779,16 @@ impl Render for Workspace {
                         this.resolve_conflict(false, cx);
                     } else if this.settings_open {
                         this.toggle_settings(window, cx);
+                    } else if let Some(picker) = &mut this.picker {
+                        // Escape closes the picker's own overlays first,
+                        // then cancels, as in the system dialog.
+                        if picker.replace.is_some() {
+                            this.picker_resolve_replace(false, cx);
+                        } else if picker.filter_menu.take().is_some() {
+                            cx.notify();
+                        } else {
+                            this.picker_cancel(cx);
+                        }
                     } else {
                         window.focus(&this.focus_handle, cx);
                     }
@@ -879,12 +889,15 @@ impl Render for Workspace {
             )
             .children(self.render_jobs(cx))
             .children(self.render_update_banner(cx))
+            .children(self.render_picker_bar(window, cx))
             .child(self.render_status_bar(&theme))
             .children(self.render_scope_menu(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_settings_modal(window, cx))
             .children(self.render_conflict_modal(cx))
             .children(self.render_feedback_modal(cx))
+            .children(self.render_picker_filter_menu(cx))
+            .children(self.render_picker_replace_modal(cx))
             .children(reveal.and_then(|t| self.render_reveal(t, cx)))
             .into_any_element()
     }

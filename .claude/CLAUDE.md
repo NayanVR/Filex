@@ -57,4 +57,4 @@ Do not introduce vector embeddings, ML inference, or content-based search (OCR, 
 - Vector embeddings / semantic search
 - Local ML model inference
 - Content-based search (OCR, PDF parsing, etc.)
-- Shell-extension integration — this is a standalone app, not a Explorer/Finder plugin
+- Shell-extension integration — this is a standalone app, not a Explorer/Finder plugin. (Exception decided 2026-10-27: the opt-in "default file explorer" registration and the Open/Save dialog shim are in scope — see docs/design-default-explorer.md. Explorer/Finder plugins — context-menu handlers, property sheets, overlays — stay out.)

@@ -1873,6 +1873,7 @@ dependencies = [
  "criterion",
  "dirs 6.0.0",
  "ed25519-dalek",
+ "filex-dialog-shim",
  "flate2",
  "fs2",
  "futures",
@@ -1915,6 +1916,15 @@ dependencies = [
  "windows-service",
  "winresource",
  "zip",
+]
+
+[[package]]
+name = "filex-dialog-shim"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]

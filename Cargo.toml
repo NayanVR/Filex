@@ -5,6 +5,11 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/NayanVR/Filex"
 
+# The Windows dialog shim is its own tiny cdylib (loaded into other apps),
+# kept in the same workspace so it shares the lockfile and target dir.
+[workspace]
+members = [".", "crates/filex-dialog-shim"]
+
 [features]
 default = ["app"]
 # Local aggregate measurements and alternate search representations. Never
@@ -180,6 +185,8 @@ harness = false
 
 [dev-dependencies]
 criterion = "0.8.2"
+# Protocol cross-check: the shim's request JSON must parse as a PickRequest.
+filex-dialog-shim = { path = "crates/filex-dialog-shim" }
 tempfile = "3.27.0"
 
 [build-dependencies]
