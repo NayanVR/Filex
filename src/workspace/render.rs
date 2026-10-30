@@ -491,7 +491,7 @@ impl Workspace {
                 .filter(|entry| !entry.is_dir)
                 .map(|entry| entry.size)
                 .collect();
-            if self.query.is_empty() && !files.is_empty() {
+            if self.query.is_empty() && !files.is_empty() && !self.meta_pending {
                 let bytes: u64 = files.iter().sum();
                 format!("{n} of {total} selected · {}", format_size(bytes)).into()
             } else {

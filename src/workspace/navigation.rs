@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// How long a names-first load waits for its backfill before showing the
+/// names alone (FIL-25). Warm local folders of a few thousand entries
+/// finish inside it, so they land in one paint with no blank size and
+/// date columns flashing.
+const BACKFILL_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
 impl Workspace {
     pub(super) fn load_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.load_dir_selecting(path, None, cx);
@@ -13,6 +19,12 @@ impl Workspace {
     /// previous rows stay on screen until the listing lands. A newer
     /// load, tab switch, or typed path bumps `path_request` and the
     /// stale result is dropped.
+    ///
+    /// Two phases where the platform needs them (FIL-25): names first,
+    /// then size, mtime and hidden flags backfilled. A backfill that beats
+    /// [`BACKFILL_BUDGET`] lands with the names in one paint; a refresh of
+    /// the folder on screen always waits for it rather than blanking
+    /// columns it already shows.
     pub(super) fn load_dir_selecting(
         &mut self,
         path: &Path,
@@ -26,37 +38,152 @@ impl Workspace {
         self.path_request = self.path_request.wrapping_add(1);
         let request = self.path_request;
         self.path_loading = false;
+        let refresh = self.listed_dir == path;
         self.cwd = path.to_path_buf();
         self.sync_path(cx);
         let sort = self.settings.read(cx).settings().sort;
+        let cancel = self.restart_backfill();
         let path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
+            // Taken by whichever phase first puts this folder's rows up.
+            let mut select = select;
+            let executor = cx.background_executor().clone();
+            let read = executor
                 .spawn({
                     let path = path.clone();
-                    async move { read_dir_sorted(&path, &sort) }
+                    async move {
+                        if sort_needs_metadata(&sort) {
+                            read_dir_sorted(&path, &sort).map(|entries| Listing {
+                                entries,
+                                complete: true,
+                            })
+                        } else {
+                            read_dir_names(&path, &sort)
+                        }
+                    }
                 })
                 .await;
-            this.update(cx, |this, cx| {
-                if this.path_request != request {
+            let names = match read {
+                Ok(listing) if !listing.complete => listing.entries,
+                read => {
+                    let read = read.map(|listing| listing.entries);
+                    this.update(cx, |this, cx| {
+                        this.finish_load(request, &path, read, select, cx)
+                    })
+                    .ok();
                     return;
                 }
-                match result {
-                    Ok(entries) => {
-                        this.apply_directory(&path, entries, cx);
-                        if let Some(name) = select {
-                            this.select_named(&name);
+            };
+            let mut filling = executor.spawn({
+                let names = names.clone();
+                async move { backfill(names, &cancel) }
+            });
+            if !refresh {
+                let budget = executor.timer(BACKFILL_BUDGET);
+                match futures::future::select(filling, budget).await {
+                    futures::future::Either::Left((filled, _)) => {
+                        if let Some(filled) = filled {
+                            this.update(cx, |this, cx| {
+                                this.finish_load(request, &path, Ok(filled), select, cx)
+                            })
+                            .ok();
                         }
-                        this.refresh_preview(cx);
+                        return;
                     }
-                    Err(err) => this.show_load_error(&path, format!("{err:#}")),
+                    futures::future::Either::Right((_, rest)) => filling = rest,
                 }
-                cx.notify();
+                let shown = this.update(cx, |this, cx| {
+                    let shown = this.finish_load(request, &path, Ok(names), select.take(), cx);
+                    this.meta_pending = shown;
+                    shown
+                });
+                if !shown.unwrap_or(false) {
+                    return;
+                }
+            }
+            let Some(filled) = filling.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if refresh {
+                    this.finish_load(request, &path, Ok(filled), select, cx);
+                } else {
+                    this.apply_metadata(request, &path, filled, cx);
+                }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Stop any backfill still running for a folder being left, and hand
+    /// out the flag for the next one.
+    pub(super) fn restart_backfill(&mut self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.backfill_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.backfill_cancel = Default::default();
+        self.backfill_cancel.clone()
+    }
+
+    /// Install a finished read of `path` (or its error) unless a newer
+    /// load superseded it; `false` when it was dropped.
+    fn finish_load(
+        &mut self,
+        request: u64,
+        path: &Path,
+        read: anyhow::Result<Vec<Entry>>,
+        select: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.path_request != request {
+            return false;
+        }
+        match read {
+            Ok(entries) => {
+                self.apply_directory(path, entries, cx);
+                if let Some(name) = select {
+                    self.select_named(&name);
+                }
+                self.refresh_preview(cx);
+            }
+            Err(err) => self.show_load_error(path, format!("{err:#}")),
+        }
+        cx.notify();
+        true
+    }
+
+    /// Phase two of a names-first load (FIL-25): the same rows with size,
+    /// mtime and hidden flags filled in. They keep their order, so the
+    /// selection, an open rename and the scroll position stay, unless the
+    /// platform hidden flag (macOS `UF_HIDDEN`) now hides some rows.
+    fn apply_metadata(
+        &mut self,
+        request: u64,
+        path: &Path,
+        mut entries: Vec<Entry>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.path_request != request || self.listed_dir != path || !self.meta_pending {
+            return;
+        }
+        if !self.settings.read(cx).settings().show_hidden_files {
+            entries.retain(|entry| !entry.is_hidden);
+        }
+        self.picker_filter_entries(&mut entries);
+        let same_rows = entries.len() == self.entries.len()
+            && entries
+                .iter()
+                .zip(&self.entries)
+                .all(|(a, b)| a.path == b.path);
+        if !same_rows {
+            self.selection.clear();
+            self.renaming = None;
+            self.pending_delete = None;
+        }
+        self.entries = entries;
+        self.meta_pending = false;
+        self.refresh_preview(cx);
+        cx.notify();
     }
 
     /// A failed load: drop the previous rows so nothing on screen (or in
@@ -86,7 +213,7 @@ impl Workspace {
     /// After a tab switch: re-issue the load that was in flight when the
     /// tab was left (its result was dropped by the switch).
     pub(super) fn resume_tab_load(&mut self, cx: &mut Context<Self>) {
-        if self.listed_dir != self.cwd {
+        if self.listed_dir != self.cwd || self.meta_pending {
             let cwd = self.cwd.clone();
             self.load_dir(&cwd, cx);
         }
@@ -111,6 +238,7 @@ impl Workspace {
         self.cwd = path.to_path_buf();
         self.listed_dir = path.to_path_buf();
         self.entries = entries;
+        self.meta_pending = false;
         self.load_error = None;
         self.selection.clear();
         // Any in-flight rename or armed delete points at rows
