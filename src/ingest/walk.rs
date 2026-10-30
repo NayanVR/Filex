@@ -3,11 +3,16 @@
 //! spends its time waiting on the filesystem. The caller's thread allocates
 //! IDs and emits records one at a time, so `allocate` and `emit` need no
 //! synchronization and see each directory before its children.
+//!
+//! A directory's record is held back until its own listing arrives, so the
+//! listing can correct its mtime (FIL-47): on Windows the copy in the
+//! parent's listing can lag the directory's own.
 
 use super::{IndexFilter, Listed, Stat, list, record, stat};
 use crate::catalog::segment::{Identity, Record, Root};
 use anyhow::Result;
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Condvar, Mutex,
@@ -26,8 +31,12 @@ const PENDING_LISTINGS: usize = 64;
 /// One directory's kept entries, or `None` when it couldn't be opened.
 struct Listing {
     parent: u64,
-    entries: Option<Vec<std::io::Result<(PathBuf, Stat)>>>,
+    entries: Option<Entries>,
 }
+
+/// A directory's own mtime when its listing read one (see `DirListing`),
+/// and its kept entries.
+type Entries = (Option<i64>, Vec<std::io::Result<(PathBuf, Stat)>>);
 
 /// Directories waiting to be listed, shared by the listers.
 struct Queue {
@@ -112,11 +121,20 @@ pub fn walk(
             // Directories queued or being listed whose listing hasn't
             // arrived; every popped directory sends exactly one.
             let mut outstanding = 1usize;
+            // Their records, emitted when that listing arrives. The root
+            // was emitted from its own `stat` and isn't here.
+            let mut held = HashMap::<u64, Record>::new();
             while outstanding > 0 {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "enumeration cancelled");
                 let listing = rx.recv()?;
                 outstanding -= 1;
-                let Some(entries) = listing.entries else {
+                if let Some(mut dir) = held.remove(&listing.parent) {
+                    if let Some((Some(mtime), _)) = listing.entries {
+                        dir.mtime = Some(mtime);
+                    }
+                    emit(dir)?;
+                }
+                let Some((_, entries)) = listing.entries else {
                     skipped += 1;
                     continue;
                 };
@@ -128,11 +146,12 @@ pub fn walk(
                     };
                     let id = allocate(&path, listing.parent, &entry_stat.identity);
                     let record = record(&path, entry_stat, id, listing.parent, root.id);
-                    let dir = record.is_dir();
-                    emit(record)?;
-                    if dir {
+                    if record.is_dir() {
+                        held.insert(id, record);
                         queue.push((path, id));
                         outstanding += 1;
+                    } else {
+                        emit(record)?;
                     }
                 }
             }
@@ -152,13 +171,15 @@ fn read_dir(
     excluded: &Path,
     filter: &IndexFilter,
     cancel: &AtomicBool,
-) -> Option<Vec<std::io::Result<(PathBuf, Stat)>>> {
+) -> Option<Entries> {
     if cancel.load(Ordering::Relaxed) {
-        return Some(Vec::new());
+        return Some((None, Vec::new()));
     }
-    let entries = list(dir).ok()?;
-    Some(
-        entries
+    let listing = list(dir).ok()?;
+    Some((
+        listing.mtime,
+        listing
+            .entries
             .filter_map(|entry| {
                 let Listed {
                     path,
@@ -181,7 +202,7 @@ fn read_dir(
                 Some(listed.map_or_else(|| stat(&path), Ok).map(|s| (path, s)))
             })
             .collect(),
-    )
+    ))
 }
 
 #[cfg(test)]
