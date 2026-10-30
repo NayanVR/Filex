@@ -81,18 +81,27 @@ The location field resolves a share address before path rules:
 ## Plan
 
 1. **Show and open mounted shares** — done (this change).
-2. **Connect to a share** ("Connect to Server…" in the sidebar/This PC and
-   the not-connected error). Per OS, behind one `connect(address) ->
-   Result<PathBuf>` trait that runs off the UI thread and is cancellable:
-   - Windows: `WNetAddConnection2W` with `CONNECT_INTERACTIVE |
-     CONNECT_PROMPT` (the OS credential prompt), optional drive letter;
-     without a letter, just open the UNC path once connected.
-   - macOS: NetFS `NetFSMountURLAsync` (system auth UI, Keychain), mounting
-     under `/Volumes`.
+2. **Connect to a share** — done (FIL-59). "Connect to Server…" in the
+   sidebar's Drives section and on This PC, and offered by the location
+   field when a typed share isn't connected (or, on Windows, can't be
+   opened by UNC path). `filex::connect::ShareConnector` per OS; each call
+   blocks, so it runs on a thread of its own (`connect_on_thread`), never
+   the background executor:
+   - Windows: `WNetAddConnection2W` with `CONNECT_INTERACTIVE` only. The
+     OS tries the signed-in or saved credentials first and prompts only
+     if they're refused; `CONNECT_PROMPT` would ask every time. Optional
+     drive letter (the highest free one, Z down), kept until sign-out.
+     Without a letter, the UNC path opens once connected. SMB only.
+   - macOS: NetFS `NetFSMountURLSync` with default options (system sign-in
+     sheet, Keychain), mounting under `/Volumes`. The sync call on its own
+     thread replaces `NetFSMountURLAsync`; cancelling abandons the call and
+     the sheet stays the user's to dismiss.
    - Linux: GVfs (`gio mount smb://…`), user-space and root-free; the share
-     appears under `$XDG_RUNTIME_DIR/gvfs/`. `mount.cifs` needs root and
-     stays out. Credentials: GVfs asks via the desktop's mount-operation
-     agent; with no agent, report it rather than prompting in-app.
+     appears under `$XDG_RUNTIME_DIR/gvfs/` (listed by FIL-61). `mount.cifs`
+     needs root and stays out. `gio` runs with stdin closed, so a share
+     that needs a password (and has none saved in the keyring) is reported
+     with a pointer to the desktop file manager rather than prompted for
+     in-app. Cancelling kills `gio`.
 3. **Disconnect / eject**: `WNetCancelConnection2W`, `unmount(2)` via
    `diskutil unmount` semantics, `gio mount -u`. Context menu on network
    drives; refuse while a file operation targets the share.

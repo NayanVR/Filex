@@ -896,6 +896,7 @@ impl Render for Workspace {
             .children(self.render_settings_modal(window, cx))
             .children(self.render_conflict_modal(cx))
             .children(self.render_feedback_modal(cx))
+            .children(self.render_connect_modal(cx))
             .children(self.render_picker_filter_menu(cx))
             .children(self.render_picker_replace_modal(cx))
             .children(reveal.and_then(|t| self.render_reveal(t, cx)))

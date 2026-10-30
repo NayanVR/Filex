@@ -50,8 +50,8 @@ fn resolve(
 
 /// The folder for a share address. Windows opens SMB shares by UNC path
 /// directly (`native_unc`); elsewhere a share has to be mounted first, so
-/// the address maps into the mount that covers it. Connecting from here
-/// is the next step (docs/design-network.md).
+/// the address maps into the mount that covers it. When it isn't, the
+/// caller offers "Connect to Server" (FIL-59) with this message.
 fn resolve_share(
     address: &filex::network::ShareAddress,
     drives: &[Drive],
@@ -60,12 +60,8 @@ fn resolve_share(
     if native_unc && let Some(unc) = address.to_unc() {
         return Ok(PathBuf::from(unc));
     }
-    filex::drives::locate_share(address, drives).ok_or_else(|| {
-        format!(
-            "{} isn’t connected. Mount it first, then open it here.",
-            address.display_name()
-        )
-    })
+    filex::drives::locate_share(address, drives)
+        .ok_or_else(|| format!("{} isn’t connected yet.", address.display_name()))
 }
 
 /// Read and validate the destination before changing any active-tab state.
@@ -106,13 +102,17 @@ impl Workspace {
     }
 
     pub(super) fn submit_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = match resolve(
-            self.path_input.read(cx).text(),
-            &self.cwd,
-            self.user_dirs.get("home"),
-            &self.drives,
-        ) {
+        let text = self.path_input.read(cx).text().to_owned();
+        // A share address that can't be opened gets "Connect to Server"
+        // rather than a dead-end error.
+        let typed_share = filex::network::ShareAddress::parse(&text).is_some();
+        let target = match resolve(&text, &self.cwd, self.user_dirs.get("home"), &self.drives) {
             Ok(path) => path,
+            Err(error) if typed_share => {
+                self.sync_path(cx);
+                self.open_connect(Some(text), Some(error.into()), window, cx);
+                return;
+            }
             Err(error) => {
                 self.path_error = Some(error.into());
                 cx.notify();
@@ -132,12 +132,12 @@ impl Workspace {
         self.path_loading = true;
         window.focus(&self.focus_handle, cx);
         cx.notify();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { read_location(&target, &sort) })
                 .await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 if this.path_request != request {
                     return;
                 }
@@ -152,6 +152,12 @@ impl Workspace {
                         this.apply_directory(&path, entries, cx);
                         this.record_recent(path, cx);
                         this.refresh_preview(cx);
+                    }
+                    // Windows opens shares by UNC path, which fails when the
+                    // share needs a sign-in the OS doesn't have yet.
+                    Err(error) if typed_share => {
+                        this.sync_path(cx);
+                        this.open_connect(Some(text), Some(error.into()), window, cx);
                     }
                     Err(error) => this.path_error = Some(error.into()),
                 }

@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod catalog;
+pub mod connect;
 pub mod context_menu;
 pub mod diagnostics;
 pub mod drives;

@@ -155,6 +155,37 @@ impl ShareAddress {
         Some(unc)
     }
 
+    /// The URL spelling (`smb://user@server/share/dir`, `nfs://server/export`)
+    /// that GVfs and NetFS mount from, segments percent-encoded.
+    pub fn to_url(&self) -> String {
+        let scheme = match self.protocol {
+            Protocol::Smb => "smb",
+            Protocol::Nfs => "nfs",
+        };
+        let mut url = format!("{scheme}://");
+        if let Some(user) = &self.user {
+            url.push_str(&percent_encode(user));
+            url.push('@');
+        }
+        url.push_str(&percent_encode(&self.host));
+        for segment in &self.segments {
+            url.push('/');
+            url.push_str(&percent_encode(segment));
+        }
+        url
+    }
+
+    /// The address of the share itself, without any folder below it: the
+    /// first segment for SMB. For NFS the export and the folders below it
+    /// can't be told apart, so the whole path is kept.
+    pub fn share_root(&self) -> Self {
+        let mut root = self.clone();
+        if self.protocol == Protocol::Smb {
+            root.segments.truncate(1);
+        }
+        root
+    }
+
     /// A short name for a mounted share, Explorer-style: `share (server)`
     /// for SMB, `export (server)` from the export's last segment for NFS.
     pub fn display_name(&self) -> String {
@@ -272,6 +303,19 @@ impl GvfsMount {
         };
         Some(Self { label, share })
     }
+}
+
+/// Percent-encode everything but RFC 3986 unreserved characters.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// Decode `%XX` escapes as UTF-8. `None` for a malformed escape or bytes
@@ -556,5 +600,30 @@ mod tests {
         ] {
             assert_eq!(GvfsMount::parse(name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn addresses_round_trip_through_their_url() {
+        for text in [
+            "smb://me@nas/My%20Media/Films%20%26%20TV",
+            "nfs://fs1/srv/data",
+            "smb://192.168.1.5/public",
+        ] {
+            let address = ShareAddress::parse(text).unwrap();
+            assert_eq!(address.to_url(), text);
+            assert_eq!(ShareAddress::parse(&address.to_url()), Some(address));
+        }
+        assert_eq!(
+            ShareAddress::parse(r"\\nas\Media\Movies").unwrap().to_url(),
+            "smb://nas/Media/Movies"
+        );
+    }
+
+    #[test]
+    fn the_share_root_drops_folders_for_smb_only() {
+        let smb = ShareAddress::parse("smb://nas/Media/Movies/2026").unwrap();
+        assert_eq!(smb.share_root().to_url(), "smb://nas/Media");
+        let nfs = ShareAddress::parse("nfs://fs1/srv/data").unwrap();
+        assert_eq!(nfs.share_root(), nfs);
     }
 }
