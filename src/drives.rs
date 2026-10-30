@@ -11,6 +11,13 @@
 
 use std::path::{Component, Path, PathBuf, Prefix};
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Duration;
+
+use crate::network::ShareAddress;
+
 /// The "This PC" location: every drive on one page, as in Explorer.
 /// Windows has no single filesystem root, so this stands in for `/`.
 /// It isn't a real path but a reserved spelling (Explorer's own shell
@@ -56,18 +63,26 @@ fn parent_or_this_pc(path: &Path, has_this_pc: bool) -> Option<PathBuf> {
     (has_this_pc && drive_root && path.has_root()).then(this_pc)
 }
 
-/// One mounted volume.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Drive {
-    /// Display name (volume label, mount-point leaf, or drive letter).
-    pub name: String,
-    /// Mount point to navigate to when clicked.
-    pub path: PathBuf,
+/// What kind of storage a [`Drive`] is. Decides its icon and whether its
+/// capacity probe runs under a time limit (network only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveKind {
+    /// An internal disk or partition.
+    Fixed,
+    /// A USB stick, SD card, optical disc or other pluggable media.
+    Removable,
+    /// A mounted network share (SMB, NFS, sshfs, WebDAV, …).
+    Network,
+}
+
+/// A volume's size and free space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capacity {
     pub total_bytes: u64,
     pub free_bytes: u64,
 }
 
-impl Drive {
+impl Capacity {
     /// Fraction of the volume in use, 0.0..=1.0 (0 when the total is
     /// unknown, so an empty bar rather than a divide-by-zero).
     pub fn used_fraction(&self) -> f32 {
@@ -77,6 +92,42 @@ impl Drive {
         let used = self.total_bytes.saturating_sub(self.free_bytes);
         (used as f64 / self.total_bytes as f64) as f32
     }
+}
+
+/// One mounted volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Drive {
+    /// Display name (volume label, share name, mount-point leaf, or drive
+    /// letter).
+    pub name: String,
+    /// Mount point to navigate to when clicked.
+    pub path: PathBuf,
+    pub kind: DriveKind,
+    /// `None` when the volume didn't answer: a disconnected mapped drive or
+    /// a network mount that's stalled. Local drives that fail the query
+    /// aren't listed at all (an empty card reader).
+    pub capacity: Option<Capacity>,
+    /// Where a network drive points, when the OS says so in a form
+    /// [`ShareAddress`] understands. Lets a typed `smb://` or UNC address
+    /// open the folder it's already mounted at.
+    pub share: Option<ShareAddress>,
+}
+
+impl Drive {
+    /// Fraction of the volume in use; 0 when the capacity is unknown.
+    pub fn used_fraction(&self) -> f32 {
+        self.capacity.map_or(0.0, |c| c.used_fraction())
+    }
+}
+
+/// The folder `address` is mounted at among `drives`, if any. See
+/// [`ShareAddress::locate`].
+pub fn locate_share(address: &ShareAddress, drives: &[Drive]) -> Option<PathBuf> {
+    address.locate(
+        drives
+            .iter()
+            .filter_map(|d| Some((d.share.as_ref()?, d.path.as_path()))),
+    )
 }
 
 /// Enumerate mounted volumes with their capacity. Blocking — call on a
@@ -94,30 +145,193 @@ pub fn default_index_roots() -> Vec<PathBuf> {
     platform::default_index_roots()
 }
 
-/// Mount points worth showing from `/proc/mounts` contents: real block
-/// devices (device path starts with `/dev/`), de-duplicated by mount
-/// point, in file order. Pure so it's testable without a real `/proc`.
+/// How long a network drive gets to report its capacity before it's shown
+/// as not responding.
+const NETWORK_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Probes that outlived their timeout and haven't returned yet, by key.
+type StuckProbes = Arc<Mutex<HashSet<PathBuf>>>;
+
+/// The process-wide [`StuckProbes`] the real drive refresh uses.
+#[cfg(any(unix, windows))]
+fn stuck_probes() -> &'static StuckProbes {
+    static STUCK: OnceLock<StuckProbes> = OnceLock::new();
+    STUCK.get_or_init(StuckProbes::default)
+}
+
+/// Lock that shrugs off poisoning: the set only ever holds plain paths.
+fn lock(stuck: &StuckProbes) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
+    stuck
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Run `probe` on its own thread and wait at most `timeout` for it.
+///
+/// A network filesystem that stops answering blocks `statvfs` /
+/// `GetDiskFreeSpaceExW` for a long time — an NFS hard mount, until the
+/// server comes back. The drive refresh runs on the shared background
+/// executor every 30 s, so waiting inline would park one executor thread
+/// per refresh until listing and search starve. Instead the probe gets a
+/// thread of its own; if it times out, `key` is remembered and no new
+/// probe starts for it until the stuck one returns. That bounds the cost
+/// of a dead mount at one parked thread.
+fn bounded_probe<T: Send + 'static>(
+    key: &Path,
+    timeout: Duration,
+    stuck: &StuckProbes,
+    probe: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<T> {
+    if lock(stuck).contains(key) {
+        return None;
+    }
+    let (tx, rx) = mpsc::sync_channel(1);
+    let finished = Arc::new(AtomicBool::new(false));
+    let (thread_key, thread_stuck, thread_finished) =
+        (key.to_path_buf(), Arc::clone(stuck), Arc::clone(&finished));
+    let spawned = std::thread::Builder::new()
+        .name("filex-drive-probe".into())
+        .spawn(move || {
+            let result = probe();
+            // Under the lock, so the waiter either sees `finished` or its
+            // insert below is undone here.
+            let mut stuck = lock(&thread_stuck);
+            thread_finished.store(true, Ordering::Relaxed);
+            stuck.remove(&thread_key);
+            drop(stuck);
+            let _ = tx.send(result);
+        });
+    if let Err(error) = spawned {
+        tracing::warn!("couldn't start a drive probe: {error}");
+        return None;
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => {
+            let mut stuck = lock(stuck);
+            if !finished.load(Ordering::Relaxed) {
+                stuck.insert(key.to_path_buf());
+            }
+            None
+        }
+    }
+}
+
+/// [`bounded_probe`] with the real timeout and stuck set.
+#[cfg(any(unix, windows))]
+fn network_capacity(
+    key: &Path,
+    probe: impl FnOnce() -> Option<Capacity> + Send + 'static,
+) -> Option<Capacity> {
+    bounded_probe(key, NETWORK_PROBE_TIMEOUT, stuck_probes(), probe)
+}
+
+/// Filesystem types that reach over the network. The SMB and NFS ones
+/// also parse into a [`ShareAddress`]; the rest are only classified.
+pub const NETWORK_FSTYPES: &[&str] = &[
+    "cifs",
+    "smb3",
+    "smbfs",
+    "nfs",
+    "nfs4",
+    "afpfs",
+    "webdav",
+    "davfs",
+    "fuse.sshfs",
+    "fuse.rclone",
+    "fuse.s3fs",
+    "ceph",
+    "glusterfs",
+    "fuse.glusterfs",
+    "afs",
+];
+
+/// Whether `fstype` (a mount table's type field) is a network filesystem.
+pub fn is_network_fstype(fstype: &str) -> bool {
+    NETWORK_FSTYPES.contains(&fstype)
+}
+
+/// One line of a Unix mount table, decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountEntry {
+    /// What's mounted: `/dev/sda1`, `//nas/share`, `fs1:/srv`.
+    pub source: String,
+    pub mount: PathBuf,
+    pub fstype: String,
+}
+
+/// Mounts worth showing from `/proc/mounts` contents: real block devices
+/// (source starts with `/dev/`) and network filesystems
+/// ([`is_network_fstype`]), de-duplicated by mount point, in file order.
+/// Pure so it's testable without a real `/proc`.
 #[cfg(any(target_os = "linux", test))]
-pub fn parse_proc_mounts(contents: &str) -> Vec<PathBuf> {
+pub fn parse_proc_mounts(contents: &str) -> Vec<MountEntry> {
     let mut seen = std::collections::HashSet::new();
     let mut mounts = Vec::new();
     for line in contents.lines() {
         let mut fields = line.split_whitespace();
-        let (Some(device), Some(mount)) = (fields.next(), fields.next()) else {
+        let (Some(source), Some(mount), Some(fstype)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
-        if !device.starts_with("/dev/") {
+        if !source.starts_with("/dev/") && !is_network_fstype(fstype) {
             continue;
         }
-        // /proc/mounts octal-escapes spaces etc. as \040 — good enough to
-        // handle the common space case for display/navigation.
-        let mount = mount.replace("\\040", " ");
-        let path = PathBuf::from(mount);
+        let path = PathBuf::from(unescape_mount_field(mount));
         if seen.insert(path.clone()) {
-            mounts.push(path);
+            mounts.push(MountEntry {
+                source: unescape_mount_field(source),
+                mount: path,
+                fstype: fstype.to_owned(),
+            });
         }
     }
     mounts
+}
+
+/// Undo `/proc/mounts`' octal escapes (`\040` space, `\011` tab, `\012`
+/// newline, `\134` backslash). Anything that isn't a valid three-digit
+/// escape is kept as written.
+#[cfg(any(target_os = "linux", test))]
+fn unescape_mount_field(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let octal = bytes
+            .get(i + 1..i + 4)
+            .filter(|d| bytes[i] == b'\\' && d.iter().all(|b| (b'0'..=b'7').contains(b)))
+            .map(|d| d.iter().fold(0u32, |n, b| n * 8 + u32::from(b - b'0')))
+            .and_then(|n| u8::try_from(n).ok());
+        match octal {
+            Some(byte) => {
+                out.push(byte);
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The kind of a Linux mount: network by filesystem type, removable when
+/// udisks put it under `/media` or `/run/media` (where desktop
+/// auto-mounting puts USB sticks and SD cards), fixed otherwise. A
+/// heuristic — a disk mounted there by hand reads as removable — but it
+/// needs no sysfs walk.
+#[cfg(any(target_os = "linux", test))]
+pub fn linux_drive_kind(entry: &MountEntry) -> DriveKind {
+    if is_network_fstype(&entry.fstype) {
+        DriveKind::Network
+    } else if entry.mount.starts_with("/media") || entry.mount.starts_with("/run/media") {
+        DriveKind::Removable
+    } else {
+        DriveKind::Fixed
+    }
 }
 
 /// The label for a mount point: its leaf name, or the path itself for
@@ -131,15 +345,18 @@ pub fn mount_label(path: &std::path::Path) -> String {
 
 #[cfg(unix)]
 mod platform {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{Drive, mount_label};
+    use super::{Capacity, Drive, DriveKind, mount_label};
+    use crate::network::ShareAddress;
 
     /// Free/total bytes for the filesystem containing `path`, via
     /// `statvfs`. `f_bavail` (not `f_bfree`) is used for free space —
     /// what an unprivileged user can actually write. Returns `None` if
-    /// the call fails (an unmounted or vanished volume).
-    fn capacity(path: &Path) -> Option<(u64, u64)> {
+    /// the call fails (an unmounted or vanished volume). On a network
+    /// mount this can block for as long as the server is unreachable, so
+    /// network drives go through [`super::network_capacity`].
+    fn capacity(path: &Path) -> Option<Capacity> {
         use std::os::unix::ffi::OsStrExt;
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
         // SAFETY: statvfs writes into a zeroed struct we own; c_path is a
@@ -149,19 +366,40 @@ mod platform {
             return None;
         }
         let block = stat.f_frsize as u64;
-        let total = (stat.f_blocks as u64).saturating_mul(block);
-        let free = (stat.f_bavail as u64).saturating_mul(block);
-        Some((total, free))
+        Some(Capacity {
+            total_bytes: (stat.f_blocks as u64).saturating_mul(block),
+            free_bytes: (stat.f_bavail as u64).saturating_mul(block),
+        })
     }
 
-    fn drive_at(path: std::path::PathBuf, name: String) -> Option<Drive> {
-        let (total_bytes, free_bytes) = capacity(&path)?;
+    /// A drive at `path`. Local volumes that fail the capacity query are
+    /// left out; network ones stay, with unknown capacity, so a stalled
+    /// share is shown as such rather than vanishing.
+    fn drive_at(
+        path: PathBuf,
+        name: String,
+        kind: DriveKind,
+        share: Option<ShareAddress>,
+    ) -> Option<Drive> {
+        let capacity = if kind == DriveKind::Network {
+            let probe_path = path.clone();
+            super::network_capacity(&path, move || capacity(&probe_path))
+        } else {
+            Some(capacity(&path)?)
+        };
         Some(Drive {
             name,
             path,
-            total_bytes,
-            free_bytes,
+            kind,
+            capacity,
+            share,
         })
+    }
+
+    /// A network mount's name: `share (server)` when its source parses,
+    /// else the mount point's leaf.
+    fn name_for(path: &Path, share: Option<&ShareAddress>) -> String {
+        share.map_or_else(|| mount_label(path), ShareAddress::display_name)
     }
 
     /// Fresh-install default on macOS: the whole startup disk, like
@@ -183,24 +421,95 @@ mod platform {
         std::env::home_dir().into_iter().collect()
     }
 
+    /// One `getfsstat` row: where it's mounted, what from, which
+    /// filesystem type, and whether the kernel calls it local.
+    #[cfg(target_os = "macos")]
+    struct MacMount {
+        source: String,
+        fstype: String,
+        local: bool,
+    }
+
+    /// The kernel's mount table, keyed by mount point.
+    ///
+    /// Assumes `getfsstat(MNT_NOWAIT)` returns the cached `statfs` for
+    /// every mount *without* contacting file servers (that's what
+    /// `MNT_NOWAIT` buys over `MNT_WAIT`), so a dead SMB share can't stall
+    /// it. `getfsstat` rather than `getmntinfo`: the latter returns a
+    /// shared static buffer, and two refreshes can overlap.
+    #[cfg(target_os = "macos")]
+    fn mount_table() -> std::collections::HashMap<PathBuf, MacMount> {
+        use std::ffi::CStr;
+        let mut table = std::collections::HashMap::new();
+        // SAFETY: a null buffer asks only for the count.
+        let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+        let Ok(count) = usize::try_from(count) else {
+            return table;
+        };
+        // Room for a few mounts appearing between the two calls.
+        let capacity = count + 8;
+        // SAFETY: statfs is plain old data; zeroed is a valid value.
+        let mut buf: Vec<libc::statfs> = vec![unsafe { std::mem::zeroed() }; capacity];
+        let Ok(bytes) = libc::c_int::try_from(capacity * std::mem::size_of::<libc::statfs>())
+        else {
+            return table;
+        };
+        // SAFETY: `buf` holds `capacity` structs and `bytes` says so.
+        let filled = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        let Ok(filled) = usize::try_from(filled) else {
+            return table;
+        };
+        for stat in buf.iter().take(filled.min(capacity)) {
+            // SAFETY: the kernel NUL-terminates each fixed-size name field.
+            let text = |field: &[libc::c_char]| unsafe {
+                CStr::from_ptr(field.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            table.insert(
+                PathBuf::from(text(&stat.f_mntonname)),
+                MacMount {
+                    source: text(&stat.f_mntfromname),
+                    fstype: text(&stat.f_fstypename),
+                    local: stat.f_flags & (libc::MNT_LOCAL as u32) != 0,
+                },
+            );
+        }
+        table
+    }
+
     /// macOS: the user-visible volumes are the mounts under `/Volumes`.
+    /// Network shares are told apart by the mount table's local flag; an
+    /// entry the table doesn't have (the startup disk's `/Volumes`
+    /// symlink) is a local disk.
     #[cfg(target_os = "macos")]
     pub fn list_drives() -> Vec<Drive> {
         let Ok(entries) = std::fs::read_dir("/Volumes") else {
             return Vec::new();
         };
+        let table = mount_table();
         let mut drives: Vec<Drive> = entries
             .filter_map(|entry| {
                 let path = entry.ok()?.path();
-                let name = mount_label(&path);
-                drive_at(path, name)
+                match table.get(&path) {
+                    Some(mount) if !mount.local => {
+                        let share = ShareAddress::from_mount_source(&mount.source, &mount.fstype);
+                        let name = name_for(&path, share.as_ref());
+                        drive_at(path, name, DriveKind::Network, share)
+                    }
+                    _ => {
+                        let name = mount_label(&path);
+                        drive_at(path, name, DriveKind::Fixed, None)
+                    }
+                }
             })
             .collect();
         drives.sort_by(|a, b| a.name.cmp(&b.name));
         drives
     }
 
-    /// Linux: real block-device mounts from `/proc/mounts`.
+    /// Linux: block-device and network mounts from `/proc/mounts`.
+    /// Reading `/proc/mounts` never touches the mounts themselves.
     #[cfg(target_os = "linux")]
     pub fn list_drives() -> Vec<Drive> {
         let Ok(contents) = std::fs::read_to_string("/proc/mounts") else {
@@ -208,9 +517,14 @@ mod platform {
         };
         super::parse_proc_mounts(&contents)
             .into_iter()
-            .filter_map(|path| {
-                let name = mount_label(&path);
-                drive_at(path, name)
+            .filter_map(|entry| {
+                let kind = super::linux_drive_kind(&entry);
+                let share = ShareAddress::from_mount_source(&entry.source, &entry.fstype);
+                let name = match kind {
+                    DriveKind::Network => name_for(&entry.mount, share.as_ref()),
+                    _ => mount_label(&entry.mount),
+                };
+                drive_at(entry.mount, name, kind, share)
             })
             .collect()
     }
@@ -220,70 +534,121 @@ mod platform {
 mod platform {
     use std::path::PathBuf;
 
+    use windows::Win32::Foundation::{ERROR_CONNECTION_UNAVAIL, NO_ERROR};
+    use windows::Win32::NetworkManagement::WNet::WNetGetConnectionW;
     use windows::Win32::Storage::FileSystem::{
         GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
     };
-    use windows::core::HSTRING;
+    use windows::core::{HSTRING, PWSTR};
 
-    use super::Drive;
-
-    /// `DRIVE_FIXED` from `GetDriveTypeW` — a local, non-removable disk.
-    /// Defined here rather than imported: the constant lives in the
-    /// `Win32_System_WindowsProgramming` feature we don't otherwise pull
-    /// in, and its value (3) is stable Win32 ABI.
-    const DRIVE_FIXED: u32 = 3;
+    use super::{Capacity, Drive, DriveKind};
+    use crate::network::ShareAddress;
 
     /// Fresh-install default on Windows: every *fixed* drive, skipping
     /// removable and network ones so a USB stick or mapped share doesn't
     /// kick off a whole-volume re-index. `GetDriveTypeW` classifies each
     /// letter; `DRIVE_FIXED` is the local hard-drive case.
     pub fn default_index_roots() -> Vec<PathBuf> {
-        let mask = unsafe { GetLogicalDrives() };
-        let mut roots = Vec::new();
-        for i in 0..26u32 {
-            if mask & (1 << i) == 0 {
-                continue;
-            }
-            let letter = (b'A' + i as u8) as char;
-            let root = format!("{letter}:\\");
-            let wide = HSTRING::from(root.as_str());
-            // SAFETY: `wide` is a valid NUL-terminated wide path for the
-            // duration of the call.
-            if unsafe { GetDriveTypeW(&wide) } == DRIVE_FIXED {
-                roots.push(PathBuf::from(&root));
-            }
-        }
-        roots
+        letters()
+            .filter(|&letter| drive_type(letter) == super::DRIVE_FIXED)
+            .map(|letter| PathBuf::from(format!("{letter}:\\")))
+            .collect()
     }
 
-    /// Windows: each set bit of the logical-drives mask is a letter A–Z.
-    pub fn list_drives() -> Vec<Drive> {
+    /// The drive letters in use, A–Z, from the logical-drives mask.
+    fn letters() -> impl Iterator<Item = char> {
+        // SAFETY: no arguments; returns a bitmask.
         let mask = unsafe { GetLogicalDrives() };
-        let mut drives = Vec::new();
-        for i in 0..26u32 {
-            if mask & (1 << i) == 0 {
-                continue;
-            }
-            let letter = (b'A' + i as u8) as char;
-            let root = format!("{letter}:\\");
-            let (mut total, mut free) = (0u64, 0u64);
-            let wide = HSTRING::from(root.as_str());
-            // SAFETY: valid NUL-terminated wide path; the out-params are
-            // owned locals. Skip drives the call rejects (empty optical
-            // drives, disconnected network mounts).
-            let ok = unsafe {
-                GetDiskFreeSpaceExW(&wide, None, Some(&mut total), Some(&mut free)).is_ok()
-            };
-            if ok {
-                drives.push(Drive {
-                    name: super::drive_label(volume_label(&wide).as_deref(), letter),
-                    path: PathBuf::from(&root),
-                    total_bytes: total,
-                    free_bytes: free,
-                });
-            }
+        (0..26u32)
+            .filter(move |i| mask & (1 << i) != 0)
+            .map(|i| (b'A' + i as u8) as char)
+    }
+
+    /// `GetDriveTypeW` for a letter's root. Reads the device type the I/O
+    /// manager already knows; it doesn't contact a mapped drive's server.
+    fn drive_type(letter: char) -> u32 {
+        let wide = HSTRING::from(format!("{letter}:\\"));
+        // SAFETY: `wide` is a valid NUL-terminated wide path for the
+        // duration of the call.
+        unsafe { GetDriveTypeW(&wide) }
+    }
+
+    /// Windows: each letter in use, classified by `GetDriveTypeW`. Local
+    /// drives the capacity query rejects (an empty optical drive) are
+    /// skipped; network drives are always listed — a disconnected mapped
+    /// drive shows as such, as in Explorer.
+    pub fn list_drives() -> Vec<Drive> {
+        letters()
+            .filter_map(
+                |letter| match super::kind_for_drive_type(drive_type(letter)) {
+                    DriveKind::Network => Some(network_drive(letter)),
+                    kind => local_drive(letter, kind),
+                },
+            )
+            .collect()
+    }
+
+    fn local_drive(letter: char, kind: DriveKind) -> Option<Drive> {
+        let root = format!("{letter}:\\");
+        let capacity = free_space(&root)?;
+        Some(Drive {
+            name: super::drive_label(volume_label(&HSTRING::from(&root)).as_deref(), letter),
+            path: PathBuf::from(root),
+            kind,
+            capacity: Some(capacity),
+            share: None,
+        })
+    }
+
+    /// A mapped drive. Its UNC target comes from the WNet connection
+    /// table (no server round-trip); its capacity from a bounded probe,
+    /// since `GetDiskFreeSpaceExW` on an unreachable server can block for
+    /// the SMB timeout. The volume label is skipped for the same reason.
+    fn network_drive(letter: char) -> Drive {
+        let root = format!("{letter}:\\");
+        let share = remote_name(letter).and_then(|unc| ShareAddress::parse(&unc));
+        let probe_root = root.clone();
+        let capacity =
+            super::network_capacity(std::path::Path::new(&root), move || free_space(&probe_root));
+        Drive {
+            name: super::network_drive_label(share.as_ref(), letter),
+            path: PathBuf::from(root),
+            kind: DriveKind::Network,
+            capacity,
+            share,
         }
-        drives
+    }
+
+    /// Size and free space for a drive root; `None` when the call fails.
+    fn free_space(root: &str) -> Option<Capacity> {
+        let (mut total, mut free) = (0u64, 0u64);
+        let wide = HSTRING::from(root);
+        // SAFETY: valid NUL-terminated wide path; the out-params are
+        // owned locals.
+        unsafe { GetDiskFreeSpaceExW(&wide, None, Some(&mut total), Some(&mut free)) }.ok()?;
+        Some(Capacity {
+            total_bytes: total,
+            free_bytes: free,
+        })
+    }
+
+    /// The UNC path a mapped drive letter points at (`\\nas\Media`), from
+    /// the WNet connection table. Assumes `WNetGetConnectionW` answers from
+    /// the local table, and that it still fills in the name for a
+    /// remembered drive whose server is unreachable
+    /// (`ERROR_CONNECTION_UNAVAIL`).
+    fn remote_name(letter: char) -> Option<String> {
+        let local = HSTRING::from(format!("{letter}:"));
+        // Long enough for any UNC path WNet hands back.
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        // SAFETY: `local` is NUL-terminated; `buf` holds `len` u16s.
+        let status = unsafe { WNetGetConnectionW(&local, Some(PWSTR(buf.as_mut_ptr())), &mut len) };
+        if status != NO_ERROR && status != ERROR_CONNECTION_UNAVAIL {
+            return None;
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..end]))
     }
 
     /// The volume label for a drive root, `None` when it has none or the
@@ -301,6 +666,45 @@ mod platform {
     }
 }
 
+// `GetDriveTypeW` results. Defined here rather than imported: the
+// constants live in the `Win32_System_WindowsProgramming` feature we don't
+// otherwise pull in, and their values are stable Win32 ABI.
+#[cfg(any(windows, test))]
+const DRIVE_REMOVABLE: u32 = 2;
+#[cfg(any(windows, test))]
+const DRIVE_FIXED: u32 = 3;
+#[cfg(any(windows, test))]
+const DRIVE_REMOTE: u32 = 4;
+#[cfg(any(windows, test))]
+const DRIVE_CDROM: u32 = 5;
+
+/// The [`DriveKind`] for a `GetDriveTypeW` result. Unknown types (and a
+/// RAM disk) count as fixed.
+#[cfg(any(windows, test))]
+fn kind_for_drive_type(drive_type: u32) -> DriveKind {
+    match drive_type {
+        DRIVE_REMOTE => DriveKind::Network,
+        DRIVE_REMOVABLE | DRIVE_CDROM => DriveKind::Removable,
+        _ => DriveKind::Fixed,
+    }
+}
+
+/// Explorer's name for a mapped drive: `Movies (\\nas\Media) (Z:)` — the
+/// last folder, then where it lives — or `Network Drive (Z:)` when the
+/// target is unknown.
+#[cfg(any(windows, test))]
+fn network_drive_label(share: Option<&ShareAddress>, letter: char) -> String {
+    let Some((leaf, parent)) = share.and_then(|s| s.segments.split_last()) else {
+        return format!("Network Drive ({letter}:)");
+    };
+    let mut location = format!(r"\\{}", share.map_or("", |s| s.host.as_str()));
+    for segment in parent {
+        location.push('\\');
+        location.push_str(segment);
+    }
+    format!("{leaf} ({location}) ({letter}:)")
+}
+
 /// Explorer's name for a Windows drive: "Data (D:)", or "Local Disk (C:)"
 /// when the volume has no label.
 #[cfg(any(windows, test))]
@@ -313,34 +717,48 @@ fn drive_label(volume: Option<&str>, letter: char) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn used_fraction_is_clamped_and_safe() {
-        let d = Drive {
+    fn capacity(total_bytes: u64, free_bytes: u64) -> Capacity {
+        Capacity {
+            total_bytes,
+            free_bytes,
+        }
+    }
+
+    fn drive(path: &str, capacity: Option<Capacity>, share: Option<ShareAddress>) -> Drive {
+        Drive {
             name: "x".into(),
-            path: "/".into(),
-            total_bytes: 0,
-            free_bytes: 0,
-        };
-        assert_eq!(d.used_fraction(), 0.0); // no divide-by-zero
-        let d = Drive {
-            name: "x".into(),
-            path: "/".into(),
-            total_bytes: 100,
-            free_bytes: 25,
-        };
-        assert!((d.used_fraction() - 0.75).abs() < 1e-6);
-        // Free somehow exceeding total must not underflow.
-        let d = Drive {
-            name: "x".into(),
-            path: "/".into(),
-            total_bytes: 100,
-            free_bytes: 200,
-        };
-        assert_eq!(d.used_fraction(), 0.0);
+            path: path.into(),
+            kind: DriveKind::Network,
+            capacity,
+            share,
+        }
     }
 
     #[test]
-    fn proc_mounts_keeps_only_block_devices_deduped() {
+    fn used_fraction_is_clamped_and_safe() {
+        assert_eq!(capacity(0, 0).used_fraction(), 0.0); // no divide-by-zero
+        assert!((capacity(100, 25).used_fraction() - 0.75).abs() < 1e-6);
+        // Free somehow exceeding total must not underflow.
+        assert_eq!(capacity(100, 200).used_fraction(), 0.0);
+    }
+
+    #[test]
+    fn an_unresponsive_drive_reads_as_empty() {
+        assert_eq!(drive("/mnt/nas", None, None).used_fraction(), 0.0);
+        let known = drive("/mnt/nas", Some(capacity(100, 50)), None);
+        assert!((known.used_fraction() - 0.5).abs() < 1e-6);
+    }
+
+    fn entry(source: &str, mount: &str, fstype: &str) -> MountEntry {
+        MountEntry {
+            source: source.into(),
+            mount: mount.into(),
+            fstype: fstype.into(),
+        }
+    }
+
+    #[test]
+    fn proc_mounts_keeps_block_devices_and_network_mounts_deduped() {
         let contents = "\
 sysfs /sys sysfs rw 0 0
 /dev/sda1 / ext4 rw 0 0
@@ -349,16 +767,193 @@ proc /proc proc rw 0 0
 tmpfs /run tmpfs rw 0 0
 /dev/sda1 / ext4 rw,remount 0 0
 /dev/sdc1 /media/My\\040Disk vfat rw 0 0
+//nas/My\\040Share /mnt/nas cifs rw 0 0
+fs1:/srv/data /mnt/fs1 nfs4 rw 0 0
+me@host:/home/me /home/me/remote fuse.sshfs rw 0 0
+gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0
 ";
-        let mounts = parse_proc_mounts(contents);
         assert_eq!(
-            mounts,
+            parse_proc_mounts(contents),
             vec![
-                PathBuf::from("/"),
-                PathBuf::from("/mnt/data"),
-                PathBuf::from("/media/My Disk"),
+                entry("/dev/sda1", "/", "ext4"),
+                entry("/dev/sdb1", "/mnt/data", "ext4"),
+                entry("/dev/sdc1", "/media/My Disk", "vfat"),
+                entry("//nas/My Share", "/mnt/nas", "cifs"),
+                entry("fs1:/srv/data", "/mnt/fs1", "nfs4"),
+                entry("me@host:/home/me", "/home/me/remote", "fuse.sshfs"),
             ]
         );
+    }
+
+    #[test]
+    fn proc_mounts_lines_missing_a_field_are_skipped() {
+        assert!(parse_proc_mounts("/dev/sda1 /\n\n//nas/s\n").is_empty());
+    }
+
+    #[test]
+    fn mount_fields_unescape_octal_only() {
+        assert_eq!(unescape_mount_field(r"a\040b\011c\134d"), "a b\tc\\d");
+        // Not a three-digit octal escape: kept as written.
+        assert_eq!(unescape_mount_field(r"a\09b\4"), r"a\09b\4");
+        assert_eq!(unescape_mount_field(r"\777"), r"\777", "out of byte range");
+        assert_eq!(unescape_mount_field("plain"), "plain");
+    }
+
+    #[test]
+    fn linux_mounts_are_classified_by_type_then_place() {
+        assert_eq!(
+            linux_drive_kind(&entry("//nas/s", "/media/nas", "cifs")),
+            DriveKind::Network
+        );
+        assert_eq!(
+            linux_drive_kind(&entry("/dev/sdc1", "/run/media/me/USB", "vfat")),
+            DriveKind::Removable
+        );
+        assert_eq!(
+            linux_drive_kind(&entry("/dev/sdc1", "/media/USB", "exfat")),
+            DriveKind::Removable
+        );
+        assert_eq!(
+            linux_drive_kind(&entry("/dev/sda1", "/mediafiles", "ext4")),
+            DriveKind::Fixed,
+            "a path prefix, not a string prefix"
+        );
+        assert_eq!(
+            linux_drive_kind(&entry("/dev/sda1", "/", "ext4")),
+            DriveKind::Fixed
+        );
+    }
+
+    #[test]
+    fn network_fstypes_are_recognized() {
+        for fstype in [
+            "cifs",
+            "smb3",
+            "smbfs",
+            "nfs",
+            "nfs4",
+            "fuse.sshfs",
+            "webdav",
+        ] {
+            assert!(is_network_fstype(fstype), "{fstype}");
+        }
+        for fstype in ["ext4", "apfs", "vfat", "fuse.gvfsd-fuse", "tmpfs", "fuse"] {
+            assert!(!is_network_fstype(fstype), "{fstype}");
+        }
+    }
+
+    #[test]
+    fn a_typed_share_opens_where_it_is_mounted() {
+        let media = ShareAddress::from_mount_source("//nas/Media", "cifs");
+        let drives = [
+            drive("/", Some(capacity(1, 1)), None),
+            drive("/mnt/media", None, media),
+        ];
+        let typed = ShareAddress::parse(r"\\NAS\media\Movies").unwrap();
+        assert_eq!(
+            locate_share(&typed, &drives),
+            Some(PathBuf::from("/mnt/media/Movies"))
+        );
+        let typed = ShareAddress::parse("smb://nas/Photos").unwrap();
+        assert_eq!(locate_share(&typed, &drives), None);
+    }
+
+    fn timeout() -> Duration {
+        Duration::from_millis(50)
+    }
+
+    #[test]
+    fn a_quick_probe_answers() {
+        let stuck = StuckProbes::default();
+        assert_eq!(
+            bounded_probe(
+                Path::new("/mnt/a"),
+                Duration::from_secs(5),
+                &stuck,
+                || Some(7)
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            bounded_probe(
+                Path::new("/mnt/a"),
+                Duration::from_secs(5),
+                &stuck,
+                || None::<u8>
+            ),
+            None
+        );
+        assert!(lock(&stuck).is_empty());
+    }
+
+    #[test]
+    fn a_stuck_probe_is_not_restarted_until_it_returns() {
+        let stuck = StuckProbes::default();
+        let key = Path::new("/mnt/dead");
+        let (release, wait) = mpsc::channel::<()>();
+        let first = bounded_probe(key, timeout(), &stuck, move || {
+            wait.recv().ok();
+            Some(1)
+        });
+        assert_eq!(first, None, "timed out");
+        assert!(lock(&stuck).contains(key));
+
+        // While the first probe is parked, a second never starts.
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&started);
+        let second = bounded_probe(key, timeout(), &stuck, move || {
+            flag.store(true, Ordering::Relaxed);
+            Some(2)
+        });
+        assert_eq!(second, None);
+        assert!(!started.load(Ordering::Relaxed));
+
+        // Other mounts are unaffected.
+        assert_eq!(
+            bounded_probe(
+                Path::new("/mnt/alive"),
+                Duration::from_secs(5),
+                &stuck,
+                || Some(3)
+            ),
+            Some(3)
+        );
+
+        // Once the server answers, the mount is probed again.
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while lock(&stuck).contains(key) {
+            assert!(std::time::Instant::now() < deadline, "probe never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            bounded_probe(key, Duration::from_secs(5), &stuck, || Some(4)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn windows_drive_types_map_to_kinds() {
+        assert_eq!(kind_for_drive_type(DRIVE_FIXED), DriveKind::Fixed);
+        assert_eq!(kind_for_drive_type(DRIVE_REMOTE), DriveKind::Network);
+        assert_eq!(kind_for_drive_type(DRIVE_REMOVABLE), DriveKind::Removable);
+        assert_eq!(kind_for_drive_type(DRIVE_CDROM), DriveKind::Removable);
+        assert_eq!(kind_for_drive_type(0), DriveKind::Fixed, "unknown");
+    }
+
+    #[test]
+    fn mapped_drives_are_named_like_explorer() {
+        let media = ShareAddress::parse(r"\\nas\Media").unwrap();
+        assert_eq!(
+            network_drive_label(Some(&media), 'Z'),
+            r"Media (\\nas) (Z:)"
+        );
+        let movies = ShareAddress::parse(r"\\nas\Media\Movies").unwrap();
+        assert_eq!(
+            network_drive_label(Some(&movies), 'Y'),
+            r"Movies (\\nas\Media) (Y:)"
+        );
+        assert_eq!(network_drive_label(None, 'X'), "Network Drive (X:)");
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod index_lab;
 pub mod launch;
 pub mod listing;
 pub mod magic;
+pub mod network;
 pub mod ops;
 pub mod picker;
 pub mod recents;

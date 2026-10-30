@@ -440,12 +440,7 @@ impl Workspace {
             if !collapsed {
                 content = content.children(self.drives.iter().enumerate().map(|(ix, drive)| {
                     let path = drive.path.clone();
-                    let free_line: SharedString = format!(
-                        "{} free of {}",
-                        format_size(drive.free_bytes),
-                        format_size(drive.total_bytes)
-                    )
-                    .into();
+                    let free_line: SharedString = this_pc::drive_detail(drive).into();
                     ui::sidebar::drive_row(&theme, ("drive", ix))
                         .child(
                             div()
@@ -453,8 +448,11 @@ impl Workspace {
                                 .items_center()
                                 .gap_2()
                                 .child(
-                                    ui::icon::ui_icon("icons/hard-drive.svg", theme.text_dim)
-                                        .size(px(14.)),
+                                    ui::icon::ui_icon(
+                                        this_pc::drive_icon(drive.kind),
+                                        theme.text_dim,
+                                    )
+                                    .size(px(14.)),
                                 )
                                 .child(
                                     div()
@@ -464,7 +462,9 @@ impl Workspace {
                                         .child(SharedString::from(drive.name.clone())),
                                 ),
                         )
-                        .child(ui::sidebar::capacity_bar(&theme, drive.used_fraction()))
+                        .when(drive.capacity.is_some(), |s| {
+                            s.child(ui::sidebar::capacity_bar(&theme, drive.used_fraction()))
+                        })
                         .child(div().text_xs().text_color(theme.text_dim).child(free_line))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.navigate(path.clone(), cx);
