@@ -440,6 +440,7 @@ impl Workspace {
             if !collapsed {
                 content = content.children(self.drives.iter().enumerate().map(|(ix, drive)| {
                     let path = drive.path.clone();
+                    let network = (drive.kind == DriveKind::Network).then(|| drive.clone());
                     let free_line: SharedString = this_pc::drive_detail(drive).into();
                     ui::sidebar::drive_row(&theme, ("drive", ix))
                         .child(
@@ -469,6 +470,19 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                             this.navigate(path.clone(), cx);
                         }))
+                        .when_some(network, |row, drive| {
+                            row.on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.open_network_drive_menu(
+                                        &drive,
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            )
+                        })
                 }));
                 content = content.child(
                     ui::sidebar::sidebar_row(&theme, "connect-to-server")

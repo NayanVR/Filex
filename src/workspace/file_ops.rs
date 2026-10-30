@@ -490,6 +490,7 @@ impl Workspace {
             id: job_id,
             label: format!("{verb} {} {}", sources.len(), plural_items(sources.len())).into(),
             progress: progress.clone(),
+            paths: sources.iter().cloned().chain([dest_dir.clone()]).collect(),
         });
         self.spawn_job_ticker(job_id, cx);
         cx.notify();
@@ -726,6 +727,10 @@ impl Workspace {
                 id: job_id,
                 label: format!("{verb} {name}").into(),
                 progress: progress.clone(),
+                paths: [op.source().to_path_buf()]
+                    .into_iter()
+                    .chain(op.destination())
+                    .collect(),
             });
             self.spawn_job_ticker(job_id, cx);
             cx.notify();

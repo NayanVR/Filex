@@ -102,9 +102,15 @@ The location field resolves a share address before path rules:
      that needs a password (and has none saved in the keyring) is reported
      with a pointer to the desktop file manager rather than prompted for
      in-app. Cancelling kills `gio`.
-3. **Disconnect / eject**: `WNetCancelConnection2W`, `unmount(2)` via
-   `diskutil unmount` semantics, `gio mount -u`. Context menu on network
-   drives; refuse while a file operation targets the share.
+3. **Disconnect / eject** — done (FIL-60). A network drive's right-click
+   menu in the sidebar and on This PC ("Eject" on macOS, "Disconnect"
+   elsewhere), through `ShareConnector::disconnect` on a thread of its own:
+   `WNetCancelConnection2W` with `CONNECT_UPDATE_PROFILE` (a "reconnect at
+   sign-in" mapping is forgotten too), `unmount(2)` on macOS, `gio mount
+   -u` on Linux. None of them forces: a share with open files is reported,
+   not torn down. Refused up front while a running job reads from or
+   writes to the share (each job records its paths). A share on screen
+   when it's disconnected leaves for This PC (Windows) or home.
 4. **Linux GVfs mounts in the drive list** — done (FIL-61):
    `fuse.gvfsd-fuse` is one mount for all GVfs shares, at
    `$XDG_RUNTIME_DIR/gvfs`. Each `smb-share:`, `nfs:`, `sftp:`, `dav(s):`,

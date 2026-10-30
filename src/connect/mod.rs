@@ -1,5 +1,6 @@
-//! Connecting to network shares (FIL-59). One [`ShareConnector`] per OS,
-//! so the UI doesn't care how a share gets mounted:
+//! Connecting to network shares (FIL-59) and disconnecting them (FIL-60).
+//! One [`ShareConnector`] per OS, so the UI doesn't care how a share gets
+//! mounted or unmounted:
 //!
 //! - Windows: `WNetAddConnection2W`, with the OS credential prompt when the
 //!   current sign-in isn't enough; optionally to a drive letter.
@@ -8,10 +9,10 @@
 //! - Linux: GVfs (`gio mount`), user-space and root-free; the share lands
 //!   under `$XDG_RUNTIME_DIR/gvfs`. `mount.cifs` needs root and stays out.
 //!
-//! Every call blocks — on the network, and on the user typing into an OS
-//! password prompt — so callers run it on a thread of its own
-//! ([`connect_on_thread`]), never the UI thread or the shared background
-//! executor. See docs/design-network.md.
+//! Every call blocks — on the network, on the user typing into an OS
+//! password prompt, or on a dead share — so callers run it on a thread of
+//! its own ([`connect_on_thread`], [`disconnect_on_thread`]), never the UI
+//! thread or the shared background executor. See docs/design-network.md.
 
 #[cfg(any(target_os = "linux", test))]
 mod linux;
@@ -22,7 +23,7 @@ mod windows;
 
 use crate::network::ShareAddress;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -53,7 +54,7 @@ impl std::fmt::Display for ConnectError {
     }
 }
 
-/// Mounts a share and says where it can be browsed.
+/// Mounts a share and says where it can be browsed, and unmounts it again.
 pub trait ShareConnector: Send + Sync {
     /// Connect, blocking until the share is mounted, the user cancels the
     /// OS prompt, or it fails. `cancel` is checked where the OS allows
@@ -65,6 +66,11 @@ pub trait ShareConnector: Send + Sync {
         request: &ConnectRequest,
         cancel: &AtomicBool,
     ) -> Result<PathBuf, ConnectError>;
+
+    /// Disconnect the network drive mounted at `mount` (a drive's
+    /// [`crate::drives::Drive::path`]), blocking until done. Fails, rather
+    /// than forcing it, while files on the share are open.
+    fn disconnect(&self, mount: &Path) -> Result<(), ConnectError>;
 }
 
 /// This platform's connector.
@@ -96,6 +102,11 @@ impl ShareConnector for Unsupported {
             "Connecting to servers isn't supported on this system.".into(),
         ))
     }
+    fn disconnect(&self, _: &Path) -> Result<(), ConnectError> {
+        Err(ConnectError::Failed(
+            "Disconnecting isn't supported on this system.".into(),
+        ))
+    }
 }
 
 /// Run `connector.connect` on a new thread and hand its result to
@@ -113,6 +124,31 @@ pub fn connect_on_thread(
     if let Err(error) = spawned {
         tracing::warn!("couldn't start a connect thread: {error}");
     }
+}
+
+/// Run `connector.disconnect` on a new thread and hand its result to
+/// `done` there: unmounting a share that stopped answering can block for
+/// as long as the server stays away.
+pub fn disconnect_on_thread(
+    connector: &'static dyn ShareConnector,
+    mount: PathBuf,
+    done: impl FnOnce(Result<(), ConnectError>) + Send + 'static,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("filex-disconnect".into())
+        .spawn(move || done(connector.disconnect(&mount)));
+    if let Err(error) = spawned {
+        tracing::warn!("couldn't start a disconnect thread: {error}");
+    }
+}
+
+/// The message for a disconnect refused because files on the share are
+/// open, shared by every platform.
+fn in_use(mount: &Path) -> ConnectError {
+    ConnectError::Failed(format!(
+        "Couldn’t disconnect {}: files on it are still open.",
+        crate::listing::location_label(mount)
+    ))
 }
 
 /// Where a just-mounted share's folder is, from a fresh drive listing.
@@ -138,6 +174,27 @@ mod tests {
         fn connect(&self, _: &ConnectRequest, _: &AtomicBool) -> Result<PathBuf, ConnectError> {
             self.0.clone()
         }
+        fn disconnect(&self, _: &Path) -> Result<(), ConnectError> {
+            self.0.clone().map(|_| ())
+        }
+    }
+
+    #[test]
+    fn a_disconnect_runs_off_the_calling_thread_and_reports_back() {
+        static FAILS: std::sync::OnceLock<Fixed> = std::sync::OnceLock::new();
+        let connector =
+            FAILS.get_or_init(|| Fixed(Err(in_use(std::path::Path::new("/mnt/media")))));
+        let (tx, rx) = mpsc::channel();
+        disconnect_on_thread(connector, PathBuf::from("/mnt/media"), move |result| {
+            let _ = tx.send(result);
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            result,
+            Err(ConnectError::Failed(
+                "Couldn’t disconnect media: files on it are still open.".into()
+            ))
+        );
     }
 
     #[test]

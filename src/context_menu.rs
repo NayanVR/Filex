@@ -53,6 +53,8 @@ pub enum Command {
     MoveFavorite(isize),
     /// Set a folder's icon; `None` is Automatic.
     SetFolderIcon(Option<FolderIcon>),
+    /// Unmount a network drive (FIL-60).
+    Disconnect,
     /// A row that only opens its submenu (see [`Item::submenu`]).
     OpenSubmenu,
 }
@@ -304,6 +306,26 @@ pub fn favorite_menu(heading: String) -> Vec<Row> {
         Row::Item(
             Item::new(Command::RemoveFromFavorites, "Remove from Favorites")
                 .icon("icons/star.svg")
+                .danger(),
+        ),
+    ]
+}
+
+/// The menu for a network drive in the sidebar or on This PC (FIL-60).
+/// macOS calls disconnecting a share "Eject", like Finder.
+pub fn network_drive_menu(heading: String) -> Vec<Row> {
+    let disconnect = if cfg!(target_os = "macos") {
+        "Eject"
+    } else {
+        "Disconnect"
+    };
+    vec![
+        Row::Heading(heading),
+        Row::Item(Item::new(Command::Open, "Open").icon("icons/folder.svg")),
+        Row::Separator,
+        Row::Item(
+            Item::new(Command::Disconnect, disconnect)
+                .icon("icons/server.svg")
                 .danger(),
         ),
     ]
@@ -799,5 +821,22 @@ mod tests {
         assert_eq!(hover.fire(close), None);
         // Coming back to the parent row from the submenu re-arms normally.
         assert!(hover.hover(Some(3)).is_some());
+    }
+
+    #[test]
+    fn a_network_drive_menu_opens_or_disconnects_it() {
+        let rows = network_drive_menu("Media (nas)".into());
+        assert_eq!(rows[0], Row::Heading("Media (nas)".into()));
+        let commands: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) => Some((item.command, item.danger)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [(Command::Open, false), (Command::Disconnect, true)]
+        );
     }
 }
