@@ -61,14 +61,20 @@ pub(super) fn free_drive_letter(used: u32) -> Option<char> {
 }
 
 /// The folder to open once connected: the requested path under the drive
-/// letter when one was mapped, else the UNC path itself.
+/// letter when one was mapped, else the UNC path itself. Joined with `\`
+/// explicitly rather than `PathBuf::push`, which uses the host's separator,
+/// so the result is the same Windows path wherever it's computed.
 pub(super) fn connected_folder(address: &ShareAddress, letter: Option<char>) -> Option<PathBuf> {
     let Some(letter) = letter else {
         return address.to_unc().map(PathBuf::from);
     };
-    let mut path = PathBuf::from(format!("{letter}:\\"));
-    path.extend(address.segments.iter().skip(1));
-    Some(path)
+    let below: Vec<&str> = address
+        .segments
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .collect();
+    Some(PathBuf::from(format!("{letter}:\\{}", below.join("\\"))))
 }
 
 #[cfg(windows)]
