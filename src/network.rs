@@ -209,6 +209,71 @@ impl ShareAddress {
     }
 }
 
+/// A share GVfs mounted (`gio mount`, or a file manager's "Connect to
+/// Server"), from its directory name under `$XDG_RUNTIME_DIR/gvfs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GvfsMount {
+    /// The name to show for it.
+    pub label: String,
+    /// Where it points, for the protocols [`ShareAddress`] covers (SMB,
+    /// NFS); `None` for SFTP, WebDAV, FTP and AFP.
+    pub share: Option<ShareAddress>,
+}
+
+impl GvfsMount {
+    /// Parse a GVfs FUSE directory name: `type:key=value,…` with values
+    /// percent-encoded, keys in any order — `smb-share:server=nas,share=media`,
+    /// `nfs:host=fs1,prefix=%2Fsrv%2Fdata`, `sftp:host=example.com,user=me`.
+    /// `None` for anything that isn't a network share: local devices GVfs
+    /// also mounts (`mtp:`, `gphoto2:`), cloud accounts, and browse-only
+    /// locations like `smb-server:` (a server's share list, not a folder).
+    pub fn parse(name: &str) -> Option<Self> {
+        let (scheme, fields) = name.split_once(':')?;
+        let fields = fields
+            .split(',')
+            .map(|field| {
+                let (key, value) = field.split_once('=')?;
+                Some((key, percent_decode(value)?))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.as_str())
+                .filter(|v| !v.is_empty())
+        };
+        let host = field("host").or(field("server"))?;
+        let share = match scheme {
+            "smb-share" => ShareAddress::from_parts(
+                Protocol::Smb,
+                field("user").map(str::to_owned),
+                [host, field("share")?].into_iter(),
+                false,
+            ),
+            "nfs" => {
+                let prefix = field("prefix").unwrap_or("");
+                ShareAddress::from_parts(
+                    Protocol::Nfs,
+                    None,
+                    std::iter::once(host).chain(prefix.split('/')),
+                    false,
+                )
+            }
+            _ => None,
+        };
+        let label = match (scheme, &share) {
+            (_, Some(share)) => share.display_name(),
+            ("afp-volume", None) => format!("{} ({host})", field("volume")?),
+            ("sftp", None) => format!("{host} (SFTP)"),
+            ("dav" | "davs", None) => format!("{host} (WebDAV)"),
+            ("ftp" | "ftps", None) => format!("{host} (FTP)"),
+            _ => return None,
+        };
+        Some(Self { label, share })
+    }
+}
+
 /// Decode `%XX` escapes as UTF-8. `None` for a malformed escape or bytes
 /// that aren't UTF-8, so a garbled URL is rejected rather than guessed at.
 fn percent_decode(text: &str) -> Option<String> {
@@ -427,5 +492,69 @@ mod tests {
                 .locate(mounts),
             None
         );
+    }
+
+    #[test]
+    fn gvfs_smb_shares_parse_with_fields_in_any_order() {
+        let mount =
+            GvfsMount::parse("smb-share:domain=WORK,server=nas,share=my%20media,user=me").unwrap();
+        assert_eq!(mount.label, "my media (nas)");
+        let mut expected = smb("nas", &["my media"]);
+        expected.user = Some("me".into());
+        assert_eq!(mount.share, Some(expected));
+        assert_eq!(
+            GvfsMount::parse("smb-share:share=Media,server=nas")
+                .unwrap()
+                .share,
+            Some(smb("nas", &["Media"]))
+        );
+    }
+
+    #[test]
+    fn gvfs_nfs_mounts_carry_their_export_path() {
+        let mount = GvfsMount::parse("nfs:host=fs1,prefix=%2Fsrv%2Fdata").unwrap();
+        assert_eq!(mount.label, "data (fs1)");
+        assert_eq!(
+            mount.share,
+            Some(ShareAddress {
+                protocol: Protocol::Nfs,
+                host: "fs1".into(),
+                user: None,
+                segments: vec!["srv".into(), "data".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn other_gvfs_network_mounts_are_named_but_not_addressable() {
+        for (name, label) in [
+            ("sftp:host=example.com,user=me", "example.com (SFTP)"),
+            (
+                "davs:host=cloud.example.com,ssl=true",
+                "cloud.example.com (WebDAV)",
+            ),
+            ("ftp:host=ftp.example.com", "ftp.example.com (FTP)"),
+            ("afp-volume:host=mac,volume=Shared", "Shared (mac)"),
+        ] {
+            let mount = GvfsMount::parse(name).unwrap();
+            assert_eq!(mount.label, label);
+            assert_eq!(mount.share, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn gvfs_devices_browse_points_and_garbage_are_not_shares() {
+        for name in [
+            "mtp:host=Google_Pixel_123",
+            "gphoto2:host=Canon",
+            "smb-server:server=nas",
+            "google-drive:host=gmail.com,user=me",
+            "smb-share:server=nas",
+            "smb-share:server=nas,share=%zz",
+            "not-a-gvfs-name",
+            "sftp:user=me",
+        ] {
+            assert_eq!(GvfsMount::parse(name), None, "{name}");
+        }
     }
 }
