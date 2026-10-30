@@ -102,7 +102,16 @@ The location field resolves a share address before path rules:
 5. **Recent servers**: remember connected addresses (no credentials) for the
    Connect dialog.
 
-Open items (filed in Linear): Linux index roots can contain network mounts
-(e.g. sshfs under `~`), which the walker and inotify would then crawl over
-the network; the index filter should skip mount points whose filesystem is
-a network type.
+Nested network mounts (FIL-62, done): on Linux, `IndexFilter` reads the
+network mount points from `/proc/mounts` and the walk and live events skip
+any that sit strictly inside a root, mount point included, so a share
+mounted under `~` (sshfs at `~/remote`, cifs under `~/mnt`) isn't crawled.
+A mount added as a root itself is indexed normally. The filter is read
+when a walk starts and per event batch, so a share mounted later is
+skipped from the next walk on.
+
+Open items (filed in Linear): notify's recursive inotify watch walks the
+whole tree itself to add a watch per directory, so it still descends into
+a nested network mount (and into excluded folder names, FIL-28) even
+though the events it reports are dropped. Skipping those needs Filex to
+register the Linux watches itself instead of using `RecursiveMode::Recursive`.

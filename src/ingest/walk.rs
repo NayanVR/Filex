@@ -172,10 +172,7 @@ fn read_dir(
                     && path
                         .file_name()
                         .is_some_and(|name| filter.excluded_name(name));
-                if pruned
-                    || path.starts_with(excluded)
-                    || filter.excludes_top_level(&root.path, &path)
-                {
+                if pruned || path.starts_with(excluded) || filter.excludes_area(&root.path, &path) {
                     return None;
                 }
                 Some(listed.map_or_else(|| stat(&path), Ok).map(|s| (path, s)))
