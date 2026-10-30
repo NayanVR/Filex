@@ -9,4 +9,5 @@ mod changes;
 mod executable;
 mod progress;
 mod recovery;
+mod watch;
 mod writer;

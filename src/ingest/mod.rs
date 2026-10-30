@@ -195,6 +195,14 @@ impl IndexFilter {
     /// Ancestors are matched by name alone; the last component only when
     /// it is a directory, so a *file* named `target` is still indexed.
     pub fn excludes(&self, root: &Path, path: &Path) -> bool {
+        self.excludes_with(root, path, || path.is_dir())
+    }
+    /// [`Self::excludes`] for a path the caller already knows is a
+    /// directory, without another `stat`.
+    pub fn excludes_dir(&self, root: &Path, path: &Path) -> bool {
+        self.excludes_with(root, path, || true)
+    }
+    fn excludes_with(&self, root: &Path, path: &Path, is_dir: impl FnOnce() -> bool) -> bool {
         if self.excludes_area(root, path) {
             return true;
         }
@@ -202,8 +210,11 @@ impl IndexFilter {
             return false;
         };
         let mut names = relative.iter().peekable();
+        let mut is_dir = Some(is_dir);
         while let Some(name) = names.next() {
-            if self.excluded_name(name) && (names.peek().is_some() || path.is_dir()) {
+            if self.excluded_name(name)
+                && (names.peek().is_some() || is_dir.take().is_some_and(|f| f()))
+            {
                 return true;
             }
         }
