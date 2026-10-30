@@ -16,6 +16,8 @@ this page says where to look and what not to do.
 - **Fixed palettes** in `theme::fixed`: identity colours that don't change
   with the theme (file-kind tints, Finder tag colours, paper artwork,
   modal scrim).
+- **Icon colours** live in `ui::icon_palette`: computed from OKLCH hue
+  angles, never spelled (docs/design-icons.md).
 - **Rule:** `theme.rs` is the only UI file that spells a hex value. A new
   colour becomes a `Theme` slot if it differs per palette, otherwise a
   `fixed` fn.
@@ -149,6 +151,8 @@ fill now reads as dated. Filex gets there without a translucent window:
 | Tooltip | `tooltip::text_tooltip` |
 | Key hint | `kbd::keycap` |
 | Icon glyph | `icon::ui_icon` (always pass an explicit colour) |
+| File or folder icon | `icon::file_icon(theme, name, edge)`, `icon::folder_icon` — see docs/design-icons.md |
+| Place / drive glyph | `icon_art::Symbol::*.path()` with `icon::ui_icon` |
 | Text field frame | `top_bar::field(theme, focused, error)` |
 | Window caption buttons | `window_controls::caption_buttons` |
 

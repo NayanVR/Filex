@@ -563,7 +563,7 @@ impl PreviewWindow {
             .justify_center()
             .gap_3()
             .p_6()
-            .child(icon::file_icon(theme, kind, &name, 96.))
+            .child(icon::file_icon(theme, &name, 96.))
             .child(
                 div()
                     .max_w(px(420.))

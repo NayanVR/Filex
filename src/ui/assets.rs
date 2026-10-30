@@ -8,11 +8,12 @@
 //! stays a single self-contained artifact and an icon can never fail to
 //! load because of a missing file at runtime.
 //!
+//! Symbols (`assets/symbols/`, Filex's own) are the icon system's
+//! two-tone set; see docs/design-icons.md.
+//!
 //! Icons are single-color: gpui rasterizes the SVG to a coverage mask
 //! and fills it with the element's `text_color`, so the stroke geometry
 //! is what matters and every glyph is tinted from the active theme.
-//! The full-color document artwork in `file.svg` is rasterized separately
-//! by `ui::icon`; its registered mask is only a fallback silhouette.
 
 use std::borrow::Cow;
 
@@ -27,6 +28,22 @@ macro_rules! icon {
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/icons/",
+                $name,
+                ".svg"
+            )) as &'static [u8],
+        )
+    };
+}
+
+/// One embedded symbol (`symbols/<name>.svg`): the icon system's two-tone
+/// set, also embedded into file and folder artwork by `ui::icon_art`.
+macro_rules! symbol {
+    ($name:literal) => {
+        (
+            concat!("symbols/", $name, ".svg"),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/symbols/",
                 $name,
                 ".svg"
             )) as &'static [u8],
@@ -97,6 +114,26 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("caption-maximize"),
     icon!("caption-restore"),
     icon!("caption-close"),
+    // Icon-system symbols (two-tone: the secondary layer is 35% coverage,
+    // so a tinted mask still shows both tones).
+    symbol!("text"),
+    symbol!("pdf"),
+    symbol!("sheet"),
+    symbol!("slides"),
+    symbol!("image"),
+    symbol!("video"),
+    symbol!("audio"),
+    symbol!("archive"),
+    symbol!("code"),
+    symbol!("font"),
+    symbol!("app"),
+    symbol!("home"),
+    symbol!("desktop"),
+    symbol!("download"),
+    symbol!("drive"),
+    symbol!("clock"),
+    symbol!("star"),
+    symbol!("trash"),
 ];
 
 /// Serves the embedded [`ICONS`]. Registered via

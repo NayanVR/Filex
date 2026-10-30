@@ -1,6 +1,7 @@
 //! Sidebar: favorites, collapsible sections, recents, and its rendering.
 
 use super::*;
+use crate::ui::icon_art::Symbol;
 
 impl Workspace {
     pub(super) fn is_favorite(&self, path: &Path, cx: &App) -> bool {
@@ -322,11 +323,11 @@ impl Workspace {
             let place = |name: &str| self.user_dirs.get(name).map(Path::to_path_buf);
             let (machine_icon, machine_label, machine) = platform::machine_place();
             let places: Vec<(&'static str, &str, PathBuf)> = [
-                ("icons/house.svg", "Home", place("home")),
-                ("icons/folder.svg", "Desktop", place("desktop")),
-                ("icons/file-text.svg", "Documents", place("documents")),
-                ("icons/download.svg", "Downloads", place("downloads")),
-                ("icons/image.svg", "Pictures", place("pictures")),
+                (Symbol::Home.path(), "Home", place("home")),
+                (Symbol::Desktop.path(), "Desktop", place("desktop")),
+                (Symbol::Text.path(), "Documents", place("documents")),
+                (Symbol::Download.path(), "Downloads", place("downloads")),
+                (Symbol::Image.path(), "Pictures", place("pictures")),
                 (machine_icon, machine_label, Some(machine)),
             ]
             .into_iter()
@@ -357,7 +358,7 @@ impl Workspace {
                     ui::sidebar::sidebar_item(
                         &theme,
                         ("favorite", ix),
-                        "icons/star.svg",
+                        Symbol::Star.path(),
                         label,
                         active,
                     )
@@ -389,7 +390,7 @@ impl Workspace {
                         ui::sidebar::sidebar_item(
                             &theme,
                             ("recent", ix),
-                            "icons/clock.svg",
+                            Symbol::Clock.path(),
                             label,
                             active,
                         )
@@ -403,7 +404,9 @@ impl Workspace {
                 content = content.child(
                     ui::sidebar::sidebar_row(&theme, "recents-clear")
                         .text_color(theme.text_dim)
-                        .child(ui::icon::ui_icon("icons/trash-2.svg", theme.text_dim).size(px(13.)))
+                        .child(
+                            ui::icon::ui_icon(Symbol::Trash.path(), theme.text_dim).size(px(13.)),
+                        )
                         .child("Clear")
                         .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.clear_recents(cx);
@@ -453,7 +456,7 @@ impl Workspace {
                                 .items_center()
                                 .gap_2()
                                 .child(
-                                    ui::icon::ui_icon("icons/hard-drive.svg", theme.text_dim)
+                                    ui::icon::ui_icon(Symbol::Drive.path(), theme.text_dim)
                                         .size(px(14.)),
                                 )
                                 .child(

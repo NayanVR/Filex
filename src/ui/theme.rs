@@ -303,6 +303,12 @@ impl Theme {
         self
     }
 
+    /// Whether this is a dark palette (dark or OLED): icon artwork has a
+    /// dimmed variant for it.
+    pub fn is_dark(&self) -> bool {
+        luminance(self.bg) < 0.5
+    }
+
     /// Apply the transparency setting. Off makes glass the opaque
     /// [`Theme::elevated`] and drops the backdrop blur, for readability or
     /// to spare a weak GPU the blur pass.
@@ -352,7 +358,6 @@ impl Theme {
 pub mod fixed {
     use gpui::{Rgba, rgb, rgba};
 
-    use filex::listing::FileKind;
     use filex::tags::TagColor;
 
     /// The Filex mark's light and deep blues (`assets/branding/filex.svg`),
@@ -396,32 +401,6 @@ pub mod fixed {
     /// The full-window dim behind a modal dialog.
     pub fn scrim() -> Rgba {
         rgba(0x00000099)
-    }
-
-    /// The blank-paper document silhouette behind a file's kind mark.
-    pub fn paper() -> Rgba {
-        rgb(0xcfe6fb)
-    }
-
-    /// Ink for the extension label printed on the paper.
-    pub fn paper_ink() -> Rgba {
-        rgb(0x6b8299)
-    }
-
-    /// Tint for a file kind's mark, or `None` for directories (they take
-    /// the theme accent). Hues chosen to stay legible on both a white and
-    /// a dark row.
-    pub fn kind(kind: FileKind) -> Option<Rgba> {
-        let hex = match kind {
-            FileKind::Directory => return None,
-            FileKind::Image => 0x30a46c,
-            FileKind::Video => 0x8b5cf6,
-            FileKind::Audio => 0xe0559a,
-            FileKind::Archive => 0xd08b1e,
-            FileKind::Code => 0x4c8bf0,
-            FileKind::Document | FileKind::Other => 0x6b8299,
-        };
-        Some(rgb(hex))
     }
 
     /// Solid dot colour for each Finder tag colour. Vivid and
@@ -528,6 +507,12 @@ mod tests {
         let light = Theme::light();
         assert!(luminance(light.elevated) >= luminance(light.bg));
         assert!(luminance(light.elevated) > luminance(light.panel));
+    }
+
+    #[test]
+    fn dark_and_oled_are_dark() {
+        assert!(Theme::dark().is_dark() && Theme::oled().is_dark());
+        assert!(!Theme::light().is_dark());
     }
 
     #[test]

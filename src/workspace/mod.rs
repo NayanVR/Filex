@@ -94,8 +94,9 @@ struct DragItems {
     /// building the drag never stats the disk).
     dirs: Vec<bool>,
     label: SharedString,
-    /// The lead item's kind and name, for the preview's icon.
-    kind: FileKind,
+    /// Whether the lead item is a folder, and its name, for the preview's
+    /// icon.
+    is_dir: bool,
     name: String,
     theme: Theme,
     position: Point<Pixels>,
@@ -149,7 +150,11 @@ impl gpui::Render for DragItems {
             .shadow_lg()
             .text_sm()
             .text_color(theme.text)
-            .child(ui::icon::file_icon(&theme, self.kind, &self.name, 22.))
+            .child(if self.is_dir {
+                ui::icon::folder_icon(&theme, filex::settings::FolderIcon::Plain, 22.)
+            } else {
+                ui::icon::file_icon(&theme, &self.name, 22.)
+            })
             .child(
                 div()
                     .flex_1()

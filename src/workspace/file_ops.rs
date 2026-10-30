@@ -331,7 +331,7 @@ impl Workspace {
             paths,
             dirs,
             label,
-            kind: FileKind::of(&name, lead_dir),
+            is_dir: lead_dir,
             name,
             theme,
             position: Point::default(),

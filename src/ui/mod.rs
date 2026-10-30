@@ -13,6 +13,8 @@ pub mod details;
 pub mod fonts;
 pub mod grid;
 pub mod icon;
+pub mod icon_art;
+pub mod icon_palette;
 pub mod job;
 pub mod kbd;
 pub mod list_row;

@@ -6,12 +6,17 @@ impl Workspace {
     /// The icon cell for a row: a decoded thumbnail for image files when
     /// ready, otherwise folder or document artwork. May schedule a decode as a side
     /// effect — only rows the virtualized list renders get here.
+    ///
+    /// A thumbnail fills `edge`; artwork is drawn at `edge * art_scale`, so a
+    /// grid can give previews the whole card while icons stay balanced —
+    /// including an image's icon shown until (or instead of) its preview.
     pub(super) fn render_icon_cell(
         &mut self,
         name: &str,
         path: &Path,
         is_dir: bool,
         edge: f32,
+        art_scale: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let kind = FileKind::of(name, is_dir);
@@ -26,6 +31,7 @@ impl Workspace {
                 None => self.request_thumbnail(path.to_path_buf(), cx),
             }
         }
+        let edge = art_edge(edge, art_scale);
         if is_dir {
             let icon = self
                 .settings
@@ -37,7 +43,7 @@ impl Workspace {
                 .unwrap_or_else(|| ui::icon::automatic_folder_icon(path));
             return ui::icon::folder_icon(cx.theme(), icon, edge);
         }
-        ui::icon::file_icon(cx.theme(), kind, name, edge)
+        ui::icon::file_icon(cx.theme(), name, edge)
     }
 
     /// The full-pane magic view (`docs/design-magic-mode.md` v2): the plan
@@ -454,13 +460,9 @@ impl Workspace {
             format_size(entry.size).into()
         };
         let name_tip: SharedString = name.clone().into();
-        // Keep document and folder symbols balanced with actual image previews.
-        let icon_edge = if FileKind::of(&name, is_dir) == FileKind::Image {
-            size
-        } else {
-            size * 0.8
-        };
-        let icon = self.render_icon_cell(&name, &path, is_dir, icon_edge, cx);
+        // Previews take the whole card; icons sit at 80% so they stay
+        // balanced beside them.
+        let icon = self.render_icon_cell(&name, &path, is_dir, size, 0.8, cx);
         let (label, truncated) = ui::grid::card_name(theme, width, &name, cx);
         let card = ui::grid::card(theme, ("card", ix), size, width, is_selected)
             // The full name only when the label had to cut it.
@@ -515,7 +517,8 @@ impl Workspace {
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let name_tip: SharedString = name.clone().into();
-                        let icon = this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
+                        let icon =
+                            this.render_icon_cell(&name, &path, is_dir, theme.icon_size, 1., cx);
                         let rename_input = this
                             .renaming
                             .as_ref()
@@ -624,7 +627,8 @@ impl Workspace {
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (row.name.clone(), row.target.clone());
                         let path_label = row.path_label.clone();
-                        let icon = this.render_icon_cell(&name, &path, is_dir, theme.icon_size, cx);
+                        let icon =
+                            this.render_icon_cell(&name, &path, is_dir, theme.icon_size, 1., cx);
                         let menu_closed = this.context_menu.is_none();
                         let row = ui::list_row::list_row(&theme, ix, is_selected)
                             .h(px((theme.row_height + 16.).max(44.)))
@@ -665,5 +669,25 @@ impl Workspace {
             cx.theme(),
         ))
         .flex_1()
+    }
+}
+
+/// The edge icon artwork is drawn at in a cell of `edge` px. Only previews
+/// fill the whole cell; the file's kind never changes the artwork's size,
+/// so an image whose preview is missing matches its neighbours.
+fn art_edge(edge: f32, art_scale: f32) -> f32 {
+    edge * art_scale
+}
+
+#[cfg(test)]
+mod icon_cell_tests {
+    use super::art_edge;
+
+    /// Regression: grid cards gave every image a full-size cell for its
+    /// preview, so an image without one drew an oversized icon.
+    #[test]
+    fn artwork_size_is_independent_of_kind() {
+        assert_eq!(art_edge(104., 0.8), 104. * 0.8);
+        assert_eq!(art_edge(20., 1.), 20.);
     }
 }

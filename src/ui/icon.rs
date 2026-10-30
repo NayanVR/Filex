@@ -1,10 +1,13 @@
 //! The fixed-size icon cell at the start of every list row, plus the
 //! shared helper for themed UI glyphs.
 //!
-//! File cells show a decoded thumbnail, a full-color folder image with an
-//! optional kind symbol, or document artwork with a kind symbol and extension.
-//! All occupy the same width so mixed rows stay column-aligned.
+//! File cells show a decoded thumbnail, or icon-system artwork
+//! (docs/design-icons.md): paper in the file family's colours, or a folder
+//! in the accent's, drawn per size class by [`super::icon_art`] and
+//! rasterized once per key. All occupy the same width so mixed rows stay
+//! column-aligned.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -14,9 +17,11 @@ use gpui::{
     div, img, linear, percentage, prelude::*, px, svg,
 };
 
-use filex::listing::FileKind;
+use filex::file_types::{FileFamily, extension_label};
 use filex::settings::FolderIcon;
 
+use super::icon_art::{self, LABEL_BOX, SizeClass, Symbol};
+use super::icon_palette::{file_ramp, folder_ramp};
 use super::theme::{Theme, fixed};
 
 /// A themed UI glyph (chevrons, gear, search, markers…) from an asset
@@ -57,80 +62,126 @@ pub fn thumbnail_icon(imagery: Arc<RenderImage>, edge: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// Document artwork with a centered kind mark and an uppercase extension.
-/// Small list cells omit the label, which only becomes readable at grid sizes.
-pub fn file_icon(theme: &Theme, kind: FileKind, name: &str, edge: f32) -> AnyElement {
-    let base = if let Some(image) = file_image() {
-        img(image).absolute().size_full().into_any_element()
-    } else {
-        ui_icon("icons/file.svg", fixed::paper())
-            .absolute()
-            .left(px(edge / 7.))
-            .w(px(edge * 5. / 7.))
-            .h(px(edge))
-            .into_any_element()
+/// A file's icon: paper in its family's colours with the family symbol.
+/// Card sizes (32px and up) print the extension on the label, laid over
+/// the artwork as text so one raster serves every extension.
+pub fn file_icon(theme: &Theme, name: &str, edge: f32) -> AnyElement {
+    let family = FileFamily::of_name(name);
+    let class = SizeClass::of(edge);
+    let label = extension_label(name).filter(|_| class == SizeClass::Card);
+    let key = ArtKey::File {
+        family,
+        class,
+        dark: theme.is_dark(),
+        labelled: label.is_some(),
+        raster: raster_edge(edge),
     };
-    let mut file = div().relative().size(px(edge)).flex_none().child(base);
-    if edge >= 20. {
-        let symbol_size = edge * 0.38;
-        file = file.child(
-            ui_icon(kind_asset(kind), kind_color(theme, kind))
-                .absolute()
-                .left(px((edge - symbol_size) / 2.))
-                .top(px(edge * 0.50 - symbol_size / 2.))
-                .size(px(symbol_size))
-                .opacity(0.75),
-        );
-    }
-    if edge >= 40.
-        && let Some(extension) = Path::new(name).extension().and_then(|ext| ext.to_str())
-        && !extension.is_empty()
-    {
-        // Bound unusual extensions without splitting Unicode characters or
-        // allowing a long label to spill outside the paper silhouette.
-        let extension = extension.to_uppercase();
-        let label = if extension.chars().count() > 6 {
-            format!("{}…", extension.chars().take(5).collect::<String>())
-        } else {
-            extension
-        };
-        let font_size = (edge * 0.16).min(edge * 0.88 / label.chars().count() as f32);
-        file = file.child(
+    let mut cell = div().relative().size(px(edge)).flex_none();
+    cell = match cached_art(key) {
+        Some(image) => cell.child(img(image).absolute().size_full()),
+        // Keep files recognizable if rasterization fails.
+        None => cell.child(
+            ui_icon(
+                Symbol::of_family(family).unwrap_or(Symbol::Text).path(),
+                file_ramp(family, theme.is_dark()).ink,
+            )
+            .size_full(),
+        ),
+    };
+    if let Some(label) = label {
+        let unit = edge / 32.;
+        let (x, y, w, h) = LABEL_BOX;
+        let size = if label.chars().count() > 3 { 3.5 } else { 3.9 };
+        cell = cell.child(
             div()
                 .absolute()
-                .left(px(edge * 0.20))
-                .bottom(px(edge * 0.08))
-                .w(px(edge * 0.60))
-                .text_ellipsis()
-                .text_center()
-                .text_size(px(font_size))
-                .line_height(px(edge * 0.20))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(fixed::paper_ink())
+                .left(px(x * unit))
+                .top(px(y * unit))
+                .w(px(w * unit))
+                .h(px(h * unit))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(size * unit))
+                .line_height(px(h * unit))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(fixed::white())
                 .child(label),
         );
     }
-    file.into_any_element()
+    cell.into_any_element()
 }
 
-/// All file cells share one raster and atlas entry, independent of extension.
-fn file_image() -> Option<Arc<RenderImage>> {
-    static IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::new(|| {
-        match render_icon_svg(
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/assets/icons/file.svg"
-            )),
-            256,
-        ) {
-            Ok(image) => Some(image),
-            Err(err) => {
-                tracing::warn!("could not render file artwork: {err:#}");
-                None
-            }
-        }
-    });
-    IMAGE.clone()
+/// What a cached icon raster depends on. Folders key on the accent too;
+/// only the current accent's folders are kept.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ArtKey {
+    File {
+        family: FileFamily,
+        class: SizeClass,
+        dark: bool,
+        labelled: bool,
+        raster: u32,
+    },
+    Folder {
+        accent: u32,
+        symbol: Option<Symbol>,
+        class: SizeClass,
+        dark: bool,
+        raster: u32,
+    },
+}
+
+/// Raster edge for an icon shown at `edge` logical px: enough for a 2×
+/// display without minifying a large raster into a tiny cell.
+fn raster_edge(edge: f32) -> u32 {
+    match edge * 2. {
+        e if e <= 64. => 64,
+        e if e <= 128. => 128,
+        _ => 384,
+    }
+}
+
+/// The raster for `key`, drawn on first use and shared after that (one
+/// GPUI image id and atlas entry per key). A failed render is cached as
+/// `None` so it's logged once, not every frame.
+fn cached_art(key: ArtKey) -> Option<Arc<RenderImage>> {
+    type Cache = HashMap<ArtKey, Option<Arc<RenderImage>>>;
+    static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(Default::default);
+    let mut cache = CACHE.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some(image) = cache.get(&key) {
+        return image.clone();
+    }
+    if let ArtKey::Folder { accent, .. } = key {
+        cache.retain(|k, _| !matches!(k, ArtKey::Folder { accent: a, .. } if *a != accent));
+    }
+    let (svg, edge) = match key {
+        ArtKey::File {
+            family,
+            class,
+            dark,
+            labelled,
+            raster,
+        } => (
+            icon_art::file_svg(family, &file_ramp(family, dark), class, dark, labelled),
+            raster,
+        ),
+        ArtKey::Folder {
+            accent,
+            symbol,
+            class,
+            dark,
+            raster,
+        } => (
+            icon_art::folder_svg(&folder_ramp(gpui::rgb(accent), dark), symbol, class, dark),
+            raster,
+        ),
+    };
+    let image = render_icon_svg(&svg, edge)
+        .inspect_err(|err| tracing::warn!("could not render icon artwork: {err:#}"))
+        .ok();
+    cache.insert(key, image.clone());
+    image
 }
 
 /// Guess a symbol from known OS folder locations, then common folder names.
@@ -165,32 +216,6 @@ pub fn automatic_folder_icon(path: &Path) -> FolderIcon {
         "archives" => FolderIcon::Archives,
         "desktop" => FolderIcon::Desktop,
         _ => FolderIcon::Plain,
-    }
-}
-
-/// Keep only the active accent in memory. A folder SVG renders once at 256px
-/// for each accent change, then every visible folder shares the same image ID
-/// and GPUI atlas entry. The center symbol remains a separate SVG mask.
-fn folder_image(accent: Rgba) -> Option<Arc<RenderImage>> {
-    type Cached = Option<(u32, Arc<RenderImage>)>;
-    static CACHE: LazyLock<Mutex<Cached>> = LazyLock::new(|| Mutex::new(None));
-    let accent = color_hex(accent);
-    let mut cached = CACHE.lock().unwrap_or_else(|err| err.into_inner());
-    if let Some((previous, image)) = cached.as_ref()
-        && *previous == accent
-    {
-        return Some(image.clone());
-    }
-    let svg = recolored_folder_svg(accent);
-    match render_icon_svg(&svg, 256) {
-        Ok(image) => {
-            *cached = Some((accent, image.clone()));
-            Some(image)
-        }
-        Err(err) => {
-            tracing::warn!("could not render folder artwork: {err:#}");
-            None
-        }
     }
 }
 
@@ -275,90 +300,23 @@ fn color_hex(color: Rgba) -> u32 {
     (byte(color.red) << 16) | (byte(color.green) << 8) | byte(color.blue)
 }
 
-fn vivid_hex(color: u32, saturation_boost: f32, peak: u8) -> String {
-    let channels = [
-        ((color >> 16) & 0xff) as f32,
-        ((color >> 8) & 0xff) as f32,
-        (color & 0xff) as f32,
-    ];
-    let min = channels.iter().copied().fold(f32::INFINITY, f32::min);
-    let max = channels.iter().copied().fold(0., f32::max);
-    if max == min {
-        return format!("#{peak:02x}{peak:02x}{peak:02x}");
-    }
-    // Move the darkest channel toward zero, then scale the brightest to
-    // `peak`. This keeps the accent hue while restoring the vivid range of
-    // the original folder artwork.
-    let shift = min * saturation_boost;
-    let channel = |value: f32| ((value - shift) * peak as f32 / (max - shift)).round() as u8;
-    format!(
-        "#{:02x}{:02x}{:02x}",
-        channel(channels[0]),
-        channel(channels[1]),
-        channel(channels[2])
-    )
-}
-
-fn recolored_folder_svg(accent: u32) -> String {
-    include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/assets/branding/folder.svg"
-    ))
-    // Replace in two passes so a generated stop that happens to equal one
-    // of the source blues cannot be recolored again by a later replacement.
-    .replace("#28bdfc", "__FRONT_TOP__")
-    .replace("#008fe5", "__FRONT_BOTTOM__")
-    .replace("#006ddc", "__BACK_TOP__")
-    .replace("#002d71", "__BACK_BOTTOM__")
-    .replace("__FRONT_TOP__", &vivid_hex(accent, 0.55, 252))
-    .replace("__FRONT_BOTTOM__", &vivid_hex(accent, 1.0, 230))
-    .replace("__BACK_TOP__", &vivid_hex(accent, 0.85, 210))
-    .replace("__BACK_BOTTOM__", &vivid_hex(accent, 1.0, 110))
-}
-
-fn folder_symbol(icon: FolderIcon) -> Option<&'static str> {
-    match icon {
-        FolderIcon::Plain => None,
-        FolderIcon::Pictures => Some("icons/image.svg"),
-        FolderIcon::Music => Some("icons/music.svg"),
-        FolderIcon::Videos => Some("icons/film.svg"),
-        FolderIcon::Documents => Some("icons/file-text.svg"),
-        FolderIcon::Downloads => Some("icons/download.svg"),
-        FolderIcon::Code => Some("icons/file-code.svg"),
-        FolderIcon::Archives => Some("icons/archive.svg"),
-        FolderIcon::Desktop => Some("icons/house.svg"),
-    }
-}
-
-/// Full-color folder artwork tinted from the active accent, with a subtle
-/// symbol centered on its front face.
+/// A folder in the accent's colours, with a special folder's symbol pressed
+/// into its front panel (none at 16px, where it would only be noise).
 pub fn folder_icon(theme: &Theme, icon: FolderIcon, edge: f32) -> AnyElement {
-    let base = if let Some(image) = folder_image(theme.accent) {
-        img(image).absolute().size_full().into_any_element()
-    } else {
-        // Keep folders recognizable if SVG rasterization fails.
-        ui_icon("icons/folder.svg", theme.accent)
-            .absolute()
-            .size_full()
-            .into_any_element()
+    let key = ArtKey::Folder {
+        accent: color_hex(theme.accent),
+        symbol: Symbol::of_folder(icon),
+        class: SizeClass::of(edge),
+        dark: theme.is_dark(),
+        raster: raster_edge(edge),
     };
-    let mut folder = div().relative().size(px(edge)).flex_none().child(base);
-    // At 16px the 24px outline glyph collapses into noise; compact rows use
-    // the same folder silhouette without a center mark.
-    if edge >= 20.
-        && let Some(path) = folder_symbol(icon)
-    {
-        let symbol_size = edge * if edge <= 24. { 0.48 } else { 0.36 };
-        folder = folder.child(
-            ui_icon(path, theme.on_accent)
-                .absolute()
-                .left(px((edge - symbol_size) / 2.))
-                .top(px(edge * 0.61 - symbol_size / 2.))
-                .size(px(symbol_size))
-                .opacity(0.45),
-        );
+    let cell = div().relative().size(px(edge)).flex_none();
+    match cached_art(key) {
+        Some(image) => cell.child(img(image).absolute().size_full()),
+        // Keep folders recognizable if rasterization fails.
+        None => cell.child(ui_icon("icons/folder.svg", theme.accent).size_full()),
     }
-    folder.into_any_element()
+    .into_any_element()
 }
 
 /// The full-color Filex app icon, rasterized once. Falls back to the
@@ -382,25 +340,6 @@ pub fn app_icon(theme: &Theme, edge: f32) -> AnyElement {
             .size(px(edge))
             .into_any_element(),
     }
-}
-
-/// The SVG asset path for a file kind.
-fn kind_asset(kind: FileKind) -> &'static str {
-    match kind {
-        FileKind::Directory => "icons/folder.svg",
-        FileKind::Image => "icons/image.svg",
-        FileKind::Video => "icons/video.svg",
-        FileKind::Audio => "icons/music.svg",
-        FileKind::Archive => "icons/archive.svg",
-        FileKind::Code => "icons/code.svg",
-        FileKind::Document | FileKind::Other => "icons/text.svg",
-    }
-}
-
-/// The tint for a file kind: folders take the theme accent so they read
-/// as the primary item; the rest use the fixed kind palette.
-fn kind_color(theme: &Theme, kind: FileKind) -> Rgba {
-    fixed::kind(kind).unwrap_or(theme.accent)
 }
 
 #[cfg(test)]
@@ -443,33 +382,48 @@ mod tests {
     }
 
     #[test]
-    fn portrait_file_artwork_is_fitted_and_cached() {
-        let image = file_image().unwrap();
-        assert!(Arc::ptr_eq(&image, &file_image().unwrap()));
-        assert_eq!(image.size(0).width.0, 256);
-        assert_eq!(image.size(0).height.0, 256);
+    fn file_art_rasterizes_and_is_shared() {
+        let key = ArtKey::File {
+            family: FileFamily::Pdf,
+            class: SizeClass::Card,
+            dark: false,
+            labelled: true,
+            raster: 128,
+        };
+        let image = cached_art(key).unwrap();
+        assert!(Arc::ptr_eq(&image, &cached_art(key).unwrap()));
         let bytes = image.as_bytes(0).unwrap();
-        let pixel = |x: usize, y: usize| &bytes[(y * 256 + x) * 4..(y * 256 + x + 1) * 4];
-        // The 5:7 paper is centered in the square without clipping its foot.
-        assert_eq!(pixel(20, 128)[3], 0);
-        assert_eq!(pixel(235, 128)[3], 0);
-        assert_eq!(pixel(128, 250)[3], 255);
-        let center = pixel(128, 128);
-        assert_eq!(center[3], 255);
-        assert!(center[0] > center[2], "expected blue paper in BGRA order");
+        // The paper's middle is opaque; the clear space beside it isn't.
+        assert_eq!(bytes[(64 * 128 + 64) * 4 + 3], 255);
+        assert_eq!(bytes[(64 * 128 + 4) * 4 + 3], 0);
     }
 
     #[test]
-    fn recolored_vector_renders_with_transparency() {
-        let blue = render_icon_svg(&recolored_folder_svg(0x3b82f6), 256).unwrap();
-        let orange = render_icon_svg(&recolored_folder_svg(0xf97316), 256).unwrap();
-        assert_eq!(blue.size(0).width.0, 256);
-        assert_eq!(&blue.as_bytes(0).unwrap()[0..4], &[0, 0, 0, 0]);
-        assert_ne!(blue.as_bytes(0), orange.as_bytes(0));
-        // The front of a blue folder must be blue in GPUI's BGRA byte order.
-        let center = (160 * 256 + 128) * 4;
-        let pixel = &blue.as_bytes(0).unwrap()[center..center + 4];
-        assert_eq!(pixel[3], 255);
-        assert!(pixel[0] > pixel[2], "expected blue folder, got {pixel:?}");
+    fn folders_follow_the_accent() {
+        let key = |accent| ArtKey::Folder {
+            accent,
+            symbol: None,
+            class: SizeClass::List,
+            dark: false,
+            raster: 64,
+        };
+        let blue = cached_art(key(0x3b82f6)).unwrap();
+        let orange = cached_art(key(0xf97316)).unwrap();
+        let front = (48 * 64 + 32) * 4;
+        let (b, o) = (
+            &blue.as_bytes(0).unwrap()[front..front + 4],
+            &orange.as_bytes(0).unwrap()[front..front + 4],
+        );
+        assert_eq!(b[3], 255);
+        // GPUI's BGRA byte order: blue leads on blue, red on orange.
+        assert!(b[0] > b[2], "expected a blue folder, got {b:?}");
+        assert!(o[2] > o[0], "expected an orange folder, got {o:?}");
+    }
+
+    #[test]
+    fn raster_size_tracks_the_display_size() {
+        assert_eq!(raster_edge(16.), 64);
+        assert_eq!(raster_edge(48.), 128);
+        assert_eq!(raster_edge(192.), 384);
     }
 }

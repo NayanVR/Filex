@@ -1,0 +1,5 @@
+Filex symbols (assets/symbols/*.svg) were drawn for Filex on a 12-unit grid
+and are licensed with the project under MIT OR Apache-2.0.
+
+Each symbol has two layers: #secondary (drawn at 35% opacity) and #primary.
+Icon artwork may drop the secondary layer when it is only a container shape.

@@ -87,12 +87,16 @@ pub(super) fn launch_system_file_manager(args: &[String]) -> std::io::Result<()>
 pub(super) fn machine_place() -> (&'static str, &'static str, PathBuf) {
     if cfg!(windows) {
         (
-            "icons/hard-drive.svg",
+            crate::ui::icon_art::Symbol::Drive.path(),
             filex::drives::THIS_PC_LABEL,
             filex::drives::this_pc(),
         )
     } else {
-        ("icons/hard-drive.svg", "Root", PathBuf::from("/"))
+        (
+            crate::ui::icon_art::Symbol::Drive.path(),
+            "Root",
+            PathBuf::from("/"),
+        )
     }
 }
 

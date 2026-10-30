@@ -432,7 +432,7 @@ impl Workspace {
                 .into_any_element();
         };
         let kind = FileKind::of(&name, is_dir);
-        let preview = self.render_icon_cell(&name, &path, is_dir, 160., cx);
+        let preview = self.render_icon_cell(&name, &path, is_dir, 160., 1., cx);
         let meta = self.preview_meta.as_ref().filter(|m| m.path == path);
 
         let size_value: SharedString = if is_dir {
