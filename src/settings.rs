@@ -89,6 +89,9 @@ pub struct Settings {
     pub folder_icons: std::collections::BTreeMap<PathBuf, FolderIcon>,
     /// List density (row height / icon size).
     pub density: Density,
+    /// Frosted-glass menus and tooltips (a blur of what's behind them).
+    /// Off makes them opaque, for readability or to spare a weak GPU.
+    pub transparency_effects: bool,
     /// Browse layout: a detailed list or a card grid.
     pub view: ViewMode,
     /// Grid card size, as an index into the app's fixed size steps
@@ -201,6 +204,7 @@ impl Default for Settings {
             accent: AccentColor::Default,
             folder_icons: Default::default(),
             density: Density::Comfortable,
+            transparency_effects: true,
             view: ViewMode::List,
             grid_zoom: 1,
             preview_open: false,
@@ -392,6 +396,7 @@ mod tests {
         assert!(settings.delete_to_trash);
         assert!(settings.thumbnails_enabled);
         assert_eq!(settings.theme, ThemeMode::System);
+        assert!(settings.transparency_effects);
         assert!(settings.folder_icons.is_empty());
         assert_eq!(settings.view, ViewMode::List);
         assert_eq!(settings.grid_zoom, 1);
@@ -448,6 +453,16 @@ mod tests {
                 .folder_icons
                 .contains_key(Path::new("/copy/Photos"))
         );
+    }
+
+    /// A file written before the transparency setting existed keeps the
+    /// glass on.
+    #[test]
+    fn older_files_keep_transparency_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, r#"{"theme":"dark"}"#).unwrap();
+        assert!(Settings::load(&file).unwrap().transparency_effects);
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub fn present(id: &'static str, backdrop: Stateful<Div>) -> AnyElement {
 
 /// The dialog card.
 pub fn panel(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    super::card(theme).id(id).w(px(440.)).p_5().gap_3()
+    super::solid_card(theme).id(id).w(px(440.)).p_5().gap_3()
 }
 
 pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {

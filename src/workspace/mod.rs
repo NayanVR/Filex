@@ -586,7 +586,9 @@ impl Workspace {
     pub(super) fn apply_theme(&self, cx: &mut Context<Self>) {
         let settings = self.settings.read(cx).settings();
         let (mode, accent, density) = (settings.theme, settings.accent, settings.density);
-        let theme = Theme::resolve(mode, self.appearance, accent).with_density(density);
+        let theme = Theme::resolve(mode, self.appearance, accent)
+            .with_density(density)
+            .with_transparency(settings.transparency_effects);
         cx.set_global(theme);
         cx.notify();
     }

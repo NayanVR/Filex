@@ -64,6 +64,7 @@ impl SettingsSection {
             ),
             Self::Search => matches!(id, "index-system-files" | "exclude-dev-folders"),
             Self::Privacy => id == "share-diagnostics",
+            Self::Appearance => id == "transparency",
             _ => false,
         }
     }
@@ -133,6 +134,14 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
         "Group folders above files whatever the sort order",
         |s| s.sort.directories_first,
         |s| s.sort.directories_first = !s.sort.directories_first,
+        no_follow_up,
+    ),
+    (
+        "transparency",
+        "Transparency effects",
+        "Frosted-glass menus and tooltips. Turn off for solid surfaces.",
+        |s| s.transparency_effects,
+        |s| s.transparency_effects = !s.transparency_effects,
         no_follow_up,
     ),
     (
@@ -304,27 +313,29 @@ impl Workspace {
                 section.description(),
             ));
         if section == SettingsSection::Appearance {
-            page = page.child(
-                ui::settings_pane::group(&theme)
-                    .child(ui::settings_pane::choice_row(
-                        &theme,
-                        "Theme",
-                        "Use your device’s appearance or choose a theme",
-                        self.render_theme_selector(&theme, settings.theme, cx),
-                    ))
-                    .child(ui::settings_pane::choice_row(
-                        &theme,
-                        "Accent color",
-                        "Color for folders, selections, and controls",
-                        self.render_accent_picker(&theme, settings.accent, cx),
-                    ))
-                    .child(ui::settings_pane::choice_row(
-                        &theme,
-                        "Density",
-                        "Give files more room or fit more on screen",
-                        self.render_density_selector(&theme, settings.density, cx),
-                    )),
-            );
+            page = page
+                .child(
+                    ui::settings_pane::group(&theme)
+                        .child(ui::settings_pane::choice_row(
+                            &theme,
+                            "Theme",
+                            "Use your device’s appearance or choose a theme",
+                            self.render_theme_selector(&theme, settings.theme, cx),
+                        ))
+                        .child(ui::settings_pane::choice_row(
+                            &theme,
+                            "Accent color",
+                            "Color for folders, selections, and controls",
+                            self.render_accent_picker(&theme, settings.accent, cx),
+                        ))
+                        .child(ui::settings_pane::choice_row(
+                            &theme,
+                            "Density",
+                            "Give files more room or fit more on screen",
+                            self.render_density_selector(&theme, settings.density, cx),
+                        )),
+                )
+                .child(self.render_toggles(&theme, &settings, section, cx));
         } else if section == SettingsSection::About {
             page = page.child(self.render_about(&theme, cx));
         } else if section == SettingsSection::Keyboard {

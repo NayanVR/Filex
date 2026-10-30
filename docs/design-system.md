@@ -7,8 +7,10 @@ this page says where to look and what not to do.
 
 - **Semantic slots** on `Theme` (`bg`, `panel`, `elevated`, `hover`,
   `field`, `shadow`, `selected`, `stripe`, `border`, `text`, `text_dim`,
-  `accent`, `on_accent`, `accent_selection`, `warn`, `success`). `hover` and
-  `field` are translucent, so one value reads on both surfaces below.
+  `accent`, `on_accent`, `accent_selection`, `warn`, `success`, and the
+  material slots `glass`, `glass_edge`, `sheen`, `float_shadow`, `glow`,
+  `blur`). `hover` and `field` are translucent, so one value reads on both
+  surfaces below.
   Read via `cx.theme()`. Dark, light and OLED palettes; accent presets
   and custom hex are applied by `Theme::resolve`.
 - **Fixed palettes** in `theme::fixed`: identity colours that don't change
@@ -20,9 +22,10 @@ this page says where to look and what not to do.
 
 ## Surfaces (2026-10 refresh)
 
-- **Shell** (`panel`): tab bar, nav bar, sidebar and status bar are one
-  continuous surface. No borders between them — don't add `border_b`
-  to a bar.
+- **Shell** (`ui::shell_backdrop`): tab bar, nav bar, sidebar and status
+  bar are one continuous surface, a diagonal wash from the accent-tinted
+  `glow` (top left) into `panel`. No borders between them — don't add
+  `border_b` to a bar. OLED keeps a flat black shell (`glow == panel`).
 - **Canvas** (`bg`): the content heading, the file pane and the details
   panel sit on one raised card (`rounded_xl`, hairline `border`,
   `ui::soft_shadow`) inset from the window edge. Children of the canvas
@@ -32,15 +35,45 @@ this page says where to look and what not to do.
   ClearType text for the *whole window* whenever its background isn't
   `Opaque` (`Window::should_use_subpixel_rendering`), which visibly
   softens every label. Tried with Mica Alt in 2026-10 and rejected;
-  revisit only if gpui-ce keeps ClearType on opaque regions. Dividers *inside* the canvas
+  revisit only if gpui-ce keeps ClearType on opaque regions. Glass is done
+  *inside* the window instead (below). Dividers *inside* the canvas
   (column header, details panel edge) are fine.
+
+## Glass material (2026-10-30)
+
+Windows 11 and macOS have moved to translucent, lit surfaces; a flat
+fill now reads as dated. Filex gets there without a translucent window:
+
+- **Glass** (`ui::glass`, `ui::card`): transient popovers — context and
+  dropdown menus, tooltips. A `glass` tint over gpui-ce's in-window
+  `backdrop_blur` (Metal, DirectX and wgpu all implement it; it clips to
+  the corner radius), a `glass_edge` hairline, a `sheen` top edge and a
+  soft `float_shadow`. The window stays opaque, so ClearType stays on.
+- **Solid glass** (`ui::solid_card`): dialogs, settings, onboarding
+  cards. Same edge, sheen and shadow on opaque `elevated`, no blur. Over
+  the modal scrim, real glass reads as murky grey and outline-only fields
+  vanish into it; cards that paint their own fills would hide the blur
+  anyway.
+- **Lit edges** (`ui::sheen`, `ui::raised`): a 1px inset highlight on
+  raised things — the canvas, active tab and segment, focused field, the
+  active sidebar row, outlined buttons. Filled buttons get a top-lit
+  gradient plus `fixed::gloss`.
+- **Cost:** a blur pass only while a menu or tooltip is on screen, never
+  on the canvas, the shell or anything inside a virtualized list. The
+  shell gradient is one quad. Search and navigation paths are unchanged.
+- **Settings → Appearance → Transparency effects** (`transparency_effects`)
+  turns glass opaque and drops the blur (`Theme::with_transparency`), for
+  readability or a weak GPU.
+- **Don't** blur the full-window scrim or any large always-on surface
+  (the sidebar, the canvas): with nothing but a smooth gradient behind
+  them, the blur adds nothing and costs a full-size pass every frame.
 - **Fields** (`top_bar::field`): filled `field` recess at rest, no
   outline; focus lifts to `bg` with an accent ring, errors ring in `warn`.
-- **Elevated** (`elevated`): menus, dialogs and tooltips (`ui::card`)
-  sit one step above the canvas — white on light, lighter graphite on
+- **Elevated** (`elevated`): dialogs (`ui::solid_card`), and menus and
+  tooltips with transparency off, sit one step above the canvas — white on light, lighter graphite on
   dark. Never use `panel` for something that floats.
 - **Raised selection** (active tab, active segment): `bg` fill +
-  `shadow_xs` on a `field`/`panel` track.
+  `ui::raised` (contact shadow + lit edge) on a `field`/`panel` track.
 
 ## Window chrome
 
@@ -107,7 +140,10 @@ this page says where to look and what not to do.
 | Text button | `button::button(theme, id, label, Variant, Size)` |
 | Button that can't be pressed yet | `button::disabled_button` |
 | Icon-only button | `button::icon_button(theme, id, icon, color, IconSize)` |
-| Floating surface (menu, dialog, card) | `ui::card` |
+| Popover (menu, dropdown) | `ui::card` (glass) |
+| Dialog or card holding its own fills | `ui::solid_card` |
+| Glass on a custom shape (tooltip) | `ui::glass(element, theme)` |
+| Raised selection / lit edge | `ui::raised`, `ui::sheen` |
 | Dialog | `modal::{backdrop, panel, title, message, buttons, button}` |
 | Context menu | `menu::{overlay, panel, scroll_panel, model_row, icon_bar, icon_button, separator, heading}`; contents from `filex::context_menu` |
 | Tooltip | `tooltip::text_tooltip` |

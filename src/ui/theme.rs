@@ -62,6 +62,23 @@ fn with_alpha(c: Rgba, a: f32) -> Rgba {
     Rgba { alpha: a, ..c }
 }
 
+/// `c` moved fraction `t` of the way toward white — the lit top of a
+/// glossy fill (see [`super::button`]'s primary gradient).
+pub fn lift(c: Rgba, t: f32) -> Rgba {
+    Rgba {
+        alpha: c.alpha,
+        ..blend(c, rgb(0xffffff), t)
+    }
+}
+
+/// How far the shell's top-left glow leans toward the accent: enough to
+/// read as a tint under the glass, not as a coloured window.
+const LIGHT_GLOW_MIX: f32 = 0.16;
+const DARK_GLOW_MIX: f32 = 0.12;
+
+/// Default backdrop blur (px) behind glass surfaces.
+const GLASS_BLUR: f32 = 28.;
+
 /// Composite `over` onto `base` at fraction `t` (opaque result).
 fn blend(base: Rgba, over: Rgba, t: f32) -> Rgba {
     Rgba::new(
@@ -120,6 +137,26 @@ pub struct Theme {
     pub warn: Rgba,
     /// Success / healthy state.
     pub success: Rgba,
+    /// Glass: the translucent fill of floating surfaces (menus, dialogs,
+    /// tooltips). It tints a blurred copy of what's behind it
+    /// ([`Theme::blur`]); with transparency off it is just
+    /// [`Theme::elevated`].
+    pub glass: Rgba,
+    /// Hairline around a glass surface.
+    pub glass_edge: Rgba,
+    /// Specular top edge of raised and glass surfaces, painted as a 1px
+    /// inset highlight ([`super::sheen`]) so they read as lit from above.
+    pub sheen: Rgba,
+    /// Shadow under floating surfaces: deeper than [`Theme::shadow`], which
+    /// only has to lift the canvas off the shell.
+    pub float_shadow: Rgba,
+    /// The accent-tinted colour the shell gradient fades from at its top
+    /// left corner, so the chrome has depth instead of one flat grey.
+    /// Equal to [`Theme::panel`] when the shell must stay flat (OLED).
+    pub glow: Rgba,
+    /// Backdrop blur radius (px) behind glass. 0 when transparency is off:
+    /// no blur pass is emitted and [`Theme::glass`] is opaque.
+    pub blur: f32,
     /// List row height (px). Set from the density setting, not the
     /// palette — a metric carried alongside the colors so every component
     /// that already takes `&Theme` gets it without a second parameter.
@@ -153,9 +190,16 @@ impl Theme {
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
+            glass: rgba(0x2a2b31c7),
+            glass_edge: rgba(0xffffff1c),
+            sheen: rgba(0xffffff14),
+            float_shadow: rgba(0x00000080),
+            glow: rgb(0x131416),
+            blur: GLASS_BLUR,
             row_height: COMFORTABLE_ROW_HEIGHT,
             icon_size: COMFORTABLE_ICON_SIZE,
         }
+        .with_glow(DARK_GLOW_MIX)
     }
 
     /// The light palette: a white canvas raised on a cool grey shell, and
@@ -178,9 +222,16 @@ impl Theme {
             accent_selection: rgba(0x087eaf3d),
             warn: rgb(0xc0851a),
             success: rgb(0x2ba55a),
+            glass: rgba(0xfcfdfed6),
+            glass_edge: rgba(0x1018281a),
+            sheen: rgba(0xffffffd9),
+            float_shadow: rgba(0x10182824),
+            glow: rgb(0xedf0f4),
+            blur: GLASS_BLUR,
             row_height: COMFORTABLE_ROW_HEIGHT,
             icon_size: COMFORTABLE_ICON_SIZE,
         }
+        .with_glow(LIGHT_GLOW_MIX)
     }
 
     /// A true-black variant of the dark palette for OLED screens: pure
@@ -204,9 +255,23 @@ impl Theme {
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
+            glass: rgba(0x151517d9),
+            glass_edge: rgba(0xffffff1c),
+            sheen: rgba(0xffffff12),
+            float_shadow: rgba(0x00000000),
+            // No glow: unlit pixels stay off.
+            glow: rgb(0x000000),
+            blur: GLASS_BLUR,
             row_height: COMFORTABLE_ROW_HEIGHT,
             icon_size: COMFORTABLE_ICON_SIZE,
         }
+    }
+
+    /// Lean [`Theme::glow`] `mix` of the way from the shell toward the
+    /// accent.
+    fn with_glow(mut self, mix: f32) -> Self {
+        self.glow = blend(self.panel, self.accent, mix);
+        self
     }
 
     /// Recolor the accent slots to `accent`, deriving the ink that sits on
@@ -226,6 +291,26 @@ impl Theme {
         // touch stronger on dark bases so it reads against low contrast.
         let mix = if light_base { 0.16 } else { 0.30 };
         self.selected = blend(self.bg, accent, mix);
+        // Re-tint the shell glow, unless this palette keeps a flat shell.
+        if self.glow != self.panel {
+            let glow_mix = if light_base {
+                LIGHT_GLOW_MIX
+            } else {
+                DARK_GLOW_MIX
+            };
+            self = self.with_glow(glow_mix);
+        }
+        self
+    }
+
+    /// Apply the transparency setting. Off makes glass the opaque
+    /// [`Theme::elevated`] and drops the backdrop blur, for readability or
+    /// to spare a weak GPU the blur pass.
+    pub fn with_transparency(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.glass = self.elevated;
+            self.blur = 0.;
+        }
         self
     }
 
@@ -300,6 +385,12 @@ pub mod fixed {
     /// Glyph ink on [`caption_close`].
     pub fn white() -> Rgba {
         rgb(0xffffff)
+    }
+
+    /// The specular top edge of a filled (accent / warn) button: white
+    /// light catching the rim, whatever the fill colour.
+    pub fn gloss() -> Rgba {
+        rgba(0xffffff47)
     }
 
     /// The full-window dim behind a modal dialog.
@@ -445,6 +536,40 @@ mod tests {
         let compact = Theme::dark().with_density(Density::Compact);
         assert!(compact.row_height < comfy.row_height);
         assert!(compact.icon_size < comfy.icon_size);
+    }
+
+    #[test]
+    fn transparency_off_makes_glass_opaque() {
+        for theme in [Theme::light(), Theme::dark(), Theme::oled()] {
+            assert!(theme.glass.alpha < 1.0 && theme.blur > 0.);
+            let flat = theme.with_transparency(false);
+            assert_eq!(flat.glass, theme.elevated);
+            assert_eq!(flat.blur, 0.);
+            assert_eq!(theme.with_transparency(true), theme);
+        }
+    }
+
+    /// The shell glow leans toward the accent and follows an accent
+    /// override; OLED keeps a flat black shell either way.
+    #[test]
+    fn shell_glow_follows_the_accent_except_on_oled() {
+        let light = Theme::light();
+        assert_ne!(light.glow, light.panel);
+        let green = Theme::resolve(
+            ThemeMode::Light,
+            WindowAppearance::Light,
+            AccentColor::Green,
+        );
+        assert_ne!(green.glow, light.glow);
+        assert!(green.glow.green > green.glow.red);
+        let oled = Theme::resolve(ThemeMode::Oled, WindowAppearance::Dark, AccentColor::Pink);
+        assert_eq!(oled.glow, oled.panel);
+    }
+
+    #[test]
+    fn lift_brightens_and_keeps_alpha() {
+        let lifted = lift(rgba(0x00000080), 0.5);
+        assert_eq!((lifted.red, lifted.alpha), (0.5, rgba(0x00000080).alpha));
     }
 
     #[test]

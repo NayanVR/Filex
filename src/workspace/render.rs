@@ -258,7 +258,7 @@ impl Workspace {
                         icon,
                         if active { theme.accent } else { theme.text_dim },
                     )
-                    .when(active, |s| s.bg(theme.bg).shadow_xs())
+                    .when(active, |s| s.bg(theme.bg).shadow(ui::raised(&theme)))
                     .tooltip(self.action_tip(label, "view", cx))
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _window, cx| {
@@ -818,9 +818,10 @@ impl Render for Workspace {
             .flex_col()
             .size_full()
             .font_family(ui::fonts::UI_FONT_FAMILY)
-            // The shell: every bar and the sidebar sit on this one surface;
-            // the content canvas below is raised on top of it.
-            .bg(theme.panel)
+            // The shell: every bar and the sidebar sit on this one surface
+            // (a faint accent-lit gradient); the content canvas below is
+            // raised on top of it.
+            .bg(ui::shell_backdrop(&theme))
             .text_color(theme.text)
             .child(self.render_tab_bar(window, cx))
             .child(self.render_top_bar(window, cx))

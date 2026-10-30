@@ -152,6 +152,7 @@ pub fn sidebar_item(
         .relative()
         .when(active, |row| {
             row.bg(theme.hover)
+                .shadow(vec![super::sheen(theme)])
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(
                     div()

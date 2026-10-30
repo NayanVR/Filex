@@ -3,10 +3,13 @@
 //! buttons are a [`Variant`] × [`Size`]; icon buttons are square hit boxes
 //! in an [`IconSize`]. Callers chain `.on_click` (and any layout tweaks).
 
-use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
+use gpui::{
+    BoxShadow, Div, ElementId, Rgba, SharedString, Stateful, div, linear_color_stop,
+    linear_gradient, prelude::*, px,
+};
 
 use super::icon;
-use super::theme::Theme;
+use super::theme::{Theme, fixed, lift};
 
 /// What the button means, which decides its colour.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -79,14 +82,25 @@ pub fn button(
             let hover = theme.hover;
             base.border_1()
                 .border_color(theme.border)
+                .shadow(vec![super::sheen(theme)])
                 .text_color(theme.text)
                 .hover(move |s| s.bg(hover))
         }
     }
 }
 
+/// A glossy fill: lit a touch brighter at the top, with a white specular
+/// edge, so a filled button reads as a pressable surface, not a flat chip.
 fn filled(base: Stateful<Div>, fill: Rgba, ink: Rgba) -> Stateful<Div> {
-    base.bg(fill).text_color(ink).hover(|s| s.opacity(0.9))
+    let gloss = BoxShadow::new(px(0.), px(1.), gpui::rgb_to_hsla(fixed::gloss())).inset();
+    base.bg(linear_gradient(
+        180.,
+        linear_color_stop(lift(fill, 0.14), 0.),
+        linear_color_stop(fill, 1.),
+    ))
+    .shadow(vec![gloss])
+    .text_color(ink)
+    .hover(|s| s.opacity(0.9))
 }
 
 /// A button that can't be pressed right now: outlined, dimmed, no hover

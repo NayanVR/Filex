@@ -61,7 +61,8 @@ pub fn drag_region() -> Div {
         .window_control_area(gpui::WindowControlArea::Drag)
 }
 
-/// One tab: the active one is raised — canvas fill and a soft shadow, so
+/// One tab: the active one is raised — canvas fill, a soft shadow and a lit
+/// top edge, so
 /// it reads as the page the content below belongs to; the rest sit flat
 /// on the shell with hover feedback. Callers add the label + close
 /// control and chain handlers.
@@ -83,7 +84,7 @@ pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Di
         .overflow_hidden();
     if active {
         base.bg(theme.bg)
-            .shadow_xs()
+            .shadow(super::raised(theme))
             .text_color(theme.text)
             .font_weight(gpui::FontWeight::MEDIUM)
     } else {

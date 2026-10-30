@@ -900,7 +900,7 @@ pub fn sample_rows(theme: &Theme) -> Div {
         ("Holiday photos", true, true),
         ("Quarterly report.pdf", false, false),
     ];
-    super::card(theme)
+    super::solid_card(theme)
         .p_1()
         .children(rows.into_iter().map(|(name, folder, selected)| {
             div()
@@ -1158,8 +1158,10 @@ pub fn magic_demo(theme: &Theme, t: f32) -> Div {
                 .child(*label)
         }));
 
-    let plan = super::card(theme).p_1().h(px(4. * 30. + 10.)).children(
-        MAGIC_FILES.iter().enumerate().map(|(ix, name)| {
+    let plan = super::solid_card(theme)
+        .p_1()
+        .h(px(4. * 30. + 10.))
+        .children(MAGIC_FILES.iter().enumerate().map(|(ix, name)| {
             let at = 3.3 + ix as f32 * 0.12;
             let p = quint(beat(t, at, at + 0.5));
             div()
@@ -1181,8 +1183,7 @@ pub fn magic_demo(theme: &Theme, t: f32) -> Div {
                 )
                 .child(div().text_sm().text_color(violet).child("→"))
                 .child(div().text_sm().child("Archive"))
-        }),
-    );
+        }));
 
     let glow = if t > 4.9 {
         0.5 + 0.5 * ((t - 4.9) * 4.).sin()
