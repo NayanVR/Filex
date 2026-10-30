@@ -1,8 +1,15 @@
 //! Editable location field and background path navigation.
 use super::*;
 
-/// Expand a location without touching disk. Relative paths use the active folder.
-fn resolve(text: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
+/// Expand a location without touching disk. Relative paths use the active
+/// folder; share addresses (`smb://…`, `\\server\share`) resolve against
+/// the mounted `drives`.
+fn resolve(
+    text: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    drives: &[Drive],
+) -> Result<PathBuf, String> {
     let text = text.trim();
     let text = text
         .strip_prefix('"')
@@ -10,6 +17,9 @@ fn resolve(text: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, Strin
         .unwrap_or(text);
     if text.is_empty() {
         return Err("Enter a folder path.".into());
+    }
+    if let Some(address) = filex::network::ShareAddress::parse(text) {
+        return resolve_share(&address, drives, cfg!(windows));
     }
     if cfg!(windows)
         && (text.eq_ignore_ascii_case(filex::drives::THIS_PC_LABEL)
@@ -36,6 +46,26 @@ fn resolve(text: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, Strin
     } else {
         Ok(cwd.join(path))
     }
+}
+
+/// The folder for a share address. Windows opens SMB shares by UNC path
+/// directly (`native_unc`); elsewhere a share has to be mounted first, so
+/// the address maps into the mount that covers it. Connecting from here
+/// is the next step (docs/design-network.md).
+fn resolve_share(
+    address: &filex::network::ShareAddress,
+    drives: &[Drive],
+    native_unc: bool,
+) -> Result<PathBuf, String> {
+    if native_unc && let Some(unc) = address.to_unc() {
+        return Ok(PathBuf::from(unc));
+    }
+    filex::drives::locate_share(address, drives).ok_or_else(|| {
+        format!(
+            "{} isn’t connected. Mount it first, then open it here.",
+            address.display_name()
+        )
+    })
 }
 
 /// Read and validate the destination before changing any active-tab state.
@@ -80,6 +110,7 @@ impl Workspace {
             self.path_input.read(cx).text(),
             &self.cwd,
             self.user_dirs.get("home"),
+            &self.drives,
         ) {
             Ok(path) => path,
             Err(error) => {
@@ -183,31 +214,31 @@ mod tests {
         let cwd = Path::new("/work/project");
         let home = Path::new("/users/person");
         assert_eq!(
-            resolve("../Other Folder", cwd, Some(home)).unwrap(),
+            resolve("../Other Folder", cwd, Some(home), &[]).unwrap(),
             cwd.join("../Other Folder")
         );
         assert_eq!(
-            resolve("~/My Files", cwd, Some(home)).unwrap(),
+            resolve("~/My Files", cwd, Some(home), &[]).unwrap(),
             home.join("My Files")
         );
-        assert_eq!(resolve("~", cwd, Some(home)).unwrap(), home);
-        assert!(resolve(" ", cwd, Some(home)).is_err());
+        assert_eq!(resolve("~", cwd, Some(home), &[]).unwrap(), home);
+        assert!(resolve(" ", cwd, Some(home), &[]).is_err());
     }
     #[test]
     fn quoted_paths_preserve_unicode_and_spaces() {
         let cwd = Path::new("/work");
         assert_eq!(
-            resolve("\"年度 reports\"", cwd, None).unwrap(),
+            resolve("\"年度 reports\"", cwd, None, &[]).unwrap(),
             cwd.join("年度 reports")
         );
-        assert!(resolve("~/files", cwd, None).is_err());
+        assert!(resolve("~/files", cwd, None, &[]).is_err());
     }
     /// Regression guard: joining onto This PC would resolve against the
     /// process's working directory.
     #[test]
     fn relative_paths_from_this_pc_are_refused() {
         let this_pc = filex::drives::this_pc();
-        assert!(resolve("Users", &this_pc, None).is_err());
+        assert!(resolve("Users", &this_pc, None, &[]).is_err());
     }
 
     #[cfg(windows)]
@@ -215,11 +246,14 @@ mod tests {
     fn this_pc_can_be_typed_by_name() {
         let cwd = Path::new(r"C:\work");
         let this_pc = filex::drives::this_pc();
-        assert_eq!(resolve("This PC", cwd, None).unwrap(), this_pc);
-        assert_eq!(resolve("this pc", cwd, None).unwrap(), this_pc);
-        assert_eq!(resolve(filex::drives::THIS_PC, cwd, None).unwrap(), this_pc);
+        assert_eq!(resolve("This PC", cwd, None, &[]).unwrap(), this_pc);
+        assert_eq!(resolve("this pc", cwd, None, &[]).unwrap(), this_pc);
         assert_eq!(
-            resolve(r"D:\Data", &this_pc, None).unwrap(),
+            resolve(filex::drives::THIS_PC, cwd, None, &[]).unwrap(),
+            this_pc
+        );
+        assert_eq!(
+            resolve(r"D:\Data", &this_pc, None, &[]).unwrap(),
             Path::new(r"D:\Data")
         );
     }
@@ -228,8 +262,61 @@ mod tests {
     #[test]
     fn absolute_paths_are_not_joined_to_cwd() {
         assert_eq!(
-            resolve("/tmp/Files", Path::new("/work"), None).unwrap(),
+            resolve("/tmp/Files", Path::new("/work"), None, &[]).unwrap(),
             Path::new("/tmp/Files")
         );
+    }
+
+    fn mounted(source: &str, fstype: &str, path: &str) -> Drive {
+        Drive {
+            name: "share".into(),
+            path: path.into(),
+            kind: filex::drives::DriveKind::Network,
+            capacity: None,
+            share: filex::network::ShareAddress::from_mount_source(source, fstype),
+        }
+    }
+
+    #[test]
+    fn typed_shares_open_their_mount_point() {
+        let drives = [mounted("//nas/Media", "cifs", "/mnt/media")];
+        let share = |text| filex::network::ShareAddress::parse(text).unwrap();
+        assert_eq!(
+            resolve_share(&share("smb://nas/Media/Movies"), &drives, false).unwrap(),
+            Path::new("/mnt/media/Movies")
+        );
+        assert_eq!(
+            resolve_share(&share(r"\\nas\media"), &drives, false).unwrap(),
+            Path::new("/mnt/media")
+        );
+        let error = resolve_share(&share("smb://nas/Photos"), &drives, false).unwrap_err();
+        assert!(error.starts_with("Photos (nas) isn’t connected"), "{error}");
+    }
+
+    #[test]
+    fn windows_opens_smb_shares_by_unc_path() {
+        let share = |text| filex::network::ShareAddress::parse(text).unwrap();
+        assert_eq!(
+            resolve_share(&share("smb://nas/Media/Movies"), &[], true).unwrap(),
+            PathBuf::from(r"\\nas\Media\Movies")
+        );
+        // NFS has no UNC spelling: it still needs a mount.
+        let drives = [mounted("fs1:/srv", "nfs", r"N:\")];
+        assert_eq!(
+            resolve_share(&share("nfs://fs1/srv/x"), &drives, true).unwrap(),
+            Path::new(r"N:\").join("x")
+        );
+        assert!(resolve_share(&share("nfs://fs2/srv"), &drives, true).is_err());
+    }
+
+    #[test]
+    fn share_addresses_skip_the_filesystem_path_rules() {
+        let drives = [mounted("//nas/Media", "cifs", "/mnt/media")];
+        let resolved = resolve("smb://nas/Media", Path::new("/work"), None, &drives);
+        if cfg!(windows) {
+            assert_eq!(resolved.unwrap(), PathBuf::from(r"\\nas\Media"));
+        } else {
+            assert_eq!(resolved.unwrap(), Path::new("/mnt/media"));
+        }
     }
 }

@@ -104,11 +104,6 @@ fn drive_tile(
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let hover = theme.hover;
-    let free = format!(
-        "{} free of {}",
-        format_size(drive.free_bytes),
-        format_size(drive.total_bytes)
-    );
     div()
         .id(("this-pc-drive", ix))
         .flex()
@@ -127,7 +122,7 @@ fn drive_tile(
         .cursor_pointer()
         .when(!selected, move |s| s.hover(move |s| s.bg(hover)))
         .tooltip(ui::tooltip::text_tooltip(display_path(&drive.path), *theme))
-        .child(ui::icon::ui_icon("icons/hard-drive.svg", theme.text_dim).size(px(32.)))
+        .child(ui::icon::ui_icon(drive_icon(drive.kind), theme.text_dim).size(px(32.)))
         .child(
             div()
                 .flex()
@@ -136,15 +131,38 @@ fn drive_tile(
                 .min_w_0()
                 .gap_1p5()
                 .child(div().text_sm().truncate().child(drive.name.clone()))
-                .child(ui::sidebar::capacity_bar(theme, drive.used_fraction()))
+                .when(drive.capacity.is_some(), |s| {
+                    s.child(ui::sidebar::capacity_bar(theme, drive.used_fraction()))
+                })
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.text_dim)
                         .truncate()
-                        .child(free),
+                        .child(drive_detail(drive)),
                 ),
         )
+}
+
+/// A drive's glyph: a server for network shares, a disk otherwise.
+pub(super) fn drive_icon(kind: DriveKind) -> &'static str {
+    match kind {
+        DriveKind::Network => "icons/server.svg",
+        DriveKind::Fixed | DriveKind::Removable => "icons/hard-drive.svg",
+    }
+}
+
+/// The line under a drive's name: "12 GB free of 1 TB", or "Not
+/// responding" for a network drive that didn't report its size in time.
+pub(super) fn drive_detail(drive: &Drive) -> String {
+    match drive.capacity {
+        Some(capacity) => format!(
+            "{} free of {}",
+            format_size(capacity.free_bytes),
+            format_size(capacity.total_bytes)
+        ),
+        None => "Not responding".into(),
+    }
 }
 
 /// The This PC subtitle and status line: "1 drive", "3 drives".
@@ -154,7 +172,41 @@ pub(super) fn drive_count(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::drive_count;
+    use filex::drives::{Capacity, Drive, DriveKind};
+
+    use super::{drive_count, drive_detail, drive_icon};
+
+    fn nas(capacity: Option<Capacity>) -> Drive {
+        Drive {
+            name: "Media (nas)".into(),
+            path: "/mnt/media".into(),
+            kind: DriveKind::Network,
+            capacity,
+            share: None,
+        }
+    }
+
+    #[test]
+    fn a_drive_that_answered_shows_its_free_space() {
+        let capacity = Capacity {
+            total_bytes: 2048,
+            free_bytes: 1024,
+        };
+        let detail = drive_detail(&nas(Some(capacity)));
+        assert!(detail.contains(" free of "), "{detail}");
+    }
+
+    #[test]
+    fn a_silent_network_drive_says_so() {
+        assert_eq!(drive_detail(&nas(None)), "Not responding");
+    }
+
+    #[test]
+    fn network_drives_get_the_server_glyph() {
+        assert_eq!(drive_icon(DriveKind::Network), "icons/server.svg");
+        assert_eq!(drive_icon(DriveKind::Fixed), "icons/hard-drive.svg");
+        assert_eq!(drive_icon(DriveKind::Removable), "icons/hard-drive.svg");
+    }
 
     #[test]
     fn drive_count_is_singular_for_one() {

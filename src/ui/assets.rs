@@ -65,6 +65,7 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("panel-right"),
     icon!("house"),
     icon!("hard-drive"),
+    icon!("server"),
     icon!("x"),
     icon!("refresh-cw"),
     icon!("loader-circle"),

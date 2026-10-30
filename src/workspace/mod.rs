@@ -14,7 +14,7 @@ use gpui::{
     uniform_list,
 };
 
-use filex::drives::Drive;
+use filex::drives::{Drive, DriveKind};
 use filex::listing::{
     Entry, display_path, format_modified, format_size, format_timestamp, read_dir_sorted,
 };
