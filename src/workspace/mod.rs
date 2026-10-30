@@ -16,7 +16,8 @@ use gpui::{
 
 use filex::drives::Drive;
 use filex::listing::{
-    Entry, display_path, format_modified, format_size, format_timestamp, read_dir_sorted,
+    Entry, Listing, backfill, display_path, format_modified, format_size, format_timestamp,
+    read_dir_names, read_dir_sorted, sort_needs_metadata,
 };
 use filex::ops::{self, FileOp};
 use filex::recents::Recents;
@@ -347,6 +348,11 @@ struct Workspace {
     /// is in flight, so the previous listing stays on screen.
     listed_dir: PathBuf,
     entries: Vec<Entry>,
+    /// `entries` are a names-first listing whose size, mtime and hidden
+    /// flags are still being backfilled (FIL-25); rows leave those blank.
+    meta_pending: bool,
+    /// Set to stop the in-flight backfill once its folder is left.
+    backfill_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     load_error: Option<SharedString>,
     roots: Vec<IndexedRoot>,
     settings: gpui::Entity<SettingsStore>,
@@ -681,6 +687,8 @@ impl Workspace {
             cwd: cwd.clone(),
             listed_dir: PathBuf::new(),
             entries: Vec::new(),
+            meta_pending: false,
+            backfill_cancel: Default::default(),
             load_error: None,
             roots: Vec::new(),
             settings,

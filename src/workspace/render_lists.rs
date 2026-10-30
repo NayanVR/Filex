@@ -448,7 +448,11 @@ impl Workspace {
         let is_dir = entry.is_dir;
         let is_selected = self.active_selection().contains(ix);
         let (name, path) = (entry.name.clone(), entry.path.clone());
-        let detail: SharedString = if is_dir {
+        // Size and date are blank until a names-first listing backfills
+        // them (FIL-25).
+        let detail: SharedString = if self.meta_pending {
+            SharedString::default()
+        } else if is_dir {
             format_modified(entry.modified, std::time::SystemTime::now()).into()
         } else {
             format_size(entry.size).into()
@@ -512,6 +516,7 @@ impl Workspace {
                         let is_dir = entry.is_dir;
                         let size = entry.size;
                         let modified = entry.modified;
+                        let pending = this.meta_pending;
                         let is_selected = this.active_selection().contains(ix);
                         let (name, path) = (entry.name.clone(), entry.path.clone());
                         let name_tip: SharedString = name.clone().into();
@@ -552,14 +557,19 @@ impl Workspace {
                             .child(ui::list_row::detail_cell(
                                 &theme,
                                 ui::list_row::MODIFIED_COL_WIDTH,
-                                format_modified(modified, std::time::SystemTime::now()),
+                                // Blank until backfilled (FIL-25).
+                                if pending {
+                                    String::new()
+                                } else {
+                                    format_modified(modified, std::time::SystemTime::now())
+                                },
                             ))
                             .child(ui::list_row::detail_cell(
                                 &theme,
                                 ui::list_row::SIZE_COL_WIDTH,
                                 // Folders have no size of their own: leave
                                 // the cell empty, as Finder and Explorer do.
-                                if is_dir {
+                                if is_dir || pending {
                                     String::new()
                                 } else {
                                     format_size(size)

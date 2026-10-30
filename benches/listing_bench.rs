@@ -1,8 +1,14 @@
 //! Browse listing cost at 1k/10k/100k entries: the full `read_dir_sorted`
-//! (one stat per entry + sort; warm cache) and the name sort alone.
+//! (one stat per entry + sort; warm cache), the two-phase listing's names
+//! (FIL-25; the full listing again on Windows) and its backfill, and the
+//! name sort alone. Browse never backfills on Windows: there `backfill`
+//! opens a handle per path (~48 µs each), so its numbers only matter on
+//! Linux and macOS.
+use std::sync::atomic::AtomicBool;
+
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use filex::{
-    listing::{Entry, read_dir_sorted, sort_entries},
+    listing::{Entry, backfill, read_dir_names, read_dir_sorted, sort_entries},
     settings::SortSettings,
 };
 
@@ -28,6 +34,17 @@ fn bench(c: &mut Criterion) {
         }
         group.bench_with_input(BenchmarkId::new("read_dir_sorted", n), &n, |b, _| {
             b.iter(|| read_dir_sorted(dir.path(), &sort).unwrap())
+        });
+        group.bench_with_input(BenchmarkId::new("read_dir_names", n), &n, |b, _| {
+            b.iter(|| read_dir_names(dir.path(), &sort).unwrap())
+        });
+        let names = read_dir_names(dir.path(), &sort).unwrap().entries;
+        group.bench_with_input(BenchmarkId::new("backfill", n), &n, |b, _| {
+            b.iter_batched(
+                || names.clone(),
+                |names| backfill(names, &AtomicBool::new(false)),
+                BatchSize::LargeInput,
+            )
         });
         let entries = read_dir_sorted(dir.path(), &sort).unwrap();
         group.bench_with_input(BenchmarkId::new("sort_by_name", n), &n, |b, _| {
