@@ -72,31 +72,47 @@ struct Listed {
     stat: Option<Stat>,
 }
 
+/// A directory's entries from [`list`], and the directory's own mtime when
+/// the listing read it from the directory itself rather than from its
+/// parent's listing (Windows, FIL-47); `None` keeps the parent's value.
+struct DirListing {
+    mtime: Option<i64>,
+    entries: Box<dyn Iterator<Item = std::io::Result<Listed>>>,
+}
+
 /// The entries of `dir`. Windows reads each entry's [`Stat`] from the
 /// directory handle in batches; elsewhere `readdir` plus a later `lstat`
 /// per kept entry is already cheap.
-fn list(dir: &Path) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<Listed>>>> {
+fn list(dir: &Path) -> std::io::Result<DirListing> {
     #[cfg(windows)]
     {
-        Ok(Box::new(windows::list(dir)?.map(|entry| {
-            entry.map(|(path, stat)| Listed {
-                path,
-                is_dir: stat.is_dir,
-                stat: Some(stat),
-            })
-        })))
+        let entries = windows::list(dir)?;
+        Ok(DirListing {
+            mtime: entries.mtime,
+            entries: Box::new(entries.map(|entry| {
+                entry.map(|(path, stat)| Listed {
+                    path,
+                    is_dir: stat.is_dir,
+                    stat: Some(stat),
+                })
+            })),
+        })
     }
     #[cfg(not(windows))]
     {
-        Ok(Box::new(std::fs::read_dir(dir)?.map(|entry| {
-            entry.map(|entry| Listed {
-                path: entry.path(),
-                // `file_type` comes from the directory entry itself on most
-                // platforms, so the name check costs no extra stat.
-                is_dir: entry.file_type().is_ok_and(|t| t.is_dir()),
-                stat: None,
-            })
-        })))
+        Ok(DirListing {
+            // The parent's per-entry `lstat` already read it from the inode.
+            mtime: None,
+            entries: Box::new(std::fs::read_dir(dir)?.map(|entry| {
+                entry.map(|entry| Listed {
+                    path: entry.path(),
+                    // `file_type` comes from the directory entry itself on
+                    // most platforms, so the name check costs no extra stat.
+                    is_dir: entry.file_type().is_ok_and(|t| t.is_dir()),
+                    stat: None,
+                })
+            })),
+        })
     }
 }
 
@@ -500,6 +516,79 @@ mod tests {
             let path = &paths[&record.id];
             let fresh = inspect(path, record.id, record.parent, root.id).unwrap();
             assert_eq!(record, fresh, "{}", path.display());
+        }
+    }
+
+    /// Regression (FIL-47): NTFS refreshes the copy of a directory's
+    /// timestamps kept in its parent's index lazily, so a walk that took a
+    /// subdirectory's mtime from its parent's listing lagged a write into it
+    /// that crossed a second boundary (a folder or file created or removed;
+    /// on Windows 11 each of those reproduced it).
+    #[test]
+    fn directory_mtime_follows_changes_inside_it() {
+        use super::{inspect, walk};
+        use crate::catalog::segment::Root;
+        use std::{
+            fs,
+            path::Path,
+            sync::atomic::AtomicBool,
+            time::{Duration, SystemTime, UNIX_EPOCH},
+        };
+
+        type Change = (&'static str, fn(&Path));
+        let changes: [Change; 3] = [
+            ("folder created", |docs| {
+                fs::create_dir(docs.join("new")).unwrap()
+            }),
+            ("file created", |docs| {
+                fs::write(docs.join("new.txt"), b"x").unwrap()
+            }),
+            ("file removed", |docs| {
+                fs::remove_file(docs.join("old.txt")).unwrap()
+            }),
+        ];
+        for (change, apply) in changes {
+            let tree = tempfile::tempdir().unwrap();
+            let docs = tree.path().join("docs");
+            fs::create_dir(&docs).unwrap();
+            fs::write(docs.join("old.txt"), b"x").unwrap();
+            let root = Root {
+                id: 3,
+                path: tree.path().to_path_buf(),
+                device: 0,
+            };
+            let into_second = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            std::thread::sleep(
+                Duration::from_millis(1050)
+                    - Duration::from_nanos(into_second.subsec_nanos().into()),
+            );
+            apply(&docs);
+            let mut records = Vec::new();
+            let (mut next, mut docs_id) = (0, 0);
+            walk(
+                &root,
+                &tree.path().join("not-the-database"),
+                &super::IndexFilter::from_settings(&Default::default()),
+                |path, _, _| {
+                    next += 1;
+                    if path == docs {
+                        docs_id = next;
+                    }
+                    next
+                },
+                |record| {
+                    records.push(record);
+                    Ok(())
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let walked = records
+                .into_iter()
+                .find(|r| r.id == docs_id)
+                .expect("docs is walked");
+            let fresh = inspect(&docs, walked.id, walked.parent, root.id).unwrap();
+            assert_eq!(walked.mtime, fresh.mtime, "{change}");
         }
     }
 
