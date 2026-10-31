@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
@@ -41,29 +42,107 @@ fn is_hidden_entry(name: &str, metadata: Option<&std::fs::Metadata>) -> bool {
 /// listing. One stat per entry is deliberate: browse directories are
 /// small, and the search index never stats (see docs/roadmap.md).
 pub fn read_dir_sorted(path: &Path, sort: &SortSettings) -> Result<Vec<Entry>> {
-    let read_dir =
-        std::fs::read_dir(path).with_context(|| format!("reading directory {}", path.display()))?;
-
-    let mut entries: Vec<Entry> = read_dir
+    let mut entries: Vec<Entry> = open_dir(path)?
         .filter_map(|dirent| {
             let dirent = dirent.ok()?;
             let file_type = dirent.file_type().ok()?;
-            let metadata = dirent.metadata().ok();
-            let name = dirent.file_name().to_string_lossy().into_owned();
-            let is_hidden = is_hidden_entry(&name, metadata.as_ref());
-            Some(Entry {
-                name,
-                path: dirent.path(),
-                is_dir: file_type.is_dir(),
-                size: metadata.as_ref().map_or(0, |m| m.len()),
-                modified: metadata.and_then(|m| m.modified().ok()),
-                is_hidden,
-            })
+            Some(entry(
+                dirent.file_name().to_string_lossy().into_owned(),
+                dirent.path(),
+                file_type.is_dir(),
+                dirent.metadata().ok().as_ref(),
+            ))
         })
         .collect();
 
     sort_entries(&mut entries, sort);
     Ok(entries)
+}
+
+/// A first, fast read of a directory for the two-phase listing (FIL-25).
+pub struct Listing {
+    pub entries: Vec<Entry>,
+    /// Whether size, mtime and the platform hidden flag are already filled
+    /// in; if not, [`backfill`] fills them.
+    pub complete: bool,
+}
+
+/// Whether ordering by `sort` needs the metadata a names-only listing
+/// lacks. Such a listing can't be shown before its metadata without its
+/// rows moving once it lands, so it is read in one phase.
+pub fn sort_needs_metadata(sort: &SortSettings) -> bool {
+    matches!(sort.by, SortBy::Size | SortBy::Modified)
+}
+
+/// Phase one of the two-phase listing (FIL-25): names first, ordered by
+/// `sort`, which must not [need metadata](sort_needs_metadata).
+///
+/// Windows: the directory enumeration (`FindNextFileW`) already carries
+/// size, times and attributes, so this is the full listing. Elsewhere it
+/// reads only names and the directory entry's file type (`d_type`, no
+/// `lstat`), which on Linux is ~5x faster at 100k entries; size is 0,
+/// mtime unknown, and only dotfiles count as hidden until [`backfill`].
+pub fn read_dir_names(path: &Path, sort: &SortSettings) -> Result<Listing> {
+    debug_assert!(!sort_needs_metadata(sort));
+    if cfg!(windows) {
+        return Ok(Listing {
+            entries: read_dir_sorted(path, sort)?,
+            complete: true,
+        });
+    }
+    Ok(Listing {
+        entries: read_names(path, sort)?,
+        complete: false,
+    })
+}
+
+/// Names and file types only, no `lstat`; see [`read_dir_names`].
+fn read_names(path: &Path, sort: &SortSettings) -> Result<Vec<Entry>> {
+    let mut entries: Vec<Entry> = open_dir(path)?
+        .filter_map(|dirent| {
+            let dirent = dirent.ok()?;
+            let file_type = dirent.file_type().ok()?;
+            let name = dirent.file_name().to_string_lossy().into_owned();
+            Some(entry(name, dirent.path(), file_type.is_dir(), None))
+        })
+        .collect();
+    sort_entries(&mut entries, sort);
+    Ok(entries)
+}
+
+/// Phase two: fill size, mtime and the platform hidden flag of a
+/// [`read_dir_names`] listing from one `lstat` per entry, keeping its
+/// order. `None` once `cancel` is set (checked every few hundred entries),
+/// so a folder the user has already left stops costing I/O.
+pub fn backfill(mut entries: Vec<Entry>, cancel: &AtomicBool) -> Option<Vec<Entry>> {
+    for (ix, slot) in entries.iter_mut().enumerate() {
+        if ix % 256 == 0 && cancel.load(AtomicOrdering::Relaxed) {
+            return None;
+        }
+        let metadata = std::fs::symlink_metadata(&slot.path).ok();
+        let name = std::mem::take(&mut slot.name);
+        let path = std::mem::take(&mut slot.path);
+        *slot = entry(name, path, slot.is_dir, metadata.as_ref());
+    }
+    Some(entries)
+}
+
+fn open_dir(path: &Path) -> Result<std::fs::ReadDir> {
+    std::fs::read_dir(path).with_context(|| format!("reading directory {}", path.display()))
+}
+
+/// One listing entry; without `metadata`, size is 0, mtime unknown and
+/// only the dotfile convention marks it hidden.
+fn entry(name: String, path: PathBuf, is_dir: bool, metadata: Option<&std::fs::Metadata>) -> Entry {
+    let is_hidden = is_hidden_entry(&name, metadata);
+    Entry {
+        name,
+        path,
+        is_dir,
+        size: metadata.map_or(0, |m| m.len()),
+        modified: metadata.and_then(|m| m.modified().ok()),
+        is_hidden,
+    }
 }
 
 /// Order `entries` per the sort settings. The `ascending` flag reverses
@@ -669,6 +748,72 @@ mod tests {
         assert!(!entries[1].is_dir);
         assert_eq!(entries[1].size, 5);
         assert_eq!(entries[1].path, dir.path().join("file.txt"));
+    }
+
+    /// FIL-25: names first, then the backfill, ends where the one-phase
+    /// listing does, in the same order.
+    #[test]
+    fn backfilled_names_match_the_full_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("Sub")).unwrap();
+        fs::write(dir.path().join("b.txt"), b"hello").unwrap();
+        fs::write(dir.path().join("A.png"), vec![0; 4096]).unwrap();
+        fs::write(dir.path().join(".hidden"), b"x").unwrap();
+        for by in [SortBy::Name, SortBy::Kind] {
+            let sort = SortSettings {
+                by,
+                ..SortSettings::default()
+            };
+            let names = read_names(dir.path(), &sort).unwrap();
+            assert!(names.iter().all(|e| e.size == 0 && e.modified.is_none()));
+            assert!(
+                names
+                    .iter()
+                    .find(|e| e.name == ".hidden")
+                    .unwrap()
+                    .is_hidden
+            );
+            let filled = backfill(names, &AtomicBool::new(false)).unwrap();
+            assert_eq!(
+                filled,
+                read_dir_sorted(dir.path(), &sort).unwrap(),
+                "{by:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelled_backfill_gives_up() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        let names = read_names(dir.path(), &SortSettings::default()).unwrap();
+        assert_eq!(backfill(names, &AtomicBool::new(true)), None);
+    }
+
+    /// Only orders that read size or mtime wait for the backfill.
+    #[test]
+    fn only_size_and_modified_sorts_need_metadata() {
+        let needs = |by| {
+            sort_needs_metadata(&SortSettings {
+                by,
+                ..SortSettings::default()
+            })
+        };
+        assert!(!needs(SortBy::Name));
+        assert!(!needs(SortBy::Kind));
+        assert!(needs(SortBy::Size));
+        assert!(needs(SortBy::Modified));
+    }
+
+    /// On Windows the enumeration carries the metadata, so the first read
+    /// is already complete; elsewhere it leaves the metadata to backfill.
+    #[test]
+    fn names_listing_is_complete_only_where_enumeration_has_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"abc").unwrap();
+        let listing = read_dir_names(dir.path(), &SortSettings::default()).unwrap();
+        assert_eq!(listing.complete, cfg!(windows));
+        assert_eq!(listing.entries[0].size, if cfg!(windows) { 3 } else { 0 });
     }
 
     #[test]

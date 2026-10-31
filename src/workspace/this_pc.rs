@@ -5,6 +5,7 @@
 //! dropped onto it.
 
 use super::*;
+use crate::ui::icon_art::Symbol;
 
 /// A drive tile's fixed width; tiles wrap to fill the pane.
 const TILE_WIDTH: f32 = 260.;
@@ -61,7 +62,7 @@ impl Workspace {
         if self.drives.is_empty() {
             return ui::pane::message_state(
                 &theme,
-                "icons/hard-drive.svg",
+                Symbol::Drive.path(),
                 "Looking for drives",
                 "Your drives will appear here in a moment.",
             );
@@ -79,21 +80,65 @@ impl Workspace {
             .children(self.drives.iter().enumerate().map(|(ix, drive)| {
                 let path = drive.path.clone();
                 let selected = self.this_pc_selected == Some(ix);
+                let network = (drive.kind == DriveKind::Network).then(|| drive.clone());
                 // Explorer's model: a click selects the drive, a double
                 // click opens it.
-                drive_tile(&theme, ix, drive, selected).on_click(cx.listener(
-                    move |this, event: &ClickEvent, _window, cx| {
+                drive_tile(&theme, ix, drive, selected)
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                         if event.click_count() >= 2 {
                             this.navigate(path.clone(), cx);
                         } else {
                             this.this_pc_selected = Some(ix);
                             cx.notify();
                         }
-                    },
-                ))
+                    }))
+                    .when_some(network, |tile, drive| {
+                        tile.on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.this_pc_selected = Some(ix);
+                                this.open_network_drive_menu(&drive, event.position, window, cx);
+                            }),
+                        )
+                    })
             }))
+            .child(connect_tile(&theme).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| this.open_connect(None, None, window, cx),
+            )))
             .into_any_element()
     }
+}
+
+/// The tile after the drives that opens "Connect to Server" (FIL-59).
+fn connect_tile(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let hover = theme.hover;
+    div()
+        .id("this-pc-connect")
+        .flex()
+        .items_center()
+        .gap_3()
+        .w(px(TILE_WIDTH))
+        .p_3()
+        .rounded_xl()
+        .border_1()
+        .border_dashed()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .child(ui::icon::ui_icon("icons/server.svg", theme.text_dim).size(px(32.)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(div().text_sm().child("Connect to Server…"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.text_dim)
+                        .child("Open a shared folder on the network"),
+                ),
+        )
 }
 
 /// One drive: icon, name, capacity bar, and free space, Explorer-style.
@@ -104,11 +149,6 @@ fn drive_tile(
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let hover = theme.hover;
-    let free = format!(
-        "{} free of {}",
-        format_size(drive.free_bytes),
-        format_size(drive.total_bytes)
-    );
     div()
         .id(("this-pc-drive", ix))
         .flex()
@@ -127,7 +167,7 @@ fn drive_tile(
         .cursor_pointer()
         .when(!selected, move |s| s.hover(move |s| s.bg(hover)))
         .tooltip(ui::tooltip::text_tooltip(display_path(&drive.path), *theme))
-        .child(ui::icon::ui_icon("icons/hard-drive.svg", theme.text_dim).size(px(32.)))
+        .child(ui::icon::ui_icon(drive_icon(drive.kind), theme.text_dim).size(px(32.)))
         .child(
             div()
                 .flex()
@@ -136,15 +176,38 @@ fn drive_tile(
                 .min_w_0()
                 .gap_1p5()
                 .child(div().text_sm().truncate().child(drive.name.clone()))
-                .child(ui::sidebar::capacity_bar(theme, drive.used_fraction()))
+                .when(drive.capacity.is_some(), |s| {
+                    s.child(ui::sidebar::capacity_bar(theme, drive.used_fraction()))
+                })
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.text_dim)
                         .truncate()
-                        .child(free),
+                        .child(drive_detail(drive)),
                 ),
         )
+}
+
+/// A drive's glyph: a server for network shares, a disk otherwise.
+pub(super) fn drive_icon(kind: DriveKind) -> &'static str {
+    match kind {
+        DriveKind::Network => "icons/server.svg",
+        DriveKind::Fixed | DriveKind::Removable => Symbol::Drive.path(),
+    }
+}
+
+/// The line under a drive's name: "12 GB free of 1 TB", or "Not
+/// responding" for a network drive that didn't report its size in time.
+pub(super) fn drive_detail(drive: &Drive) -> String {
+    match drive.capacity {
+        Some(capacity) => format!(
+            "{} free of {}",
+            format_size(capacity.free_bytes),
+            format_size(capacity.total_bytes)
+        ),
+        None => "Not responding".into(),
+    }
 }
 
 /// The This PC subtitle and status line: "1 drive", "3 drives".
@@ -154,7 +217,41 @@ pub(super) fn drive_count(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::drive_count;
+    use filex::drives::{Capacity, Drive, DriveKind};
+
+    use super::{Symbol, drive_count, drive_detail, drive_icon};
+
+    fn nas(capacity: Option<Capacity>) -> Drive {
+        Drive {
+            name: "Media (nas)".into(),
+            path: "/mnt/media".into(),
+            kind: DriveKind::Network,
+            capacity,
+            share: None,
+        }
+    }
+
+    #[test]
+    fn a_drive_that_answered_shows_its_free_space() {
+        let capacity = Capacity {
+            total_bytes: 2048,
+            free_bytes: 1024,
+        };
+        let detail = drive_detail(&nas(Some(capacity)));
+        assert!(detail.contains(" free of "), "{detail}");
+    }
+
+    #[test]
+    fn a_silent_network_drive_says_so() {
+        assert_eq!(drive_detail(&nas(None)), "Not responding");
+    }
+
+    #[test]
+    fn network_drives_get_the_server_glyph() {
+        assert_eq!(drive_icon(DriveKind::Network), "icons/server.svg");
+        assert_eq!(drive_icon(DriveKind::Fixed), Symbol::Drive.path());
+        assert_eq!(drive_icon(DriveKind::Removable), Symbol::Drive.path());
+    }
 
     #[test]
     fn drive_count_is_singular_for_one() {

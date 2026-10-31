@@ -120,6 +120,34 @@ pub(super) const OTHER_VOLUME_DIRS: &[&str] = &["Volumes", "Network", "home"];
 #[cfg(not(target_os = "macos"))]
 pub(super) const OTHER_VOLUME_DIRS: &[&str] = &[];
 
+/// Mount points of network filesystems (cifs, nfs, sshfs, …) that a root
+/// may contain (FIL-62). Linux only: macOS keeps network volumes under
+/// `/Volumes`, which [`OTHER_VOLUME_DIRS`] already prunes, and the Windows
+/// default roots are fixed drives. Assumes `/proc/mounts` is the kernel's
+/// view of this process's mount namespace; reading it never touches the
+/// mounts themselves, so a dead share can't stall it.
+#[cfg(target_os = "linux")]
+pub(super) fn network_mounts() -> Vec<std::path::PathBuf> {
+    std::fs::read_to_string("/proc/mounts")
+        .map(|contents| network_mount_points(&contents))
+        .unwrap_or_default()
+}
+#[cfg(not(target_os = "linux"))]
+pub(super) fn network_mounts() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+/// The network mount points in `/proc/mounts` contents. Pure so tests can
+/// use fixture mount tables.
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn network_mount_points(proc_mounts: &str) -> Vec<std::path::PathBuf> {
+    crate::drives::parse_proc_mounts(proc_mounts)
+        .into_iter()
+        .filter(|entry| crate::drives::is_network_fstype(&entry.fstype))
+        .map(|entry| entry.mount)
+        .collect()
+}
+
 /// Whether folder names compare case-insensitively: NTFS and APFS/HFS+
 /// default to case-insensitive, Linux filesystems don't. A case-sensitive
 /// APFS volume would over-match here, which only excludes more.

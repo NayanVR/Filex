@@ -231,6 +231,8 @@ windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Storage_FileSystem",
+  # Drives: a mapped drive letter's UNC target (WNetGetConnectionW).
+  "Win32_NetworkManagement_WNet",
   # Settings: the MSI's crash-report choice (HKLM\Software\Filex).
   "Win32_System_Registry",
 ] }

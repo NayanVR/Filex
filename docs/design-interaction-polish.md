@@ -520,8 +520,37 @@ compares ASCII names bytewise (no allocation): `benches/listing_bench.rs`
 measured the sort at 100k entries 8.3 ms → 3.5 ms (a lazy
 `char::to_lowercase` iterator was *slower*, 15 ms). The full listing is
 stat-bound, ~370 ms at 100k warm, now off-thread. The settings
-subscription was already scoped to `sort`/`show_hidden_files`. Still
-open: the two-phase listing (names first, metadata backfilled).
+subscription was already scoped to `sort`/`show_hidden_files`.
+
+**Status (FIL-25, two-phase listing):** `listing::read_dir_names` reads
+names and `d_type` only, sorted, and `listing::backfill` fills size,
+mtime and the platform hidden flag with one `lstat` per entry, keeping
+the order. Decisions:
+
+- **Only where it pays.** Windows' enumeration (`FindNextFileW`) already
+  carries size, times and attributes, so there the first read *is* the
+  full listing (100k: 124 ms full vs 73 ms bare names, the gap being the
+  sort and `Entry` building, not stats). On Linux the stats are the cost:
+  100k on ext4 (WSL), 62–81 ms names vs 349–402 ms with an `lstat` each.
+- **Size/Modified sorts stay one-phase.** Their order depends on the
+  missing metadata, so showing names first would reorder rows under the
+  pointer when it lands. They keep the old behaviour (previous folder on
+  screen until the full listing).
+- **A 50 ms budget before showing names alone.** The backfill races a
+  timer; if it wins, names and metadata land in one paint, so ordinary
+  folders never flash blank columns. Past the budget the names show with
+  size/date blank (`meta_pending`), then fill in place: order, selection,
+  rename and scroll survive, unless the macOS `UF_HIDDEN` flag now hides
+  rows (selection is then cleared, as indices moved).
+- **Refreshes wait.** A reload of the folder on screen (after a file op)
+  skips the names phase rather than blanking columns it already shows.
+- **Cancellable.** Leaving the folder (a new load or a tab switch) sets
+  the backfill's cancel flag, checked every 256 entries; a tab left with
+  a pending listing reloads it on return.
+
+Not covered: no `#[gpui::test]` exercises the workspace side yet (FIL-26);
+the listing functions carry the tests and `benches/listing_bench.rs` the
+`read_dir_names`/`backfill` numbers.
 
 The analysis below is the original pre-fix record.
 

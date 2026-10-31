@@ -72,31 +72,47 @@ struct Listed {
     stat: Option<Stat>,
 }
 
+/// A directory's entries from [`list`], and the directory's own mtime when
+/// the listing read it from the directory itself rather than from its
+/// parent's listing (Windows, FIL-47); `None` keeps the parent's value.
+struct DirListing {
+    mtime: Option<i64>,
+    entries: Box<dyn Iterator<Item = std::io::Result<Listed>>>,
+}
+
 /// The entries of `dir`. Windows reads each entry's [`Stat`] from the
 /// directory handle in batches; elsewhere `readdir` plus a later `lstat`
 /// per kept entry is already cheap.
-fn list(dir: &Path) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<Listed>>>> {
+fn list(dir: &Path) -> std::io::Result<DirListing> {
     #[cfg(windows)]
     {
-        Ok(Box::new(windows::list(dir)?.map(|entry| {
-            entry.map(|(path, stat)| Listed {
-                path,
-                is_dir: stat.is_dir,
-                stat: Some(stat),
-            })
-        })))
+        let entries = windows::list(dir)?;
+        Ok(DirListing {
+            mtime: entries.mtime,
+            entries: Box::new(entries.map(|entry| {
+                entry.map(|(path, stat)| Listed {
+                    path,
+                    is_dir: stat.is_dir,
+                    stat: Some(stat),
+                })
+            })),
+        })
     }
     #[cfg(not(windows))]
     {
-        Ok(Box::new(std::fs::read_dir(dir)?.map(|entry| {
-            entry.map(|entry| Listed {
-                path: entry.path(),
-                // `file_type` comes from the directory entry itself on most
-                // platforms, so the name check costs no extra stat.
-                is_dir: entry.file_type().is_ok_and(|t| t.is_dir()),
-                stat: None,
-            })
-        })))
+        Ok(DirListing {
+            // The parent's per-entry `lstat` already read it from the inode.
+            mtime: None,
+            entries: Box::new(std::fs::read_dir(dir)?.map(|entry| {
+                entry.map(|entry| Listed {
+                    path: entry.path(),
+                    // `file_type` comes from the directory entry itself on
+                    // most platforms, so the name check costs no extra stat.
+                    is_dir: entry.file_type().is_ok_and(|t| t.is_dir()),
+                    stat: None,
+                })
+            })),
+        })
     }
 }
 
@@ -129,6 +145,9 @@ pub struct IndexFilter {
     /// Case-folded per [`CASE_INSENSITIVE_NAMES`]; empty while the
     /// setting is off.
     excluded_names: HashSet<String>,
+    /// Network mount points (FIL-62), skipped when nested inside a root so
+    /// the walk doesn't crawl a share over the network. Empty off Linux.
+    network_mounts: Vec<PathBuf>,
 }
 impl IndexFilter {
     pub fn from_settings(settings: &crate::settings::Settings) -> Self {
@@ -144,15 +163,29 @@ impl IndexFilter {
         Self {
             include_system: settings.index_system_files,
             excluded_names,
+            network_mounts: Vec::new(),
         }
     }
-    /// The filter from the settings file on disk; defaults when it's
-    /// missing or unreadable.
+    /// The filter from the settings file on disk (defaults when it's
+    /// missing or unreadable) and the current network mounts.
     pub fn load() -> Self {
         crate::settings::default_settings_file()
             .and_then(|p| crate::settings::Settings::load(&p).ok())
             .map(|s| Self::from_settings(&s))
             .unwrap_or_else(|| Self::from_settings(&Default::default()))
+            .with_network_mounts(platform::network_mounts())
+    }
+    pub fn with_network_mounts(mut self, mounts: Vec<PathBuf>) -> Self {
+        self.network_mounts = mounts;
+        self
+    }
+    /// Whether `path` is, or is inside, a network mount nested strictly
+    /// within `root`. A mount added as a root itself, or one that contains
+    /// the root, is indexed normally.
+    fn in_nested_network_mount(&self, root: &Path, path: &Path) -> bool {
+        self.network_mounts
+            .iter()
+            .any(|mount| mount != root && mount.starts_with(root) && path.starts_with(mount))
     }
     fn excluded_name(&self, name: &OsStr) -> bool {
         !self.excluded_names.is_empty()
@@ -162,15 +195,26 @@ impl IndexFilter {
     /// Ancestors are matched by name alone; the last component only when
     /// it is a directory, so a *file* named `target` is still indexed.
     pub fn excludes(&self, root: &Path, path: &Path) -> bool {
-        if self.excludes_top_level(root, path) {
+        self.excludes_with(root, path, || path.is_dir())
+    }
+    /// [`Self::excludes`] for a path the caller already knows is a
+    /// directory, without another `stat`.
+    pub fn excludes_dir(&self, root: &Path, path: &Path) -> bool {
+        self.excludes_with(root, path, || true)
+    }
+    fn excludes_with(&self, root: &Path, path: &Path, is_dir: impl FnOnce() -> bool) -> bool {
+        if self.excludes_area(root, path) {
             return true;
         }
         let Ok(relative) = path.strip_prefix(root) else {
             return false;
         };
         let mut names = relative.iter().peekable();
+        let mut is_dir = Some(is_dir);
         while let Some(name) = names.next() {
-            if self.excluded_name(name) && (names.peek().is_some() || path.is_dir()) {
+            if self.excluded_name(name)
+                && (names.peek().is_some() || is_dir.take().is_some_and(|f| f()))
+            {
                 return true;
             }
         }
@@ -186,10 +230,13 @@ fn fold(name: &str) -> String {
 }
 impl IndexFilter {
     /// OS folders (unless the setting includes them) and other-volume
-    /// mount folders, matched by the first component under `root`.
-    fn excludes_top_level(&self, root: &Path, path: &Path) -> bool {
+    /// mount folders, matched by the first component under `root`, plus
+    /// nested network mounts at any depth (the mount point itself included,
+    /// so the walk doesn't even `stat` it over the network).
+    fn excludes_area(&self, root: &Path, path: &Path) -> bool {
         (!self.include_system && first_component_in(root, path, SYSTEM_DIRS))
             || first_component_in(root, path, OTHER_VOLUME_DIRS)
+            || self.in_nested_network_mount(root, path)
     }
 }
 fn first_component_in(root: &Path, path: &Path, names: &[&str]) -> bool {
@@ -331,6 +378,96 @@ mod tests {
             "a missing or file path named target is kept"
         );
         assert!(!super::IndexFilter::default().excludes(root, &root.join("web/target/x")));
+    }
+
+    /// FIL-62: only network filesystems from the mount table count; local
+    /// disks, pseudo filesystems and the GVfs umbrella mount don't.
+    #[test]
+    fn network_mount_points_come_from_network_fstypes_only() {
+        use std::path::PathBuf;
+        let contents = "\
+/dev/sda1 / ext4 rw 0 0
+proc /proc proc rw 0 0
+/dev/sdb1 /home/me/disk ext4 rw 0 0
+//nas/Media /home/me/mnt/media cifs rw 0 0
+fs1:/srv /home/me/fs1 nfs4 rw 0 0
+me@host:/home/me /home/me/remote fuse.sshfs rw 0 0
+gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0
+";
+        assert_eq!(
+            super::platform::network_mount_points(contents),
+            ["/home/me/mnt/media", "/home/me/fs1", "/home/me/remote"].map(PathBuf::from)
+        );
+    }
+
+    /// FIL-62: a network mount nested in a root is left out, mount point
+    /// included, at any depth; the same mount added as a root (or a root
+    /// inside it) is indexed normally.
+    #[test]
+    fn nested_network_mounts_are_excluded_unless_they_are_the_root() {
+        use std::path::Path;
+        let filter = super::IndexFilter::default()
+            .with_network_mounts(vec!["/home/me/remote".into(), "/home/me/mnt/nas".into()]);
+        let home = Path::new("/home/me");
+        assert!(filter.excludes(home, Path::new("/home/me/remote")));
+        assert!(filter.excludes(home, Path::new("/home/me/remote/a/b.txt")));
+        assert!(filter.excludes(home, Path::new("/home/me/mnt/nas/x")));
+        assert!(!filter.excludes(home, Path::new("/home/me/mnt/local.txt")));
+        assert!(
+            !filter.excludes(home, Path::new("/home/me/remote-notes.txt")),
+            "a sibling sharing the prefix"
+        );
+
+        let remote = Path::new("/home/me/remote");
+        assert!(!filter.excludes(remote, Path::new("/home/me/remote/a/b.txt")));
+        let inside = Path::new("/home/me/mnt/nas/photos");
+        assert!(!filter.excludes(inside, Path::new("/home/me/mnt/nas/photos/1.jpg")));
+        assert!(
+            !filter.excludes(Path::new("/srv"), Path::new("/srv/a")),
+            "a root the mount isn't under"
+        );
+    }
+
+    /// FIL-62: the walk prunes a nested network mount before listing or
+    /// stat'ing anything in it.
+    #[test]
+    fn walk_skips_a_nested_network_mount() {
+        use super::walk;
+        use crate::catalog::segment::Root;
+        use std::{fs, sync::atomic::AtomicBool};
+
+        let tree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tree.path().join("remote/deep")).unwrap();
+        fs::write(tree.path().join("remote/deep/far.txt"), b"x").unwrap();
+        fs::write(tree.path().join("near.txt"), b"x").unwrap();
+        let root = Root {
+            id: 1,
+            path: tree.path().to_path_buf(),
+            device: 0,
+        };
+        let filter =
+            super::IndexFilter::default().with_network_mounts(vec![tree.path().join("remote")]);
+        let mut next = 0;
+        let mut seen = Vec::new();
+        walk(
+            &root,
+            &tree.path().join("not-the-database"),
+            &filter,
+            |_, _, _| {
+                next += 1;
+                next
+            },
+            |record| {
+                seen.push(String::from_utf8_lossy(&record.name).into_owned());
+                Ok(())
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(seen.iter().any(|n| n == "near.txt"), "{seen:?}");
+        for gone in ["remote", "deep", "far.txt"] {
+            assert!(!seen.iter().any(|n| n == gone), "{gone} leaked: {seen:?}");
+        }
     }
 
     #[test]
@@ -500,6 +637,79 @@ mod tests {
             let path = &paths[&record.id];
             let fresh = inspect(path, record.id, record.parent, root.id).unwrap();
             assert_eq!(record, fresh, "{}", path.display());
+        }
+    }
+
+    /// Regression (FIL-47): NTFS refreshes the copy of a directory's
+    /// timestamps kept in its parent's index lazily, so a walk that took a
+    /// subdirectory's mtime from its parent's listing lagged a write into it
+    /// that crossed a second boundary (a folder or file created or removed;
+    /// on Windows 11 each of those reproduced it).
+    #[test]
+    fn directory_mtime_follows_changes_inside_it() {
+        use super::{inspect, walk};
+        use crate::catalog::segment::Root;
+        use std::{
+            fs,
+            path::Path,
+            sync::atomic::AtomicBool,
+            time::{Duration, SystemTime, UNIX_EPOCH},
+        };
+
+        type Change = (&'static str, fn(&Path));
+        let changes: [Change; 3] = [
+            ("folder created", |docs| {
+                fs::create_dir(docs.join("new")).unwrap()
+            }),
+            ("file created", |docs| {
+                fs::write(docs.join("new.txt"), b"x").unwrap()
+            }),
+            ("file removed", |docs| {
+                fs::remove_file(docs.join("old.txt")).unwrap()
+            }),
+        ];
+        for (change, apply) in changes {
+            let tree = tempfile::tempdir().unwrap();
+            let docs = tree.path().join("docs");
+            fs::create_dir(&docs).unwrap();
+            fs::write(docs.join("old.txt"), b"x").unwrap();
+            let root = Root {
+                id: 3,
+                path: tree.path().to_path_buf(),
+                device: 0,
+            };
+            let into_second = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            std::thread::sleep(
+                Duration::from_millis(1050)
+                    - Duration::from_nanos(into_second.subsec_nanos().into()),
+            );
+            apply(&docs);
+            let mut records = Vec::new();
+            let (mut next, mut docs_id) = (0, 0);
+            walk(
+                &root,
+                &tree.path().join("not-the-database"),
+                &super::IndexFilter::from_settings(&Default::default()),
+                |path, _, _| {
+                    next += 1;
+                    if path == docs {
+                        docs_id = next;
+                    }
+                    next
+                },
+                |record| {
+                    records.push(record);
+                    Ok(())
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let walked = records
+                .into_iter()
+                .find(|r| r.id == docs_id)
+                .expect("docs is walked");
+            let fresh = inspect(&docs, walked.id, walked.parent, root.id).unwrap();
+            assert_eq!(walked.mtime, fresh.mtime, "{change}");
         }
     }
 

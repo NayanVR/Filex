@@ -71,6 +71,8 @@ pub(super) enum MenuTarget {
     Favorite { path: PathBuf },
     /// Icon choices for one folder, opened from its context menu.
     FolderIcon { path: PathBuf },
+    /// A network drive in the sidebar or on This PC (FIL-60).
+    NetworkDrive { path: PathBuf },
 }
 
 /// Which panel of an open menu a row belongs to.
@@ -128,6 +130,16 @@ pub(super) struct Job {
     pub(super) id: u64,
     pub(super) label: SharedString,
     pub(super) progress: std::sync::Arc<ops::OpProgress>,
+    /// What the job reads from or writes to, so a share it's using isn't
+    /// disconnected under it (FIL-60).
+    pub(super) paths: Vec<PathBuf>,
+}
+
+/// Whether any of `jobs` reads from or writes to something under `mount`.
+pub(super) fn jobs_touch(jobs: &[Job], mount: &Path) -> bool {
+    jobs.iter()
+        .flat_map(|job| &job.paths)
+        .any(|path| path.starts_with(mount))
 }
 
 /// How the search bar chooses between normal search and magic mode. Three
@@ -336,6 +348,7 @@ pub(super) struct TabSnapshot {
     pub(super) cwd: PathBuf,
     pub(super) listed_dir: PathBuf,
     pub(super) entries: Vec<Entry>,
+    pub(super) meta_pending: bool,
     pub(super) load_error: Option<SharedString>,
     pub(super) selection: Selection,
     pub(super) scroll: UniformListScrollHandle,
@@ -351,6 +364,7 @@ impl TabSnapshot {
             cwd: PathBuf::new(),
             listed_dir: PathBuf::new(),
             entries: Vec::new(),
+            meta_pending: false,
             load_error: None,
             selection: Selection::default(),
             scroll: UniformListScrollHandle::new(),

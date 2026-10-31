@@ -141,7 +141,7 @@ pub(super) use list::list;
 
 #[cfg(windows)]
 mod list {
-    use super::{RawEntry, decode};
+    use super::{RawEntry, decode, unix_seconds};
     use crate::ingest::Stat;
     use std::{
         ffi::OsString,
@@ -164,23 +164,32 @@ mod list {
     /// info structs require.
     const BUFFER_WORDS: usize = 8 * 1024;
 
-    /// Every entry of `dir` with its [`Stat`], from one directory handle.
+    /// Every entry of `dir` with its [`Stat`], and `dir`'s own modification
+    /// time ([`Listing::mtime`]), all from one directory handle.
     ///
     /// Assumes a local NTFS-like volume: the directory is opened for listing
     /// only (no data access, so antivirus doesn't scan it), without
     /// following a reparse point, and the volume serial comes from that same
     /// handle. Each entry is `Err` only once the listing itself fails
     /// part-way; the caller counts it as skipped.
-    pub fn list(
-        dir: &Path,
-    ) -> io::Result<impl Iterator<Item = io::Result<(PathBuf, Stat)>> + use<>> {
+    ///
+    /// NTFS copies each child's timestamps into its parent's index entry and
+    /// refreshes that copy lazily, so a subdirectory's `LastWriteTime` in
+    /// this listing can lag the one on its own handle (FIL-47); `mtime` is
+    /// the authoritative one for `dir` itself.
+    pub fn list(dir: &Path) -> io::Result<Listing> {
         let handle = std::fs::OpenOptions::new()
             .access_mode(FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
             .open(dir)?;
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         unsafe { GetFileInformationByHandle(HANDLE(handle.as_raw_handle()), &mut info) }?;
+        let written = info.ftLastWriteTime;
+        let mtime = unix_seconds(
+            ((written.dwHighDateTime as u64) << 32 | written.dwLowDateTime as u64) as i64,
+        );
         Ok(Listing {
+            mtime,
             dir: dir.to_path_buf(),
             handle,
             volume_serial: info.dwVolumeSerialNumber,
@@ -191,7 +200,9 @@ mod list {
         })
     }
 
-    struct Listing {
+    pub(crate) struct Listing {
+        /// The directory's own `LastWriteTime`, from its handle.
+        pub mtime: Option<i64>,
         dir: PathBuf,
         handle: File,
         volume_serial: u32,

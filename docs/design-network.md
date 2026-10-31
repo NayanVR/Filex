@@ -1,0 +1,138 @@
+# Network locations
+
+Status: **slice 1 landed (2026-10-30)**: network drives show up and can be
+opened by address. Connecting and disconnecting shares are the next slices
+(see "Plan").
+
+## Goal
+
+Treat network shares as first-class places: see the shares this machine has
+mounted, open one by typing its address, and (next) connect to a new share or
+disconnect one from inside Filex. All three platforms, one model.
+
+Non-goals for Phase 1: browsing the LAN for servers (SMB browsing/mDNS
+discovery), indexing network shares by default, a built-in SMB/NFS client
+(Filex always goes through the OS's own mount), FTP/SFTP/cloud drives as
+their own protocol stacks, and "Share with ›" access management (FIL-43).
+
+## Ground rules
+
+- **Never block on the network where the UI or the shared executor waits.**
+  A share that stops answering makes `statvfs` / `GetDiskFreeSpaceExW` /
+  `readdir` block for the SMB timeout, and an NFS hard mount blocks until the
+  server returns. Anything that touches a mounted share either runs in a
+  cancellable background task (listing, which already does) or under a time
+  limit (capacity probes).
+- **Parsing is pure.** Addresses are parsed and matched to mounts without
+  I/O, against the mount snapshot the background drive refresh already holds.
+- **The OS mounts, Filex doesn't.** Credentials, Kerberos, keychains and the
+  OS's own auth prompts stay the OS's job.
+
+## Model (`src/network.rs`, `src/drives.rs`)
+
+- `ShareAddress { protocol: Smb | Nfs, host, user, segments }` parses what
+  people type (`\\server\share\dir`, `smb://user@server/share/dir`,
+  `nfs://server/export/dir`) and what mount tables report (`//server/share`
+  for cifs/smbfs, `server:/export` for NFS). It's not a path: bare
+  `//server/share` typed on Unix stays an ordinary path.
+- `Drive` gained `kind: Fixed | Removable | Network`, `capacity:
+  Option<Capacity>` (`None` = the share didn't answer in time) and `share:
+  Option<ShareAddress>` (what a network drive points at).
+- `ShareAddress::locate` maps an address to the deepest mount covering it
+  (SMB names compare case-insensitively, NFS paths case-sensitively), so
+  `smb://nas/Media/Movies` opens `/mnt/media/Movies` when `//nas/Media` is
+  mounted there.
+
+### Per-OS enumeration
+
+| | Where mounts come from | How "network" is decided | Name |
+|---|---|---|---|
+| Windows | drive letters (`GetLogicalDrives`) | `GetDriveTypeW == DRIVE_REMOTE` | Explorer's `Movies (\\nas\Media) (Z:)`, target from `WNetGetConnectionW` |
+| macOS | `/Volumes/*` | `getfsstat(MNT_NOWAIT)` local flag | `share (server)` |
+| Linux | `/proc/mounts` | filesystem type (`cifs`, `nfs4`, `fuse.sshfs`, …) | `share (server)` |
+
+None of the three sources contact a server: the WNet connection table, the
+kernel's cached `statfs` (`MNT_NOWAIT`) and `/proc/mounts` are all local.
+Previously Linux dropped every network mount (it kept only `/dev/*`
+sources), and Windows skipped a mapped drive whose server was down and named
+reachable ones like local disks (volume label, or "Local Disk").
+
+### The capacity probe
+
+Network drives get their capacity from `bounded_probe`: the syscall runs on
+its own thread and the refresh waits at most 2 s. When it times out, the
+mount point is remembered and no new probe starts for it until the stuck one
+returns, so a dead mount costs one parked thread, not one per 30 s refresh.
+The drive stays listed as "Not responding", without a capacity bar.
+
+A refresh with several dead mounts can take 2 s each the first time; that's
+the background refresh, not the UI.
+
+### Typed addresses
+
+The location field resolves a share address before path rules:
+
+- Windows: SMB addresses become UNC paths and open directly (no mapping
+  needed). NFS addresses need a mounted drive letter.
+- macOS/Linux: the address maps into the mount that covers it; otherwise the
+  field says `Media (nas) isn't connected. Mount it first, then open it
+  here.` Slice 2 turns that into a Connect action.
+
+## Plan
+
+1. **Show and open mounted shares** — done (this change).
+2. **Connect to a share** — done (FIL-59). "Connect to Server…" in the
+   sidebar's Drives section and on This PC, and offered by the location
+   field when a typed share isn't connected (or, on Windows, can't be
+   opened by UNC path). `filex::connect::ShareConnector` per OS; each call
+   blocks, so it runs on a thread of its own (`connect_on_thread`), never
+   the background executor:
+   - Windows: `WNetAddConnection2W` with `CONNECT_INTERACTIVE` only. The
+     OS tries the signed-in or saved credentials first and prompts only
+     if they're refused; `CONNECT_PROMPT` would ask every time. Optional
+     drive letter (the highest free one, Z down), kept until sign-out.
+     Without a letter, the UNC path opens once connected. SMB only.
+   - macOS: NetFS `NetFSMountURLSync` with default options (system sign-in
+     sheet, Keychain), mounting under `/Volumes`. The sync call on its own
+     thread replaces `NetFSMountURLAsync`; cancelling abandons the call and
+     the sheet stays the user's to dismiss.
+   - Linux: GVfs (`gio mount smb://…`), user-space and root-free; the share
+     appears under `$XDG_RUNTIME_DIR/gvfs/` (listed by FIL-61). `mount.cifs`
+     needs root and stays out. `gio` runs with stdin closed, so a share
+     that needs a password (and has none saved in the keyring) is reported
+     with a pointer to the desktop file manager rather than prompted for
+     in-app. Cancelling kills `gio`.
+3. **Disconnect / eject** — done (FIL-60). A network drive's right-click
+   menu in the sidebar and on This PC ("Eject" on macOS, "Disconnect"
+   elsewhere), through `ShareConnector::disconnect` on a thread of its own:
+   `WNetCancelConnection2W` with `CONNECT_UPDATE_PROFILE` (a "reconnect at
+   sign-in" mapping is forgotten too), `unmount(2)` on macOS, `gio mount
+   -u` on Linux. None of them forces: a share with open files is reported,
+   not torn down. Refused up front while a running job reads from or
+   writes to the share (each job records its paths). A share on screen
+   when it's disconnected leaves for This PC (Windows) or home.
+4. **Linux GVfs mounts in the drive list** — done (FIL-61):
+   `fuse.gvfsd-fuse` is one mount for all GVfs shares, at
+   `$XDG_RUNTIME_DIR/gvfs`. Each `smb-share:`, `nfs:`, `sftp:`, `dav(s):`,
+   `ftp(s):` and `afp-volume:` child is listed as a network drive (devices
+   such as `mtp:` and browse points such as `smb-server:` are not); SMB and
+   NFS ones parse into `ShareAddress` so typed addresses find them. The
+   folder is listed under the network probe's time limit.
+5. **Recent servers**: remember connected addresses (no credentials) for the
+   Connect dialog.
+
+Nested network mounts (FIL-62, done): on Linux, `IndexFilter` reads the
+network mount points from `/proc/mounts` and the walk and live events skip
+any that sit strictly inside a root, mount point included, so a share
+mounted under `~` (sshfs at `~/remote`, cifs under `~/mnt`) isn't crawled.
+A mount added as a root itself is indexed normally. The filter is read
+when a walk starts and per event batch, so a share mounted later is
+skipped from the next walk on.
+
+Watches (FIL-66, done): on Linux the daemon registers one inotify watch
+per directory itself (`daemon::watch`), pruned by the same `IndexFilter`,
+instead of notify's recursive mode, which walked the whole tree, nested
+network mounts and excluded folders included. A directory created or moved
+in gets its watches from a registrar thread; a filter change or a queue
+overflow resyncs them. macOS and Windows keep their native recursive
+watches, which don't walk the tree.

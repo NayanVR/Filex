@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod catalog;
+pub mod connect;
 pub mod context_menu;
 pub mod diagnostics;
 pub mod drives;
@@ -16,6 +17,7 @@ pub mod index_lab;
 pub mod launch;
 pub mod listing;
 pub mod magic;
+pub mod network;
 pub mod ops;
 pub mod picker;
 pub mod recents;

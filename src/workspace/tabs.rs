@@ -5,10 +5,14 @@ use super::*;
 impl Workspace {
     /// Save the live browse state into the active tab's slot.
     pub(super) fn snapshot_active(&mut self) -> TabSnapshot {
+        // A backfill only ever lands on the active tab; the switched-to
+        // tab reloads a pending listing on return instead.
+        self.restart_backfill();
         TabSnapshot {
             cwd: std::mem::take(&mut self.cwd),
             listed_dir: std::mem::take(&mut self.listed_dir),
             entries: std::mem::take(&mut self.entries),
+            meta_pending: self.meta_pending,
             load_error: self.load_error.take(),
             selection: std::mem::take(&mut self.selection),
             scroll: std::mem::replace(&mut self.browse_scroll, UniformListScrollHandle::new()),
@@ -23,6 +27,7 @@ impl Workspace {
         self.cwd = snap.cwd;
         self.listed_dir = snap.listed_dir;
         self.entries = snap.entries;
+        self.meta_pending = snap.meta_pending;
         self.load_error = snap.load_error;
         self.selection = snap.selection;
         self.browse_scroll = snap.scroll;

@@ -87,6 +87,11 @@ impl Workspace {
             )
             .into(),
             progress: progress.clone(),
+            paths: ops
+                .iter()
+                .flat_map(|op| [Some(op.source().to_path_buf()), op.destination()])
+                .flatten()
+                .collect(),
         });
         self.spawn_job_ticker(job_id, cx);
         // The card's work is done; clearing the query also drops the card

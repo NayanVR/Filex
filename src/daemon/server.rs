@@ -1,10 +1,11 @@
 //! One per-user index owner, two query workers, one writer, one builder.
 use super::{
     ipc::{self, Command, Endpoint, Request, Response, VERSION},
-    query, writer,
+    query,
+    watch::RootWatches,
+    writer,
 };
 use anyhow::{Result, ensure};
-use notify::Watcher;
 use std::{
     collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
@@ -60,8 +61,8 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
     let event_owner = shared.clone();
     let filter = Arc::new(RwLock::new(crate::ingest::IndexFilter::load()));
     let event_filter = filter.clone();
-    let mut watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+    let watches = RootWatches::new(
+        Arc::new(move |event: notify::Result<notify::Event>| match event {
             Ok(mut event) => {
                 if matches!(event.kind, notify::EventKind::Access(_)) {
                     return;
@@ -99,16 +100,17 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
                     Some(format!("watch coverage incomplete: {error}"));
                 event_owner.overflow.store(true, Ordering::Relaxed);
             }
-        })?;
+        }),
+        filter.clone(),
+    )?;
     let watched_roots = shared.view.read().unwrap().roots.clone();
     for root in &watched_roots {
-        if let Err(e) = watcher.watch(&root.path, notify::RecursiveMode::Recursive) {
+        if let Err(e) = watches.add_root(&root.path) {
             *shared.coverage_error.write().unwrap() =
                 Some(format!("watch coverage incomplete: {e}"));
         }
     }
     handle.commands.send(writer::Command::Reconcile)?;
-    let watcher = Arc::new(Mutex::new(watcher));
     let (jobs, interactive) = mpsc::sync_channel::<Job>(16);
     let (streams, exhaustive) = mpsc::sync_channel::<Job>(4);
     let hot = Arc::new(Mutex::new(HashMap::<u64, u64>::new()));
@@ -260,6 +262,7 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
                 }
                 Command::Reconcile => {
                     *filter.write().unwrap() = crate::ingest::IndexFilter::load();
+                    watches.resync();
                     handle.commands.try_send(writer::Command::Reconcile)?;
                     Ok(Some(Response::Ack))
                 }
@@ -284,16 +287,13 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
                         .map(|r| r.path.clone())
                         .collect();
                     let path = crate::ingest::validate_new_root(&roots, &path)?;
-                    watcher
-                        .lock()
-                        .unwrap()
-                        .watch(&path, notify::RecursiveMode::Recursive)?;
+                    watches.add_root(&path)?;
                     handle.commands.send(writer::Command::AddRoot(path))?;
                     Ok(Some(Response::Ack))
                 }
                 Command::RemoveRoot(path) => {
                     let path = crate::ingest::canonical_event_path(&path);
-                    let _ = watcher.lock().unwrap().unwatch(&path);
+                    watches.remove_root(&path);
                     handle.commands.send(writer::Command::RemoveRoot(path))?;
                     Ok(Some(Response::Ack))
                 }
@@ -373,7 +373,7 @@ pub fn run(directory: &Path, roots: Vec<PathBuf>, stop: Arc<AtomicBool>) -> Resu
     for worker in workers {
         let _ = worker.join();
     }
-    drop(watcher);
+    drop(watches);
     drop(handle);
     let _ = wake.join();
     let _ = std::fs::remove_file(endpoint_path);

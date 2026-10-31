@@ -150,6 +150,21 @@ impl Workspace {
         self.show_menu(position, MenuTarget::Favorite { path }, rows, window, cx);
     }
 
+    /// The right-click menu of a network drive (sidebar or This PC).
+    pub(super) fn open_network_drive_menu(
+        &mut self,
+        drive: &Drive,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = menu_model::network_drive_menu(drive.name.clone());
+        let target = MenuTarget::NetworkDrive {
+            path: drive.path.clone(),
+        };
+        self.show_menu(position, target, rows, window, cx);
+    }
+
     fn open_folder_icon_menu(
         &mut self,
         path: PathBuf,
@@ -493,9 +508,9 @@ impl Workspace {
                 is_dir,
                 from_search,
             } => (Some(path.clone()), *is_dir, *from_search, Some(*ix)),
-            MenuTarget::Favorite { path } | MenuTarget::FolderIcon { path } => {
-                (Some(path.clone()), true, false, None)
-            }
+            MenuTarget::Favorite { path }
+            | MenuTarget::FolderIcon { path }
+            | MenuTarget::NetworkDrive { path } => (Some(path.clone()), true, false, None),
             MenuTarget::Background => (None, true, false, None),
         };
         let app = match (command, &menu.apps) {
@@ -599,6 +614,11 @@ impl Workspace {
                             s.folder_icons.remove(&path);
                         }
                     });
+                }
+            }
+            Command::Disconnect => {
+                if let Some(path) = path {
+                    self.disconnect_drive(path, cx);
                 }
             }
             Command::FolderIcon | Command::OpenSubmenu => {}
@@ -741,6 +761,8 @@ impl Workspace {
             )
             .into(),
             progress: progress.clone(),
+            // The archive is written beside the sources.
+            paths: sources.clone(),
         });
         self.spawn_job_ticker(job_id, cx);
         cx.notify();
