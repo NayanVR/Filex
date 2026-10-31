@@ -110,8 +110,10 @@ A mount added as a root itself is indexed normally. The filter is read
 when a walk starts and per event batch, so a share mounted later is
 skipped from the next walk on.
 
-Open items (filed in Linear): notify's recursive inotify watch walks the
-whole tree itself to add a watch per directory, so it still descends into
-a nested network mount (and into excluded folder names, FIL-28) even
-though the events it reports are dropped. Skipping those needs Filex to
-register the Linux watches itself instead of using `RecursiveMode::Recursive`.
+Watches (FIL-66, done): on Linux the daemon registers one inotify watch
+per directory itself (`daemon::watch`), pruned by the same `IndexFilter`,
+instead of notify's recursive mode, which walked the whole tree, nested
+network mounts and excluded folders included. A directory created or moved
+in gets its watches from a registrar thread; a filter change or a queue
+overflow resyncs them. macOS and Windows keep their native recursive
+watches, which don't walk the tree.
