@@ -516,6 +516,8 @@ struct Workspace {
     tag_editor: Option<TagEditor>,
     /// Open feedback dialog (sidebar footer button), if any.
     feedback: Option<FeedbackDraft>,
+    /// The "Connect to Server" dialog (FIL-59), while open.
+    connect: Option<connect::ConnectDialog>,
     /// Distinct tags across the store, for the sidebar TAGS section.
     /// Cached (rendering never scans the store) and refreshed off-thread
     /// whenever tags change.
@@ -554,6 +556,7 @@ struct Workspace {
 }
 
 mod app;
+mod connect;
 mod file_ops;
 mod input;
 mod integration;
@@ -771,6 +774,7 @@ impl Workspace {
             preview_tags: Vec::new(),
             tag_editor: None,
             feedback: None,
+            connect: None,
             sidebar_tags: Vec::new(),
             tabs: vec![TabSnapshot::placeholder()],
             active_tab: 0,

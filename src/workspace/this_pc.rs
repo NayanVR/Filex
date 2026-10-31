@@ -92,8 +92,43 @@ impl Workspace {
                     },
                 ))
             }))
+            .child(connect_tile(&theme).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| this.open_connect(None, None, window, cx),
+            )))
             .into_any_element()
     }
+}
+
+/// The tile after the drives that opens "Connect to Server" (FIL-59).
+fn connect_tile(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let hover = theme.hover;
+    div()
+        .id("this-pc-connect")
+        .flex()
+        .items_center()
+        .gap_3()
+        .w(px(TILE_WIDTH))
+        .p_3()
+        .rounded_xl()
+        .border_1()
+        .border_dashed()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .child(ui::icon::ui_icon("icons/server.svg", theme.text_dim).size(px(32.)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(div().text_sm().child("Connect to Server…"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.text_dim)
+                        .child("Open a shared folder on the network"),
+                ),
+        )
 }
 
 /// One drive: icon, name, capacity bar, and free space, Explorer-style.
