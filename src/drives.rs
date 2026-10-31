@@ -318,6 +318,26 @@ fn unescape_mount_field(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The GVfs FUSE mount for this user's session in `/proc/mounts`
+/// contents: the `fuse.gvfsd-fuse` mount at `<runtime_dir>/gvfs`. GVfs
+/// puts every share it mounts in a subfolder of that one mount, so
+/// [`parse_proc_mounts`] can't list them itself; other users' sessions
+/// have their own, which aren't ours to show.
+#[cfg(any(target_os = "linux", test))]
+pub fn gvfs_mount_point(contents: &str, runtime_dir: &Path) -> Option<PathBuf> {
+    let wanted = runtime_dir.join("gvfs");
+    contents.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let (Some(_), Some(mount), Some("fuse.gvfsd-fuse")) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        let mount = PathBuf::from(unescape_mount_field(mount));
+        (mount == wanted).then_some(mount)
+    })
+}
+
 /// The kind of a Linux mount: network by filesystem type, removable when
 /// udisks put it under `/media` or `/run/media` (where desktop
 /// auto-mounting puts USB sticks and SD cards), fixed otherwise. A
@@ -526,7 +546,49 @@ mod platform {
                 };
                 drive_at(entry.mount, name, kind, share)
             })
+            .chain(gvfs_drives(&contents))
             .collect()
+    }
+
+    /// The shares GVfs has mounted, one drive each (FIL-61). Listing the
+    /// GVfs folder is answered by the local `gvfsd-fuse` daemon, but a
+    /// wedged daemon blocks it, so it runs under the same time limit as a
+    /// network capacity probe; each share's own capacity probe is bounded
+    /// as for any network drive.
+    #[cfg(target_os = "linux")]
+    fn gvfs_drives(contents: &str) -> Vec<Drive> {
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            // SAFETY: getuid has no preconditions and can't fail.
+            .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
+        let Some(gvfs) = super::gvfs_mount_point(contents, &runtime_dir) else {
+            return Vec::new();
+        };
+        let dir = gvfs.clone();
+        let names = super::bounded_probe(
+            &gvfs,
+            super::NETWORK_PROBE_TIMEOUT,
+            super::stuck_probes(),
+            move || {
+                let entries = std::fs::read_dir(&dir).ok()?;
+                Some(entries.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+            },
+        );
+        let mut drives: Vec<Drive> = names
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| {
+                let mount = crate::network::GvfsMount::parse(name.to_str()?)?;
+                drive_at(
+                    gvfs.join(&name),
+                    mount.label,
+                    DriveKind::Network,
+                    mount.share,
+                )
+            })
+            .collect();
+        drives.sort_by(|a, b| a.name.cmp(&b.name));
+        drives
     }
 }
 
@@ -786,6 +848,31 @@ gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0
     }
 
     #[test]
+    fn the_gvfs_mount_is_this_sessions_own() {
+        let contents = "/dev/sda1 / ext4 rw 0 0
+gvfsd-fuse /run/user/1001/gvfs fuse.gvfsd-fuse rw 0 0
+gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0
+";
+        assert_eq!(
+            gvfs_mount_point(contents, Path::new("/run/user/1000")),
+            Some(PathBuf::from("/run/user/1000/gvfs"))
+        );
+        assert_eq!(
+            gvfs_mount_point(contents, Path::new("/run/user/1002")),
+            None
+        );
+        assert_eq!(
+            gvfs_mount_point(
+                "tmpfs /run/user/1000/gvfs tmpfs rw 0 0
+",
+                Path::new("/run/user/1000")
+            ),
+            None,
+            "only the GVfs FUSE type counts"
+        );
+    }
+
+    #[test]
     fn proc_mounts_lines_missing_a_field_are_skipped() {
         assert!(parse_proc_mounts("/dev/sda1 /\n\n//nas/s\n").is_empty());
     }
@@ -856,6 +943,20 @@ gvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0
         );
         let typed = ShareAddress::parse("smb://nas/Photos").unwrap();
         assert_eq!(locate_share(&typed, &drives), None);
+    }
+
+    /// FIL-61: a share GVfs mounted is found by a typed address too.
+    #[test]
+    fn a_typed_share_opens_in_its_gvfs_folder() {
+        let gvfs = "/run/user/1000/gvfs/smb-share:server=nas,share=photos,user=me";
+        let mount =
+            crate::network::GvfsMount::parse("smb-share:server=nas,share=photos,user=me").unwrap();
+        let drives = [drive(gvfs, None, mount.share)];
+        let typed = ShareAddress::parse("smb://NAS/Photos/2026").unwrap();
+        assert_eq!(
+            locate_share(&typed, &drives),
+            Some(PathBuf::from(gvfs).join("2026"))
+        );
     }
 
     fn timeout() -> Duration {

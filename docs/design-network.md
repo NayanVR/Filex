@@ -96,9 +96,13 @@ The location field resolves a share address before path rules:
 3. **Disconnect / eject**: `WNetCancelConnection2W`, `unmount(2)` via
    `diskutil unmount` semantics, `gio mount -u`. Context menu on network
    drives; refuse while a file operation targets the share.
-4. **Linux GVfs mounts in the drive list**: `fuse.gvfsd-fuse` is one mount
-   for all GVfs shares; list its `smb-share:server=…,share=…` children as
-   drives and parse them into `ShareAddress` so typed addresses find them.
+4. **Linux GVfs mounts in the drive list** — done (FIL-61):
+   `fuse.gvfsd-fuse` is one mount for all GVfs shares, at
+   `$XDG_RUNTIME_DIR/gvfs`. Each `smb-share:`, `nfs:`, `sftp:`, `dav(s):`,
+   `ftp(s):` and `afp-volume:` child is listed as a network drive (devices
+   such as `mtp:` and browse points such as `smb-server:` are not); SMB and
+   NFS ones parse into `ShareAddress` so typed addresses find them. The
+   folder is listed under the network probe's time limit.
 5. **Recent servers**: remember connected addresses (no credentials) for the
    Connect dialog.
 
