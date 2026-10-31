@@ -79,18 +79,27 @@ impl Workspace {
             .children(self.drives.iter().enumerate().map(|(ix, drive)| {
                 let path = drive.path.clone();
                 let selected = self.this_pc_selected == Some(ix);
+                let network = (drive.kind == DriveKind::Network).then(|| drive.clone());
                 // Explorer's model: a click selects the drive, a double
                 // click opens it.
-                drive_tile(&theme, ix, drive, selected).on_click(cx.listener(
-                    move |this, event: &ClickEvent, _window, cx| {
+                drive_tile(&theme, ix, drive, selected)
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                         if event.click_count() >= 2 {
                             this.navigate(path.clone(), cx);
                         } else {
                             this.this_pc_selected = Some(ix);
                             cx.notify();
                         }
-                    },
-                ))
+                    }))
+                    .when_some(network, |tile, drive| {
+                        tile.on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.this_pc_selected = Some(ix);
+                                this.open_network_drive_menu(&drive, event.position, window, cx);
+                            }),
+                        )
+                    })
             }))
             .child(connect_tile(&theme).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| this.open_connect(None, None, window, cx),

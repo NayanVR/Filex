@@ -6,9 +6,12 @@
 //! runner; the NetFS call itself is macOS-only.
 use super::ConnectError;
 use crate::network::ShareAddress;
+use std::path::Path;
 
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
+const EBUSY: i32 = 16;
+const EINVAL: i32 = 22;
 const EACCES: i32 = 13;
 const EEXIST: i32 = 17;
 const ENETUNREACH: i32 = 51;
@@ -37,6 +40,23 @@ pub(super) fn outcome(status: i32, address: &ShareAddress) -> Result<(), Connect
     }))
 }
 
+/// What `unmount(2)` failing with `errno` means. `EINVAL` (not a mount
+/// point) and `ENOENT` mean it's already gone.
+pub(super) fn unmount_outcome(errno: Option<i32>, mount: &Path) -> Result<(), ConnectError> {
+    match errno {
+        None | Some(EINVAL) | Some(ENOENT) => Ok(()),
+        Some(EBUSY) => Err(super::in_use(mount)),
+        Some(EPERM) => Err(ConnectError::Failed(format!(
+            "You aren’t allowed to eject {}.",
+            crate::listing::location_label(mount)
+        ))),
+        Some(errno) => Err(ConnectError::Failed(format!(
+            "Couldn’t eject {} (error {errno}).",
+            crate::listing::location_label(mount)
+        ))),
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(super) struct NetFsConnector;
 
@@ -53,6 +73,21 @@ impl super::ShareConnector for NetFsConnector {
         })?;
         outcome(status, address)?;
         super::locate_mounted(address)
+    }
+
+    /// Unmount with `unmount(2)` and no flags. Assumes macOS lets the user
+    /// who mounted a volume (NetFS mounts as the signed-in user) unmount
+    /// it without privileges, and that without `MNT_FORCE` it refuses with
+    /// `EBUSY` while files on it are open.
+    fn disconnect(&self, mount: &Path) -> Result<(), ConnectError> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(mount.as_os_str().as_bytes())
+            .map_err(|_| ConnectError::Failed("That path can’t be ejected.".into()))?;
+        // SAFETY: `path` is a valid NUL-terminated C string for the call.
+        let status = unsafe { libc::unmount(path.as_ptr(), 0) };
+        let errno =
+            (status != 0).then(|| std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+        unmount_outcome(errno, mount)
     }
 }
 
@@ -143,6 +178,23 @@ fn mount(url: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmount_errors_read_plainly() {
+        let mount = Path::new("/Volumes/Media");
+        assert_eq!(unmount_outcome(None, mount), Ok(()));
+        assert_eq!(unmount_outcome(Some(EINVAL), mount), Ok(()), "already gone");
+        assert_eq!(
+            unmount_outcome(Some(EBUSY), mount),
+            Err(super::super::in_use(mount))
+        );
+        assert_eq!(
+            unmount_outcome(Some(EPERM), mount),
+            Err(ConnectError::Failed(
+                "You aren’t allowed to eject Media.".into()
+            ))
+        );
+    }
 
     #[test]
     fn netfs_statuses_read_plainly() {

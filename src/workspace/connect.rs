@@ -3,6 +3,9 @@
 //! sit in a sign-in prompt for minutes) and opens the share once mounted.
 //! Opened from the sidebar's Drives section, the This PC page, and the
 //! location field when a typed share isn't connected.
+//!
+//! Disconnect / Eject (FIL-60) is a network drive's right-click action in
+//! the same two places, also on its own thread.
 
 use super::*;
 use filex::connect::{ConnectError, ConnectRequest};
@@ -202,6 +205,63 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Disconnect the network drive at `mount` off the UI thread, unless a
+    /// running file operation is using it. Leaves the share's folders for
+    /// This PC (Windows) or home, since they're about to vanish.
+    pub(super) fn disconnect_drive(&mut self, mount: PathBuf, cx: &mut Context<Self>) {
+        let label = filex::listing::location_label(&mount);
+        if jobs_touch(&self.jobs, &mount) {
+            self.notice = Some(
+                format!("Can’t disconnect {label} while files are being copied or moved there")
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.notice = Some(format!("Disconnecting {label}…").into());
+        cx.notify();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        filex::connect::disconnect_on_thread(
+            filex::connect::connector(),
+            mount.clone(),
+            move |result| {
+                let _ = tx.send(result);
+            },
+        );
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.notice = Some(match result {
+                    Ok(()) => {
+                        if this.cwd.starts_with(&mount) {
+                            this.leave_disconnected_share(cx);
+                        }
+                        format!("Disconnected {label}").into()
+                    }
+                    Err(error) => error.to_string().into(),
+                });
+                this.refresh_drives(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Go somewhere that still exists once the share on screen is gone.
+    fn leave_disconnected_share(&mut self, cx: &mut Context<Self>) {
+        let away = if cfg!(windows) {
+            Some(filex::drives::this_pc())
+        } else {
+            self.user_dirs.get("home").map(Path::to_path_buf)
+        };
+        if let Some(away) = away {
+            self.navigate(away, cx);
+        }
+    }
+
     pub(super) fn render_connect_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let dialog = self.connect.as_ref()?;
         let theme = *cx.theme();
@@ -299,6 +359,32 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn job(paths: &[&str]) -> Job {
+        Job {
+            id: 1,
+            label: "copying".into(),
+            progress: Default::default(),
+            paths: paths.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    /// FIL-60: a share is busy while a job reads from or writes to it.
+    #[test]
+    fn a_share_in_use_by_a_job_is_not_disconnected() {
+        let mount = Path::new("/mnt/nas");
+        let jobs = [
+            job(&["/home/me/a.txt", "/home/me/backup"]),
+            job(&["/mnt/nas/films/x.mkv", "/home/me/Videos"]),
+        ];
+        assert!(jobs_touch(&jobs, mount));
+        assert!(!jobs_touch(&jobs[..1], mount));
+        assert!(
+            !jobs_touch(&[job(&["/mnt/nas-old/x"])], mount),
+            "a sibling with the same prefix"
+        );
+        assert!(!jobs_touch(&[], mount));
+    }
 
     fn failed(state: &ConnectState) -> Option<&str> {
         state.failed.then_some(state.message.as_deref()).flatten()

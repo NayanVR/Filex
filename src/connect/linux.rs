@@ -55,6 +55,26 @@ pub(super) fn gio_outcome(output: &Output, address: &ShareAddress) -> GioOutcome
     }))
 }
 
+/// Read `gio mount -u`'s result for the share at `mount`. A share that's
+/// no longer mounted is a success.
+pub(super) fn unmount_outcome(
+    output: &Output,
+    mount: &std::path::Path,
+) -> Result<(), ConnectError> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() || stderr.contains("not mounted") {
+        return Ok(());
+    }
+    if stderr.contains("busy") {
+        return Err(super::in_use(mount));
+    }
+    let label = crate::listing::location_label(mount);
+    Err(ConnectError::Failed(match last_reason(&stderr) {
+        "" => format!("Couldn’t disconnect {label}."),
+        reason => format!("Couldn’t disconnect {label}: {reason}"),
+    }))
+}
+
 /// The last line of `gio`'s error output without its `gio: <url>: `
 /// prefix — the reason GVfs gave.
 fn last_reason(stderr: &str) -> &str {
@@ -125,6 +145,19 @@ impl super::ShareConnector for GvfsConnector {
         match gio_outcome(&output, address) {
             GioOutcome::Mounted => super::locate_mounted(address),
             GioOutcome::Failed(error) => Err(error),
+        }
+    }
+
+    /// `gio mount -u`, which unmounts GVfs shares and the network mounts
+    /// GIO lets the user unmount (fstab `user` mounts). It doesn't force:
+    /// a busy share is reported, not torn down.
+    fn disconnect(&self, mount: &std::path::Path) -> Result<(), ConnectError> {
+        let mut gio = Command::new("gio");
+        gio.arg("mount").arg("-u").arg(mount).env("LC_ALL", "C");
+        match run_cancellable(gio, &AtomicBool::new(false)) {
+            Ok(Some(output)) => unmount_outcome(&output, mount),
+            Ok(None) => Err(ConnectError::Cancelled),
+            Err(error) => Err(ConnectError::Failed(format!("Couldn’t run gio: {error}"))),
         }
     }
 }
@@ -198,6 +231,26 @@ mod tests {
             gio_outcome(&output(1, "", ""), &media()),
             GioOutcome::Failed(ConnectError::Failed(
                 "Couldn’t connect to Media (nas).".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn unmount_results_read_plainly() {
+        let mount = std::path::Path::new("/run/user/1000/gvfs/smb-share:server=nas,share=media");
+        assert_eq!(unmount_outcome(&output(0, "", ""), mount), Ok(()));
+        let busy = "gio: file:///run/user/1000/gvfs/x: Device or resource busy\n";
+        assert_eq!(
+            unmount_outcome(&output(2, "", busy), mount),
+            Err(super::super::in_use(mount))
+        );
+        let gone = "gio: file:///mnt/x: Containing mount for file /mnt/x not mounted\n";
+        assert_eq!(unmount_outcome(&output(2, "", gone), mount), Ok(()));
+        let denied = "gio: file:///mnt/nas: Not authorized to perform operation\n";
+        assert_eq!(
+            unmount_outcome(&output(2, "", denied), std::path::Path::new("/mnt/nas")),
+            Err(ConnectError::Failed(
+                "Couldn’t disconnect nas: Not authorized to perform operation".into()
             ))
         );
     }

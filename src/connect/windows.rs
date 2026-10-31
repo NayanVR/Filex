@@ -6,7 +6,7 @@
 //! open) build everywhere so they're tested on every CI runner.
 use super::ConnectError;
 use crate::network::ShareAddress;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Win32 errors `WNetAddConnection2W` reports that deserve their own
 /// message (winerror.h).
@@ -19,6 +19,9 @@ const ERROR_SESSION_CREDENTIAL_CONFLICT: u32 = 1219;
 const ERROR_CANCELLED: u32 = 1223;
 const ERROR_NO_NETWORK: u32 = 1222;
 const ERROR_LOGON_FAILURE: u32 = 1326;
+const ERROR_NOT_CONNECTED: u32 = 2250;
+const ERROR_OPEN_FILES: u32 = 2401;
+const ERROR_DEVICE_IN_USE: u32 = 2404;
 
 /// What a failed connect means for someone looking at the dialog.
 pub(super) fn error_for(code: u32, address: &ShareAddress) -> ConnectError {
@@ -48,6 +51,31 @@ pub(super) fn error_for(code: u32, address: &ShareAddress) -> ConnectError {
         ERROR_NO_NETWORK => "The network isn’t available.".to_owned(),
         _ => format!("Couldn’t connect to {name} (error {code})."),
     })
+}
+
+/// The connection name WNet knows a network drive by: `Z:` for a mapped
+/// drive's root (`Z:\`), else the UNC share itself.
+pub(super) fn connection_name(mount: &Path) -> Option<String> {
+    let text = mount.to_str()?;
+    let trimmed = text.trim_end_matches('\\');
+    let bytes = trimmed.as_bytes();
+    if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Some(trimmed.to_ascii_uppercase());
+    }
+    ShareAddress::parse(text)?.share_root().to_unc()
+}
+
+/// What `WNetCancelConnection2W`'s status means. A connection that's
+/// already gone is a success: there's nothing left to disconnect.
+pub(super) fn disconnect_outcome(code: u32, mount: &Path) -> Result<(), ConnectError> {
+    match code {
+        0 | ERROR_NOT_CONNECTED => Ok(()),
+        ERROR_OPEN_FILES | ERROR_DEVICE_IN_USE => Err(super::in_use(mount)),
+        _ => Err(ConnectError::Failed(format!(
+            "Couldn’t disconnect {} (error {code}).",
+            crate::listing::location_label(mount)
+        ))),
+    }
 }
 
 /// The drive letter Explorer's "Map network drive" offers first: the
@@ -108,6 +136,33 @@ impl super::ShareConnector for WNetConnector {
         connected_folder(address, letter)
             .ok_or_else(|| ConnectError::Failed("Couldn’t open the share.".into()))
     }
+
+    fn disconnect(&self, mount: &Path) -> Result<(), ConnectError> {
+        let Some(name) = connection_name(mount) else {
+            return Err(ConnectError::Failed(format!(
+                "{} isn’t a network drive.",
+                mount.display()
+            )));
+        };
+        disconnect_outcome(cancel_connection(&name), mount)
+    }
+}
+
+/// Cancel the WNet connection `name` (`Z:` or `\\server\share`).
+///
+/// Assumes `WNetCancelConnection2W`'s documented behaviour: without
+/// `fForce` it refuses (`ERROR_OPEN_FILES`) while files or folders on the
+/// share are open, rather than closing them under their owners; with
+/// `CONNECT_UPDATE_PROFILE` a mapping marked "Reconnect at sign-in" is
+/// forgotten too, as Explorer's Disconnect does.
+#[cfg(windows)]
+fn cancel_connection(name: &str) -> u32 {
+    use ::windows::Win32::NetworkManagement::WNet::{
+        CONNECT_UPDATE_PROFILE, WNetCancelConnection2W,
+    };
+    let name = ::windows::core::HSTRING::from(name);
+    // SAFETY: `name` is a NUL-terminated wide string that outlives the call.
+    unsafe { WNetCancelConnection2W(&name, CONNECT_UPDATE_PROFILE, false) }.0
 }
 
 /// Connect `share` (`\\server\share`), optionally as drive `letter`.
@@ -171,6 +226,45 @@ mod tests {
             matches!(&result, Err(ConnectError::Failed(m)) if m.starts_with("Couldn’t find")),
             "{result:?}"
         );
+    }
+
+    /// The real `WNetCancelConnection2W` on a share that was never
+    /// connected: nothing to do, so it succeeds. A UNC name rather than a
+    /// drive letter, so it can't touch the machine's real mappings.
+    #[cfg(windows)]
+    #[test]
+    fn disconnecting_a_share_that_isnt_connected_succeeds() {
+        use crate::connect::ShareConnector as _;
+        assert_eq!(
+            WNetConnector.disconnect(Path::new(r"\\filex-no-such-host-60\share")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn network_drives_are_named_for_wnet_by_letter_or_share() {
+        assert_eq!(connection_name(Path::new(r"z:\")), Some("Z:".into()));
+        assert_eq!(connection_name(Path::new("Z:")), Some("Z:".into()));
+        assert_eq!(
+            connection_name(Path::new(r"\\nas\Media\Movies")),
+            Some(r"\\nas\Media".into())
+        );
+        assert_eq!(connection_name(Path::new(r"C:\Users")), None);
+    }
+
+    #[test]
+    fn disconnect_statuses_read_plainly() {
+        let mount = Path::new(r"Z:\");
+        assert_eq!(disconnect_outcome(0, mount), Ok(()));
+        assert_eq!(disconnect_outcome(ERROR_NOT_CONNECTED, mount), Ok(()));
+        assert_eq!(
+            disconnect_outcome(ERROR_OPEN_FILES, mount),
+            Err(super::super::in_use(mount))
+        );
+        assert!(matches!(
+            disconnect_outcome(31, mount),
+            Err(ConnectError::Failed(m)) if m.ends_with("(error 31).")
+        ));
     }
 
     #[test]
