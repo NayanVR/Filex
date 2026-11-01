@@ -3,21 +3,27 @@
 //! buttons are a [`Variant`] × [`Size`]; icon buttons are square hit boxes
 //! in an [`IconSize`]. Callers chain `.on_click` (and any layout tweaks).
 
-use gpui::{Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
+use gpui::{BoxShadow, Div, ElementId, Rgba, SharedString, Stateful, div, prelude::*, px};
 
 use super::icon;
-use super::theme::Theme;
+use super::theme::{Theme, fixed, lift, sink};
 
 /// What the button means, which decides its colour.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Variant {
     /// The main action (the Enter-key choice): accent fill.
     Primary,
-    /// Everything else (Cancel, Refresh…): outlined, hover-tinted.
+    /// Everything else (Cancel, Refresh…): a filled control surface.
     Secondary,
-    /// Irreversible actions (Delete, Remove): warn fill.
+    /// Irreversible actions (Delete, Replace, Remove): danger-red fill.
     Danger,
+    /// Low-stakes actions beside others ("Learn more", "Undo"): accent
+    /// text, no fill until hovered.
+    Subtle,
 }
+
+/// How far a filled button lightens on hover and darkens while pressed.
+const FILL_SHIFT: f32 = 0.12;
 
 /// Text-button scale. Regular sits in dialogs and panes; Small fits slim
 /// bars (update banner) and inline editors.
@@ -54,7 +60,8 @@ fn shell(id: impl Into<ElementId>, label: impl Into<SharedString>, size: Size) -
         .flex()
         .flex_none()
         .items_center()
-        .justify_center();
+        .justify_center()
+        .font_weight(gpui::FontWeight::MEDIUM);
     let base = match size {
         Size::Regular => base.h(px(32.)).px_3().rounded_lg().text_sm(),
         Size::Small => base.h(px(22.)).px_2().rounded_md().text_xs(),
@@ -62,8 +69,8 @@ fn shell(id: impl Into<ElementId>, label: impl Into<SharedString>, size: Size) -
     base.child(label.into())
 }
 
-/// A text button. Filled variants dim slightly on hover so the fill (and
-/// its meaning) never disappears; the outlined one gains the hover tint.
+/// A text button. Filled variants lighten on hover and darken while
+/// pressed, so the fill (and its meaning) never disappears.
 pub fn button(
     theme: &Theme,
     id: impl Into<ElementId>,
@@ -73,24 +80,55 @@ pub fn button(
 ) -> Stateful<Div> {
     let base = shell(id, label, size).cursor_pointer();
     match variant {
-        Variant::Primary => filled(base, theme.accent, theme.on_accent),
-        Variant::Danger => filled(base, theme.warn, theme.on_accent),
+        Variant::Primary => filled(theme, base, theme.accent, theme.on_accent),
+        Variant::Danger => filled(theme, base, theme.danger, theme.on_danger),
         Variant::Secondary => {
-            let hover = theme.hover;
-            base.border_1()
-                .border_color(theme.border)
+            let (hover, pressed) = (theme.control_hover, theme.field);
+            base.bg(theme.control)
+                .border_1()
+                .border_color(theme.control_border)
+                .shadow(control_shadow(theme))
                 .text_color(theme.text)
                 .hover(move |s| s.bg(hover))
+                .active(move |s| s.bg(pressed))
+        }
+        Variant::Subtle => {
+            let hover = theme.hover;
+            base.text_color(theme.accent).hover(move |s| s.bg(hover))
         }
     }
 }
 
-fn filled(base: Stateful<Div>, fill: Rgba, ink: Rgba) -> Stateful<Div> {
-    base.bg(fill).text_color(ink).hover(|s| s.opacity(0.9))
+/// A flat fill with a faint lit top edge, a darker bottom lip and a small
+/// contact shadow: a pressable surface, not a flat chip and not a glossy
+/// gradient.
+fn filled(theme: &Theme, base: Stateful<Div>, fill: Rgba, ink: Rgba) -> Stateful<Div> {
+    base.bg(fill)
+        .shadow(fill_shadow(theme))
+        .text_color(ink)
+        .hover(move |s| s.bg(lift(fill, FILL_SHIFT)))
+        .active(move |s| s.bg(sink(fill, FILL_SHIFT)))
 }
 
-/// A button that can't be pressed right now: outlined, dimmed, no hover
-/// and no pointer cursor. Callers still own whether to attach a handler.
+fn fill_shadow(theme: &Theme) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(1.), gpui::rgb_to_hsla(theme.float_shadow)).blur_radius(px(2.)),
+        BoxShadow::new(px(0.), px(1.), gpui::rgb_to_hsla(fixed::gloss())).inset(),
+        BoxShadow::new(px(0.), px(-1.), gpui::rgb_to_hsla(fixed::lip())).inset(),
+    ]
+}
+
+fn control_shadow(theme: &Theme) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(1.), gpui::rgb_to_hsla(theme.shadow)).blur_radius(px(2.)),
+        super::sheen(theme),
+    ]
+}
+
+/// A button that can't be pressed right now: a recessed `field` fill with
+/// dim text, no hover and no pointer cursor. Full opacity, so it reads as
+/// unavailable rather than faded. Callers still own whether to attach a
+/// handler.
 pub fn disabled_button(
     theme: &Theme,
     id: impl Into<ElementId>,
@@ -98,10 +136,8 @@ pub fn disabled_button(
     size: Size,
 ) -> Stateful<Div> {
     shell(id, label, size)
-        .border_1()
-        .border_color(theme.border)
+        .bg(theme.field)
         .text_color(theme.text_dim)
-        .opacity(0.6)
 }
 
 /// A square icon-only button. The glyph is tinted explicitly (gpui's

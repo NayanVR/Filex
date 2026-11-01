@@ -5,6 +5,7 @@
 //! dropped onto it.
 
 use super::*;
+use crate::ui::icon_art::Symbol;
 
 /// A drive tile's fixed width; tiles wrap to fill the pane.
 const TILE_WIDTH: f32 = 260.;
@@ -28,7 +29,7 @@ impl Workspace {
         self.load_error = None;
         self.selection.clear();
         self.renaming = None;
-        self.pending_delete = None;
+        self.delete_prompt = None;
         self.sync_path(cx);
         self.refresh_drives(cx);
         self.refresh_preview(cx);
@@ -61,7 +62,7 @@ impl Workspace {
         if self.drives.is_empty() {
             return ui::pane::message_state(
                 &theme,
-                "icons/hard-drive.svg",
+                Symbol::Drive.path(),
                 "Looking for drives",
                 "Your drives will appear here in a moment.",
             );
@@ -192,7 +193,7 @@ fn drive_tile(
 pub(super) fn drive_icon(kind: DriveKind) -> &'static str {
     match kind {
         DriveKind::Network => "icons/server.svg",
-        DriveKind::Fixed | DriveKind::Removable => "icons/hard-drive.svg",
+        DriveKind::Fixed | DriveKind::Removable => Symbol::Drive.path(),
     }
 }
 
@@ -218,7 +219,7 @@ pub(super) fn drive_count(n: usize) -> String {
 mod tests {
     use filex::drives::{Capacity, Drive, DriveKind};
 
-    use super::{drive_count, drive_detail, drive_icon};
+    use super::{Symbol, drive_count, drive_detail, drive_icon};
 
     fn nas(capacity: Option<Capacity>) -> Drive {
         Drive {
@@ -248,8 +249,8 @@ mod tests {
     #[test]
     fn network_drives_get_the_server_glyph() {
         assert_eq!(drive_icon(DriveKind::Network), "icons/server.svg");
-        assert_eq!(drive_icon(DriveKind::Fixed), "icons/hard-drive.svg");
-        assert_eq!(drive_icon(DriveKind::Removable), "icons/hard-drive.svg");
+        assert_eq!(drive_icon(DriveKind::Fixed), Symbol::Drive.path());
+        assert_eq!(drive_icon(DriveKind::Removable), Symbol::Drive.path());
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub fn update_banner(theme: &Theme) -> Div {
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg)
-        .shadow_xs()
+        .shadow(super::raised(theme))
         .text_xs()
 }
 

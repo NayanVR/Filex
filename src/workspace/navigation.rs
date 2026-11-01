@@ -178,7 +178,6 @@ impl Workspace {
         if !same_rows {
             self.selection.clear();
             self.renaming = None;
-            self.pending_delete = None;
         }
         self.entries = entries;
         self.meta_pending = false;
@@ -241,10 +240,10 @@ impl Workspace {
         self.meta_pending = false;
         self.load_error = None;
         self.selection.clear();
-        // Any in-flight rename or armed delete points at rows
-        // that no longer exist; drop them.
+        // Any in-flight rename points at rows that no longer exist, and
+        // an open delete prompt belongs to the folder being left.
         self.renaming = None;
-        self.pending_delete = None;
+        self.delete_prompt = None;
         // Only jump to the top when this is a real navigation. A
         // same-directory refresh (after a delete, paste, or rename)
         // must keep the user's scroll position — yanking back to

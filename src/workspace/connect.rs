@@ -299,13 +299,19 @@ impl Workspace {
             )
             .min_w(px(84.))
         } else {
-            ui::modal::button(&theme, "connect-go", "Connect", true).on_click(
+            ui::modal::button(
+                &theme,
+                "connect-go",
+                "Connect",
+                ui::button::Variant::Primary,
+            )
+            .on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.submit_connect(window, cx)),
             )
         };
         Some(ui::modal::present(
             "connect-backdrop-in",
-            ui::modal::backdrop("connect-backdrop")
+            ui::modal::backdrop(&theme, "connect-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.cancel_connect(window, cx);
                 }))
@@ -340,9 +346,9 @@ impl Workspace {
                             )
                         })
                         .child(
-                            ui::modal::buttons()
+                            ui::modal::buttons(&theme)
                                 .child(
-                                    ui::modal::button(&theme, "connect-cancel", "Cancel", false)
+                                    ui::modal::button(&theme, "connect-cancel", "Cancel", ui::button::Variant::Secondary)
                                         .on_click(cx.listener(
                                             |this, _: &ClickEvent, window, cx| {
                                                 this.cancel_connect(window, cx);

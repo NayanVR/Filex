@@ -74,12 +74,7 @@ impl Grid {
                 }).detach();
             }
         }
-        ui::icon::file_icon(
-            &ui::theme::Theme::dark(),
-            filex::listing::FileKind::of(&name, false),
-            &name,
-            edge,
-        )
+        ui::icon::file_icon(&ui::theme::Theme::dark(), &name, edge)
     }
 }
 impl Render for Grid {

@@ -13,7 +13,7 @@ use gpui::{
     SharedString, Task, Window, canvas, div, point, prelude::*, px, size,
 };
 
-use filex::listing::{FileKind, format_size};
+use filex::listing::format_size;
 
 use crate::ui::button::{self, IconSize, Size, Variant};
 use crate::ui::icon;
@@ -549,7 +549,6 @@ impl PreviewWindow {
             .as_ref()
             .map(|s| file_name(s.current()))
             .unwrap_or_default();
-        let kind = FileKind::of(&name, false);
         let detail = self
             .facts
             .as_ref()
@@ -563,7 +562,7 @@ impl PreviewWindow {
             .justify_center()
             .gap_3()
             .p_6()
-            .child(icon::file_icon(theme, kind, &name, 96.))
+            .child(icon::file_icon(theme, &name, 96.))
             .child(
                 div()
                     .max_w(px(420.))

@@ -16,11 +16,11 @@ use super::theme::Theme;
 /// The settings card: a centred modal panel floating over the browse
 /// view. Fixed width with a scrollable page. Callers chain `.on_click`
 /// (to stop the backdrop's click-through) and the rows.
+/// Solid: its columns and groups paint their own fills.
 pub fn settings_card(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
-    super::card(theme)
+    super::solid_card(theme)
         .id(id)
         .w(px(780.))
-        .bg(theme.elevated)
         .overflow_hidden()
 }
 
@@ -140,7 +140,7 @@ pub fn segment(
         .child(label.into());
     if selected {
         base.bg(theme.elevated)
-            .shadow_xs()
+            .shadow(super::raised(theme))
             .text_color(theme.text)
             .font_weight(gpui::FontWeight::MEDIUM)
     } else {

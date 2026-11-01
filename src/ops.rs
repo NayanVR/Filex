@@ -293,6 +293,26 @@ pub fn undo_batch(batch: &[AppliedOp]) -> Result<()> {
     Ok(())
 }
 
+/// Delete `path` for good: no trash, no undo. A directory goes with
+/// everything inside it. A symlink (or Windows junction) is removed
+/// itself and never followed: `symlink_metadata` reports the link, not
+/// its target, so deleting a link can't reach what it points to. A link
+/// to a directory on Windows needs `remove_dir`, a file link
+/// `remove_file`. Callers confirm with the user first and run this off
+/// the UI thread.
+pub fn delete_permanently(path: &Path) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    let removed = if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else if meta.is_symlink() {
+        std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))
+    } else {
+        std::fs::remove_file(path)
+    };
+    removed.with_context(|| format!("deleting {}", path.display()))
+}
+
 /// Reverse a completed operation. Blocking — run on a background
 /// executor. Undoing a copy removes the copy (delete-to-trash will
 /// soften this in a later slice).
@@ -632,6 +652,39 @@ mod tests {
         undo(&applied).unwrap();
         assert!(from.exists() && !to.exists());
         assert_eq!(fs::read_to_string(&from).unwrap(), "hello");
+    }
+
+    #[test]
+    fn delete_permanently_removes_files_and_whole_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "x").unwrap();
+        let folder = dir.path().join("tree");
+        fs::create_dir_all(folder.join("inner")).unwrap();
+        fs::write(folder.join("inner").join("b.txt"), "y").unwrap();
+
+        delete_permanently(&file).unwrap();
+        delete_permanently(&folder).unwrap();
+        assert!(!file.exists() && !folder.exists());
+        // Nothing went to a trash: there's nothing to undo or restore.
+        assert!(delete_permanently(&file).is_err(), "already gone");
+    }
+
+    /// Deleting a link to a folder removes the link and leaves the folder
+    /// and its contents alone.
+    #[cfg(unix)]
+    #[test]
+    fn delete_permanently_never_follows_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("keep");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("c.txt"), "z").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        delete_permanently(&link).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert!(target.join("c.txt").exists());
     }
 
     #[test]

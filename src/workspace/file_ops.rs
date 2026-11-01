@@ -105,15 +105,15 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Trash every selected item (context-menu "Move to Trash" — no
-    /// two-press confirm, the click is already explicit).
+    /// Trash every selected item (the context menu's Delete / Move to
+    /// Trash), asking first as the keyboard does.
     pub(super) fn trash_selected(&mut self, cx: &mut Context<Self>) {
-        let paths = self
-            .selected_paths()
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect();
-        self.delete_paths(paths, cx);
+        let items = self.selected_paths();
+        let Some(label) = describe_items(&items) else {
+            return;
+        };
+        let paths = items.into_iter().map(|(path, _)| path).collect();
+        self.request_delete(paths, label, false, cx);
     }
 
     /// Begin renaming the selected browse entry (F2): the row's name
@@ -331,7 +331,7 @@ impl Workspace {
             paths,
             dirs,
             label,
-            kind: FileKind::of(&name, lead_dir),
+            is_dir: lead_dir,
             name,
             theme,
             position: Point::default(),
@@ -567,12 +567,15 @@ impl Workspace {
         .detach();
     }
 
-    /// Move the selected browse entry to the OS trash. With
-    /// confirm_delete on (the default), the first press arms and the
-    /// second press on the same entry deletes — a modal dialog can
-    /// replace this once conflict prompts exist.
-    pub(super) fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        if self.renaming.is_some() || !self.query.is_empty() || self.settings_open {
+    /// Delete the selected browse entries from the keyboard: to the OS
+    /// trash (Delete), or for good (`permanent`, Shift+Delete). Asks
+    /// first through the delete prompt (see `delete_prompt`).
+    pub(super) fn delete_selected(&mut self, permanent: bool, cx: &mut Context<Self>) {
+        if self.renaming.is_some()
+            || !self.query.is_empty()
+            || self.settings_open
+            || self.delete_prompt.is_some()
+        {
             return;
         }
         let items = self.selected_paths();
@@ -580,15 +583,7 @@ impl Workspace {
             return;
         };
         let paths: Vec<PathBuf> = items.into_iter().map(|(path, _)| path).collect();
-        let confirm = self.settings.read(cx).settings().confirm_delete;
-        if confirm && self.pending_delete.as_deref() != Some(&paths[..]) {
-            self.pending_delete = Some(paths);
-            self.notice = Some(format!("press again to move {label} to the trash").into());
-            cx.notify();
-            return;
-        }
-        self.pending_delete = None;
-        self.delete_paths(paths, cx);
+        self.request_delete(paths, label, permanent, cx);
     }
 
     /// Move every path to the OS trash as one undo batch (off-thread;

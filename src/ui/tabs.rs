@@ -49,6 +49,12 @@ pub fn tab_group() -> Div {
         .items_center()
         .gap_1()
         .overflow_hidden()
+        // The clip would also cut the active tab's raised shadow (it
+        // reaches ~3px past the tab), so pad the clip box by 4px and
+        // pull the group back out by the same amount: the shadow fits
+        // and nothing moves.
+        .p_1()
+        .m_neg_1()
 }
 
 /// The empty run of the bar after the tabs. Tagged as the window's drag
@@ -61,7 +67,8 @@ pub fn drag_region() -> Div {
         .window_control_area(gpui::WindowControlArea::Drag)
 }
 
-/// One tab: the active one is raised — canvas fill and a soft shadow, so
+/// One tab: the active one is raised — canvas fill, a soft shadow and a lit
+/// top edge, so
 /// it reads as the page the content below belongs to; the rest sit flat
 /// on the shell with hover feedback. Callers add the label + close
 /// control and chain handlers.
@@ -83,7 +90,7 @@ pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Di
         .overflow_hidden();
     if active {
         base.bg(theme.bg)
-            .shadow_xs()
+            .shadow(super::raised(theme))
             .text_color(theme.text)
             .font_weight(gpui::FontWeight::MEDIUM)
     } else {

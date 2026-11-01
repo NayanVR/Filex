@@ -18,7 +18,7 @@ pub fn jobs_bar(theme: &Theme) -> Div {
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg)
-        .shadow_xs()
+        .shadow(super::raised(theme))
         .overflow_hidden()
 }
 

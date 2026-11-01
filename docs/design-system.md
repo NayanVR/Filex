@@ -7,22 +7,38 @@ this page says where to look and what not to do.
 
 - **Semantic slots** on `Theme` (`bg`, `panel`, `elevated`, `hover`,
   `field`, `shadow`, `selected`, `stripe`, `border`, `text`, `text_dim`,
-  `accent`, `on_accent`, `accent_selection`, `warn`, `success`). `hover` and
-  `field` are translucent, so one value reads on both surfaces below.
+  `accent`, `on_accent`, `accent_selection`, `warn`, `success`, `danger`,
+  `on_danger`, `danger_tint`, the control slots `control`,
+  `control_hover`, `control_border`, the dialog slots `dialog_footer`,
+  `scrim`, and the material slots `glass`, `glass_edge`, `sheen`,
+  `float_shadow`, `glow`, `blur`). `hover` and `field` are translucent, so
+  one value reads on both surfaces below.
   Read via `cx.theme()`. Dark, light and OLED palettes; accent presets
   and custom hex are applied by `Theme::resolve`.
+- **`warn` vs `danger`:** `warn` is for warnings and errors (failed roots,
+  error rings on fields). Destructive actions (Danger buttons, Delete in
+  menus, a destructive dialog's glyph) use red `danger`: amber read as a
+  warning, not as loss.
+- **Contrast is tested** (`text_and_fills_meet_contrast_targets`): text on
+  every surface it lands on, `warn` text and the ink on accent and danger
+  fills hold 4.5:1 in all three palettes, and `text_dim` on the shell glow
+  holds 4.5:1 for every accent preset. Light `text_dim`, `warn` and the
+  glow mix (6%) were tuned on 2026-11-01 to pass.
 - **Fixed palettes** in `theme::fixed`: identity colours that don't change
-  with the theme (file-kind tints, Finder tag colours, paper artwork,
-  modal scrim).
+  with the theme (brand blues, Finder tag colours, the filled-button
+  `gloss` and `lip`).
+- **Icon colours** live in `ui::icon_palette`: computed from OKLCH hue
+  angles, never spelled (docs/design-icons.md).
 - **Rule:** `theme.rs` is the only UI file that spells a hex value. A new
   colour becomes a `Theme` slot if it differs per palette, otherwise a
   `fixed` fn.
 
 ## Surfaces (2026-10 refresh)
 
-- **Shell** (`panel`): tab bar, nav bar, sidebar and status bar are one
-  continuous surface. No borders between them — don't add `border_b`
-  to a bar.
+- **Shell** (`ui::shell_backdrop`): tab bar, nav bar, sidebar and status
+  bar are one continuous surface, a diagonal wash from the accent-tinted
+  `glow` (top left) into `panel`. No borders between them — don't add
+  `border_b` to a bar. OLED keeps a flat black shell (`glow == panel`).
 - **Canvas** (`bg`): the content heading, the file pane and the details
   panel sit on one raised card (`rounded_xl`, hairline `border`,
   `ui::soft_shadow`) inset from the window edge. Children of the canvas
@@ -32,15 +48,53 @@ this page says where to look and what not to do.
   ClearType text for the *whole window* whenever its background isn't
   `Opaque` (`Window::should_use_subpixel_rendering`), which visibly
   softens every label. Tried with Mica Alt in 2026-10 and rejected;
-  revisit only if gpui-ce keeps ClearType on opaque regions. Dividers *inside* the canvas
+  revisit only if gpui-ce keeps ClearType on opaque regions. Glass is done
+  *inside* the window instead (below). Dividers *inside* the canvas
   (column header, details panel edge) are fine.
+
+## Glass material (2026-10-30)
+
+Windows 11 and macOS have moved to translucent, lit surfaces; a flat
+fill now reads as dated. Filex gets there without a translucent window:
+
+- **Glass** (`ui::glass`, `ui::card`): transient popovers — context and
+  dropdown menus, tooltips. A `glass` tint over gpui-ce's in-window
+  `backdrop_blur` (Metal, DirectX and wgpu all implement it; it clips to
+  the corner radius), a `glass_edge` hairline, a `sheen` top edge and a
+  soft `float_shadow`. The window stays opaque, so ClearType stays on.
+- **Solid glass** (`ui::solid_card`): dialogs, settings, onboarding
+  cards. Same edge, sheen and shadow on opaque `elevated`, no blur. Over
+  the modal scrim, real glass reads as murky grey and outline-only fields
+  vanish into it; cards that paint their own fills would hide the blur
+  anyway.
+- **Lit edges** (`ui::sheen`, `ui::raised`): a 1px inset highlight on
+  raised things — the canvas, active tab and segment, focused field, the
+  active sidebar row, Secondary buttons. Filled buttons are a flat fill
+  with a faint `fixed::gloss` top edge and a darker `fixed::lip` bottom
+  edge (the visible top-lit gradient was dropped on 2026-11-01).
+- **Dialogs** (`ui::modal`): a 420px solid card with 24px padding and a
+  deeper `dialog_shadow`; an optional `glyph` tile beside the title and
+  message (`intro`) says what kind of decision it is (`Tone::Danger` on
+  `danger_tint`, `Tone::Neutral` on `selected`; leave it out of plain
+  forms); `buttons(theme)` is a footer band on `dialog_footer` that spans
+  the card below a `glass_edge` rule. The `scrim` is themed (30% ink on
+  light, 50% black on dark), never blurred.
+- **Cost:** a blur pass only while a menu or tooltip is on screen, never
+  on the canvas, the shell or anything inside a virtualized list. The
+  shell gradient is one quad. Search and navigation paths are unchanged.
+- **Settings → Appearance → Transparency effects** (`transparency_effects`)
+  turns glass opaque and drops the blur (`Theme::with_transparency`), for
+  readability or a weak GPU.
+- **Don't** blur the full-window scrim or any large always-on surface
+  (the sidebar, the canvas): with nothing but a smooth gradient behind
+  them, the blur adds nothing and costs a full-size pass every frame.
 - **Fields** (`top_bar::field`): filled `field` recess at rest, no
   outline; focus lifts to `bg` with an accent ring, errors ring in `warn`.
-- **Elevated** (`elevated`): menus, dialogs and tooltips (`ui::card`)
-  sit one step above the canvas — white on light, lighter graphite on
+- **Elevated** (`elevated`): dialogs (`ui::solid_card`), and menus and
+  tooltips with transparency off, sit one step above the canvas — white on light, lighter graphite on
   dark. Never use `panel` for something that floats.
 - **Raised selection** (active tab, active segment): `bg` fill +
-  `shadow_xs` on a `field`/`panel` track.
+  `ui::raised` (contact shadow + lit edge) on a `field`/`panel` track.
 
 ## Window chrome
 
@@ -107,18 +161,30 @@ this page says where to look and what not to do.
 | Text button | `button::button(theme, id, label, Variant, Size)` |
 | Button that can't be pressed yet | `button::disabled_button` |
 | Icon-only button | `button::icon_button(theme, id, icon, color, IconSize)` |
-| Floating surface (menu, dialog, card) | `ui::card` |
-| Dialog | `modal::{backdrop, panel, title, message, buttons, button}` |
+| Popover (menu, dropdown) | `ui::card` (glass) |
+| Dialog or card holding its own fills | `ui::solid_card` |
+| Glass on a custom shape (tooltip) | `ui::glass(element, theme)` |
+| Raised selection / lit edge | `ui::raised`, `ui::sheen` |
+| Dialog | `modal::{backdrop, panel, intro, glyph, title, message, buttons, button}` |
 | Context menu | `menu::{overlay, panel, scroll_panel, model_row, icon_bar, icon_button, separator, heading}`; contents from `filex::context_menu` |
 | Tooltip | `tooltip::text_tooltip` |
 | Key hint | `kbd::keycap` |
 | Icon glyph | `icon::ui_icon` (always pass an explicit colour) |
+| File or folder icon | `icon::file_icon(theme, name, edge)`, `icon::folder_icon` — see docs/design-icons.md |
+| Place / drive glyph | `icon_art::Symbol::*.path()` with `icon::ui_icon` |
 | Text field frame | `top_bar::field(theme, focused, error)` |
 | Window caption buttons | `window_controls::caption_buttons` |
 
 **Button variants:** `Primary` (accent fill, the Enter-key choice),
-`Secondary` (outlined), `Danger` (warn fill, for irreversible actions).
-Filled buttons dim on hover rather than losing their fill. **Sizes:**
+`Secondary` (a filled `control` surface with a `control_border` edge),
+`Danger` (`danger` fill with `on_danger` ink, for actions that lose data:
+delete, replace), `Subtle` (accent text, no fill until hovered, for
+low-stakes actions beside others: "Select all", "Undo"). Labels are Medium
+weight. Filled buttons lighten 12% on hover and darken 12% while pressed;
+Secondary takes `control_hover`, then `field` while pressed. Disabled
+(`disabled_button`) is a `field` fill with `text_dim`, at full opacity. In
+dialogs, `modal::button` takes a `Variant` and a 96px minimum width.
+**Sizes:**
 `Regular` (32px, dialogs and panes), `Small` (22px, slim bars and inline
 editors). **Icon sizes:** `Large` 30/18 (toolbar), `Medium` 24/16 (tab
 strip), `Small` 20/12 (inline ✕).

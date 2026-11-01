@@ -62,6 +62,33 @@ fn with_alpha(c: Rgba, a: f32) -> Rgba {
     Rgba { alpha: a, ..c }
 }
 
+/// `c` moved fraction `t` of the way toward white: a filled button's
+/// hover (see [`super::button`]).
+pub fn lift(c: Rgba, t: f32) -> Rgba {
+    Rgba {
+        alpha: c.alpha,
+        ..blend(c, rgb(0xffffff), t)
+    }
+}
+
+/// `c` moved fraction `t` of the way toward black: a filled button while
+/// pressed.
+pub fn sink(c: Rgba, t: f32) -> Rgba {
+    Rgba {
+        alpha: c.alpha,
+        ..blend(c, rgb(0x000000), t)
+    }
+}
+
+/// How far the shell's top-left glow leans toward the accent: enough to
+/// read as a tint under the glass, not as a coloured window. Light stays
+/// low so `text_dim` sidebar labels at the top left keep 4.5:1.
+const LIGHT_GLOW_MIX: f32 = 0.06;
+const DARK_GLOW_MIX: f32 = 0.12;
+
+/// Default backdrop blur (px) behind glass surfaces.
+const GLASS_BLUR: f32 = 28.;
+
 /// Composite `over` onto `base` at fraction `t` (opaque result).
 fn blend(base: Rgba, over: Rgba, t: f32) -> Rgba {
     Rgba::new(
@@ -115,11 +142,52 @@ pub struct Theme {
     pub on_accent: Rgba,
     /// [`Theme::accent`] at low alpha — the text-selection highlight.
     pub accent_selection: Rgba,
-    /// Warnings (failed roots, missing permissions, destructive menu
-    /// items).
+    /// Warnings and errors: failed roots, missing permissions, error rings
+    /// on fields. Not for destructive actions; those are
+    /// [`Theme::danger`].
     pub warn: Rgba,
     /// Success / healthy state.
     pub success: Rgba,
+    /// Destructive actions: Danger buttons, destructive menu rows and a
+    /// destructive dialog's glyph. Red, so it reads as loss rather than
+    /// as a warning.
+    pub danger: Rgba,
+    /// Label ink on a [`Theme::danger`] fill (white on light, dark ink on
+    /// the lighter dark-theme red, as [`Theme::on_accent`] does).
+    pub on_danger: Rgba,
+    /// Tile behind a destructive dialog's glyph.
+    pub danger_tint: Rgba,
+    /// Fill of Secondary buttons: a pressable surface on any background.
+    pub control: Rgba,
+    /// [`Theme::control`] under the pointer.
+    pub control_hover: Rgba,
+    /// 1px edge of a [`Theme::control`] fill.
+    pub control_border: Rgba,
+    /// The recessed band behind a dialog's buttons, a step below
+    /// [`Theme::elevated`].
+    pub dialog_footer: Rgba,
+    /// The full-window dim behind a modal dialog. Never blurred.
+    pub scrim: Rgba,
+    /// Glass: the translucent fill of floating surfaces (menus, dialogs,
+    /// tooltips). It tints a blurred copy of what's behind it
+    /// ([`Theme::blur`]); with transparency off it is just
+    /// [`Theme::elevated`].
+    pub glass: Rgba,
+    /// Hairline around a glass surface.
+    pub glass_edge: Rgba,
+    /// Specular top edge of raised and glass surfaces, painted as a 1px
+    /// inset highlight ([`super::sheen`]) so they read as lit from above.
+    pub sheen: Rgba,
+    /// Shadow under floating surfaces: deeper than [`Theme::shadow`], which
+    /// only has to lift the canvas off the shell.
+    pub float_shadow: Rgba,
+    /// The accent-tinted colour the shell gradient fades from at its top
+    /// left corner, so the chrome has depth instead of one flat grey.
+    /// Equal to [`Theme::panel`] when the shell must stay flat (OLED).
+    pub glow: Rgba,
+    /// Backdrop blur radius (px) behind glass. 0 when transparency is off:
+    /// no blur pass is emitted and [`Theme::glass`] is opaque.
+    pub blur: f32,
     /// List row height (px). Set from the density setting, not the
     /// palette — a metric carried alongside the colors so every component
     /// that already takes `&Theme` gets it without a second parameter.
@@ -153,9 +221,24 @@ impl Theme {
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
+            danger: rgb(0xf26b63),
+            on_danger: rgb(0x1a0d0c),
+            danger_tint: rgb(0x3d2321),
+            control: rgb(0x34353b),
+            control_hover: rgb(0x3c3d44),
+            control_border: rgb(0x45474e),
+            dialog_footer: rgb(0x202126),
+            scrim: rgba(0x00000080),
+            glass: rgba(0x2a2b31c7),
+            glass_edge: rgba(0xffffff1c),
+            sheen: rgba(0xffffff14),
+            float_shadow: rgba(0x00000080),
+            glow: rgb(0x131416),
+            blur: GLASS_BLUR,
             row_height: COMFORTABLE_ROW_HEIGHT,
             icon_size: COMFORTABLE_ICON_SIZE,
         }
+        .with_glow(DARK_GLOW_MIX)
     }
 
     /// The light palette: a white canvas raised on a cool grey shell, and
@@ -172,15 +255,30 @@ impl Theme {
             stripe: rgb(0xf7f8fa),
             border: rgb(0xdfe3e9),
             text: rgb(0x1a2230),
-            text_dim: rgb(0x667085),
+            text_dim: rgb(0x5f6878),
             accent: rgb(0x087eaf),
             on_accent: rgb(0xffffff),
             accent_selection: rgba(0x087eaf3d),
-            warn: rgb(0xc0851a),
+            warn: rgb(0x9a5f08),
             success: rgb(0x2ba55a),
+            danger: rgb(0xc4312b),
+            on_danger: rgb(0xffffff),
+            danger_tint: rgb(0xfde8e7),
+            control: rgb(0xffffff),
+            control_hover: rgb(0xf4f6f8),
+            control_border: rgb(0xd0d5dd),
+            dialog_footer: rgb(0xf7f8fa),
+            scrim: rgba(0x1018284d),
+            glass: rgba(0xfcfdfed6),
+            glass_edge: rgba(0x1018281a),
+            sheen: rgba(0xffffffd9),
+            float_shadow: rgba(0x10182824),
+            glow: rgb(0xedf0f4),
+            blur: GLASS_BLUR,
             row_height: COMFORTABLE_ROW_HEIGHT,
             icon_size: COMFORTABLE_ICON_SIZE,
         }
+        .with_glow(LIGHT_GLOW_MIX)
     }
 
     /// A true-black variant of the dark palette for OLED screens: pure
@@ -204,9 +302,31 @@ impl Theme {
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
+            danger: rgb(0xf26b63),
+            on_danger: rgb(0x1a0d0c),
+            danger_tint: rgb(0x2e1716),
+            control: rgb(0x1f2023),
+            control_hover: rgb(0x292a2e),
+            control_border: rgb(0x3a3b40),
+            dialog_footer: rgb(0x0e0e10),
+            scrim: rgba(0x000000a6),
+            glass: rgba(0x151517d9),
+            glass_edge: rgba(0xffffff1c),
+            sheen: rgba(0xffffff12),
+            float_shadow: rgba(0x00000000),
+            // No glow: unlit pixels stay off.
+            glow: rgb(0x000000),
+            blur: GLASS_BLUR,
             row_height: COMFORTABLE_ROW_HEIGHT,
             icon_size: COMFORTABLE_ICON_SIZE,
         }
+    }
+
+    /// Lean [`Theme::glow`] `mix` of the way from the shell toward the
+    /// accent.
+    fn with_glow(mut self, mix: f32) -> Self {
+        self.glow = blend(self.panel, self.accent, mix);
+        self
     }
 
     /// Recolor the accent slots to `accent`, deriving the ink that sits on
@@ -226,6 +346,32 @@ impl Theme {
         // touch stronger on dark bases so it reads against low contrast.
         let mix = if light_base { 0.16 } else { 0.30 };
         self.selected = blend(self.bg, accent, mix);
+        // Re-tint the shell glow, unless this palette keeps a flat shell.
+        if self.glow != self.panel {
+            let glow_mix = if light_base {
+                LIGHT_GLOW_MIX
+            } else {
+                DARK_GLOW_MIX
+            };
+            self = self.with_glow(glow_mix);
+        }
+        self
+    }
+
+    /// Whether this is a dark palette (dark or OLED): icon artwork has a
+    /// dimmed variant for it.
+    pub fn is_dark(&self) -> bool {
+        luminance(self.bg) < 0.5
+    }
+
+    /// Apply the transparency setting. Off makes glass the opaque
+    /// [`Theme::elevated`] and drops the backdrop blur, for readability or
+    /// to spare a weak GPU the blur pass.
+    pub fn with_transparency(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.glass = self.elevated;
+            self.blur = 0.;
+        }
         self
     }
 
@@ -267,7 +413,6 @@ impl Theme {
 pub mod fixed {
     use gpui::{Rgba, rgb, rgba};
 
-    use filex::listing::FileKind;
     use filex::tags::TagColor;
 
     /// The Filex mark's light and deep blues (`assets/branding/filex.svg`),
@@ -302,35 +447,16 @@ pub mod fixed {
         rgb(0xffffff)
     }
 
-    /// The full-window dim behind a modal dialog.
-    pub fn scrim() -> Rgba {
-        rgba(0x00000099)
+    /// The faint lit top edge of a filled (accent / danger) button: white
+    /// light catching the rim, whatever the fill colour.
+    pub fn gloss() -> Rgba {
+        rgba(0xffffff33)
     }
 
-    /// The blank-paper document silhouette behind a file's kind mark.
-    pub fn paper() -> Rgba {
-        rgb(0xcfe6fb)
-    }
-
-    /// Ink for the extension label printed on the paper.
-    pub fn paper_ink() -> Rgba {
-        rgb(0x6b8299)
-    }
-
-    /// Tint for a file kind's mark, or `None` for directories (they take
-    /// the theme accent). Hues chosen to stay legible on both a white and
-    /// a dark row.
-    pub fn kind(kind: FileKind) -> Option<Rgba> {
-        let hex = match kind {
-            FileKind::Directory => return None,
-            FileKind::Image => 0x30a46c,
-            FileKind::Video => 0x8b5cf6,
-            FileKind::Audio => 0xe0559a,
-            FileKind::Archive => 0xd08b1e,
-            FileKind::Code => 0x4c8bf0,
-            FileKind::Document | FileKind::Other => 0x6b8299,
-        };
-        Some(rgb(hex))
+    /// The darker bottom lip of a filled button, so it sits on the
+    /// surface instead of floating as a flat chip.
+    pub fn lip() -> Rgba {
+        rgba(0x0000001f)
     }
 
     /// Solid dot colour for each Finder tag colour. Vivid and
@@ -440,11 +566,51 @@ mod tests {
     }
 
     #[test]
+    fn dark_and_oled_are_dark() {
+        assert!(Theme::dark().is_dark() && Theme::oled().is_dark());
+        assert!(!Theme::light().is_dark());
+    }
+
+    #[test]
     fn compact_density_shrinks_rows() {
         let comfy = Theme::dark().with_density(Density::Comfortable);
         let compact = Theme::dark().with_density(Density::Compact);
         assert!(compact.row_height < comfy.row_height);
         assert!(compact.icon_size < comfy.icon_size);
+    }
+
+    #[test]
+    fn transparency_off_makes_glass_opaque() {
+        for theme in [Theme::light(), Theme::dark(), Theme::oled()] {
+            assert!(theme.glass.alpha < 1.0 && theme.blur > 0.);
+            let flat = theme.with_transparency(false);
+            assert_eq!(flat.glass, theme.elevated);
+            assert_eq!(flat.blur, 0.);
+            assert_eq!(theme.with_transparency(true), theme);
+        }
+    }
+
+    /// The shell glow leans toward the accent and follows an accent
+    /// override; OLED keeps a flat black shell either way.
+    #[test]
+    fn shell_glow_follows_the_accent_except_on_oled() {
+        let light = Theme::light();
+        assert_ne!(light.glow, light.panel);
+        let green = Theme::resolve(
+            ThemeMode::Light,
+            WindowAppearance::Light,
+            AccentColor::Green,
+        );
+        assert_ne!(green.glow, light.glow);
+        assert!(green.glow.green > green.glow.red);
+        let oled = Theme::resolve(ThemeMode::Oled, WindowAppearance::Dark, AccentColor::Pink);
+        assert_eq!(oled.glow, oled.panel);
+    }
+
+    #[test]
+    fn lift_brightens_and_keeps_alpha() {
+        let lifted = lift(rgba(0x00000080), 0.5);
+        assert_eq!((lifted.red, lifted.alpha), (0.5, rgba(0x00000080).alpha));
     }
 
     #[test]
@@ -501,5 +667,72 @@ mod tests {
             .accent,
             plain.accent
         );
+    }
+
+    fn assert_contrast(name: &str, fg: Rgba, bg: Rgba, min: f32) {
+        let ratio = super::super::icon_palette::contrast(fg, bg);
+        assert!(ratio >= min, "{name}: {ratio:.2} < {min}");
+    }
+
+    /// Text on the surfaces it lands on reads at 4.5:1 in every palette.
+    /// Regression: light `text_dim` was 4.35:1 on the shell, `warn` text
+    /// 3.2:1, and white on the amber Danger button 3.2:1.
+    #[test]
+    fn text_and_fills_meet_contrast_targets() {
+        for (label, theme) in [
+            ("light", Theme::light()),
+            ("dark", Theme::dark()),
+            ("oled", Theme::oled()),
+        ] {
+            let pairs = [
+                ("text_dim on bg", theme.text_dim, theme.bg),
+                ("text_dim on panel", theme.text_dim, theme.panel),
+                ("text_dim on glow", theme.text_dim, theme.glow),
+                (
+                    "text_dim on dialog_footer",
+                    theme.text_dim,
+                    theme.dialog_footer,
+                ),
+                ("warn on bg", theme.warn, theme.bg),
+                ("danger on elevated", theme.danger, theme.elevated),
+                ("on_danger on danger", theme.on_danger, theme.danger),
+                ("text on control", theme.text, theme.control),
+                ("text on control_hover", theme.text, theme.control_hover),
+                ("on_accent on accent", theme.on_accent, theme.accent),
+            ];
+            for (name, fg, bg) in pairs {
+                assert_contrast(&format!("{label} {name}"), fg, bg, 4.5);
+            }
+            // A glyph, not text: 3:1.
+            assert_contrast(
+                &format!("{label} danger on danger_tint"),
+                theme.danger,
+                theme.danger_tint,
+                3.0,
+            );
+        }
+    }
+
+    /// Sidebar labels stay legible on the shell glow whichever accent
+    /// preset tints it.
+    #[test]
+    fn glow_keeps_labels_legible_for_every_preset() {
+        for accent in ACCENT_PRESETS {
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                let theme = Theme::resolve(mode, WindowAppearance::Light, accent);
+                assert_contrast(
+                    &format!("{accent:?} {mode:?} text_dim on glow"),
+                    theme.text_dim,
+                    theme.glow,
+                    4.5,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sink_darkens_and_keeps_alpha() {
+        let sunk = sink(rgba(0xffffff80), 0.5);
+        assert_eq!((sunk.red, sunk.alpha), (0.5, rgba(0xffffff80).alpha));
     }
 }

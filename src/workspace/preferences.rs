@@ -64,6 +64,7 @@ impl SettingsSection {
             ),
             Self::Search => matches!(id, "index-system-files" | "exclude-dev-folders"),
             Self::Privacy => id == "share-diagnostics",
+            Self::Appearance => id == "transparency",
             _ => false,
         }
     }
@@ -122,7 +123,7 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
     (
         "confirm-delete",
         "Confirm before deleting",
-        "First press arms; a second press moves the file to the trash",
+        "Ask before moving items to the Recycle Bin or Trash. Permanent deletes always ask.",
         |s| s.confirm_delete,
         |s| s.confirm_delete = !s.confirm_delete,
         no_follow_up,
@@ -133,6 +134,14 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
         "Group folders above files whatever the sort order",
         |s| s.sort.directories_first,
         |s| s.sort.directories_first = !s.sort.directories_first,
+        no_follow_up,
+    ),
+    (
+        "transparency",
+        "Transparency effects",
+        "Frosted-glass menus and tooltips. Turn off for solid surfaces.",
+        |s| s.transparency_effects,
+        |s| s.transparency_effects = !s.transparency_effects,
         no_follow_up,
     ),
     (
@@ -304,31 +313,33 @@ impl Workspace {
                 section.description(),
             ));
         if section == SettingsSection::Appearance {
-            page = page.child(
-                ui::settings_pane::group(&theme)
-                    .child(ui::settings_pane::choice_row(
-                        &theme,
-                        "Theme",
-                        "Use your device’s appearance or choose a theme",
-                        self.render_theme_selector(&theme, settings.theme, cx),
-                    ))
-                    .child(ui::settings_pane::choice_row(
-                        &theme,
-                        "Accent color",
-                        "Color for folders, selections, and controls",
-                        self.render_accent_picker(&theme, settings.accent, cx),
-                    ))
-                    .child(ui::settings_pane::choice_row(
-                        &theme,
-                        "Density",
-                        "Give files more room or fit more on screen",
-                        self.render_density_selector(&theme, settings.density, cx),
-                    )),
-            );
+            page = page
+                .child(
+                    ui::settings_pane::group(&theme)
+                        .child(ui::settings_pane::choice_row(
+                            &theme,
+                            "Theme",
+                            "Use your device’s appearance or choose a theme",
+                            self.render_theme_selector(&theme, settings.theme, cx),
+                        ))
+                        .child(ui::settings_pane::choice_row(
+                            &theme,
+                            "Accent color",
+                            "Color for folders, selections, and controls",
+                            self.render_accent_picker(&theme, settings.accent, cx),
+                        ))
+                        .child(ui::settings_pane::choice_row(
+                            &theme,
+                            "Density",
+                            "Give files more room or fit more on screen",
+                            self.render_density_selector(&theme, settings.density, cx),
+                        )),
+                )
+                .child(self.render_toggles(&theme, &settings, section, cx));
         } else if section == SettingsSection::About {
             page = page.child(self.render_about(&theme, cx));
         } else if section == SettingsSection::Keyboard {
-            page = page.child(self.render_keyboard_preferences(&theme, cx));
+            page = page.child(self.render_keyboard_preferences(&theme, window, cx));
         } else if section == SettingsSection::Integration {
             page = page.child(self.render_integration(&theme, cx));
         } else if section == SettingsSection::Search {
@@ -343,8 +354,11 @@ impl Workspace {
             .track_focus(&self.settings_focus)
             .key_context("Settings")
             .capture_key_down(cx.listener(Self::handle_settings_key))
+            // Don't stop propagation here: gpui-ce treats a stopped key as
+            // handled, and on Windows a handled key never becomes typed
+            // text, so every field in Settings went dead. The workspace's
+            // own key handler ignores keys while Settings is open instead.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                cx.stop_propagation();
                 // Enter bubbles up from the focused add field (FIL-28).
                 if event.keystroke.key == "enter"
                     && this
@@ -360,7 +374,7 @@ impl Workspace {
             .child(div().flex().flex_1().min_h_0().child(nav).child(page));
         Some(ui::modal::present(
             "settings-backdrop-in",
-            ui::modal::backdrop("settings-backdrop")
+            ui::modal::backdrop(&theme, "settings-backdrop")
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)))
                 .child(card),
         ))
@@ -512,16 +526,26 @@ impl Workspace {
                     .min_w_0()
                     .child(self.excluded_folder_input.clone()),
             );
-        let add = ui::modal::button(theme, "excluded-folder-add", "Add", true)
-            .on_click(cx.listener(|this, _, _, cx| this.add_excluded_folder(cx)));
-        let reset = ui::modal::button(theme, "excluded-folder-reset", "Reset to defaults", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.settings.update(cx, |store, cx| {
-                    store.update(cx, |s| {
-                        s.excluded_folder_names = Settings::default().excluded_folder_names
-                    })
-                });
-            }));
+        let add = ui::modal::button(
+            theme,
+            "excluded-folder-add",
+            "Add",
+            ui::button::Variant::Primary,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.add_excluded_folder(cx)));
+        let reset = ui::modal::button(
+            theme,
+            "excluded-folder-reset",
+            "Reset to defaults",
+            ui::button::Variant::Secondary,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.settings.update(cx, |store, cx| {
+                store.update(cx, |s| {
+                    s.excluded_folder_names = Settings::default().excluded_folder_names
+                })
+            });
+        }));
         ui::settings_pane::group(theme).child(
             div()
                 .flex()
@@ -537,9 +561,21 @@ impl Workspace {
         )
     }
 
-    fn render_keyboard_preferences(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_keyboard_preferences(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let overrides = &self.settings.read(cx).settings().keyboard_shortcuts;
+        let query = self.shortcut_search.read(cx).text().trim().to_owned();
+        let search_focused = self.shortcut_search.focus_handle(cx).is_focused(window);
         let mut content = div().flex().flex_col().gap_4();
+        content = content.child(
+            ui::top_bar::field(theme, search_focused, false)
+                .child(ui::icon::ui_icon("icons/search.svg", theme.text_dim).size(px(14.)))
+                .child(div().flex_1().min_w_0().child(self.shortcut_search.clone())),
+        );
         content = content.child(
             div()
                 .flex()
@@ -551,16 +587,21 @@ impl Workspace {
                     "Changes save automatically. Text editing keeps standard system shortcuts.",
                 ))
                 .child(
-                    ui::modal::button(theme, "reset-shortcuts", "Reset all", false)
-                        .flex_none()
-                        .text_xs()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.recording_shortcut = None;
-                            this.shortcut_error = None;
-                            this.settings.update(cx, |store, cx| {
-                                store.update(cx, |s| s.keyboard_shortcuts.clear())
-                            });
-                        })),
+                    ui::modal::button(
+                        theme,
+                        "reset-shortcuts",
+                        "Reset all",
+                        ui::button::Variant::Secondary,
+                    )
+                    .flex_none()
+                    .text_xs()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.recording_shortcut = None;
+                        this.shortcut_error = None;
+                        this.settings.update(cx, |store, cx| {
+                            store.update(cx, |s| s.keyboard_shortcuts.clear())
+                        });
+                    })),
                 ),
         );
         if let Some(error) = &self.shortcut_error {
@@ -580,12 +621,19 @@ impl Workspace {
                 "Press a combination. Backspace clears it; Escape cancels.",
             ));
         }
+        let mut shown = 0;
         for group_name in ["Navigation", "Selection & files", "View", "Tabs & window"] {
             let mut group = ui::settings_pane::group(theme);
-            for spec in shortcuts::catalog()
+            let specs: Vec<_> = shortcuts::catalog()
                 .into_iter()
                 .filter(|s| s.group == group_name)
-            {
+                .filter(|s| shortcuts::matches_search(s, overrides, &query))
+                .collect();
+            if specs.is_empty() {
+                continue;
+            }
+            shown += specs.len();
+            for spec in specs {
                 let id = spec.id;
                 let recording = self.recording_shortcut == Some(id);
                 let keys = shortcuts::active_keys(&spec, overrides);
@@ -642,6 +690,14 @@ impl Workspace {
                     )
                     .child(group),
             );
+        }
+        if shown == 0 {
+            content = content.child(ui::settings_pane::note(
+                theme,
+                format!(
+                    "No shortcuts match “{query}”. Try an action like “rename” or a key like “F2”."
+                ),
+            ));
         }
         content
     }
@@ -786,17 +842,22 @@ impl Workspace {
                 theme,
                 slot.label.clone(),
                 format!("{} · {status}", display_path(&slot.path)),
-                ui::modal::button(theme, ("remove-root", ix), "Remove", false)
-                    .flex_none()
-                    .text_xs()
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove_root(&path, cx))),
+                ui::modal::button(
+                    theme,
+                    ("remove-root", ix),
+                    "Remove",
+                    ui::button::Variant::Secondary,
+                )
+                .flex_none()
+                .text_xs()
+                .on_click(cx.listener(move |this, _, _, cx| this.remove_root(&path, cx))),
             ));
         }
         group = group.child(ui::settings_pane::action_row(
             theme,
             "Add current folder",
             display_path(&self.cwd),
-            ui::modal::button(theme, "add-root", "Add", false)
+            ui::modal::button(theme, "add-root", "Add", ui::button::Variant::Secondary)
                 .flex_none()
                 .text_xs()
                 .on_click(cx.listener(|this, _, _, cx| this.add_current_folder(cx))),

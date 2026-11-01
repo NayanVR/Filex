@@ -42,6 +42,25 @@ pub fn sidebar_panel() -> Div {
         .pb_2()
 }
 
+/// A vertical scroller around `content`, which callers build as a plain
+/// column of headers and rows.
+///
+/// gpui-ce measures a scroller's content as the span from its first
+/// child's top to its last child's bottom, so a top margin on the first
+/// child (a section header's `mt_4`) is never scrolled into reach and the
+/// last row ends up cut off. Wrapping everything in one column makes the
+/// margins part of that single child's height.
+pub fn scroll_area(id: impl Into<ElementId>, content: Div) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .child(content.flex().flex_col().flex_none().pb_2())
+}
+
 /// A clickable section header: a quiet label, with the disclosure
 /// chevron at the trailing edge. Expanded sections show the chevron only
 /// on hover, so the column reads as calm labels rather than a tree view;
@@ -152,6 +171,7 @@ pub fn sidebar_item(
         .relative()
         .when(active, |row| {
             row.bg(theme.hover)
+                .shadow(vec![super::sheen(theme)])
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(
                     div()

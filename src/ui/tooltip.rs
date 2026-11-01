@@ -1,6 +1,6 @@
 //! A minimal text tooltip. gpui ships the `.tooltip()` hook but no
 //! ready-made tooltip view, so this is the smallest thing that renders
-//! one: a bordered card holding a single (wrapping) line of text, handed
+//! one: a glass card holding a single (wrapping) line of text, handed
 //! to `.tooltip(..)` as an `AnyView`.
 
 use gpui::{
@@ -30,14 +30,9 @@ impl TextTooltip {
 
 impl Render for TextTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+        super::glass(div().rounded_md(), &self.theme)
             .px_2()
             .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(self.theme.border)
-            .bg(self.theme.elevated)
-            .shadow_lg()
             .max_w(px(680.))
             .text_xs()
             .text_color(self.theme.text)

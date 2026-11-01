@@ -54,7 +54,7 @@ pub fn field(theme: &Theme, focused: bool, error: bool) -> Div {
         .border_1()
         .border_color(ring.unwrap_or(fixed::with_alpha(theme.border, 0.)))
         .bg(if focused { theme.bg } else { theme.field })
-        .when(focused, |s| s.shadow_xs())
+        .when(focused, |s| s.shadow(super::raised(theme)))
         .text_sm()
         .text_color(theme.text)
 }
