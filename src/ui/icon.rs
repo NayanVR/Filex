@@ -22,7 +22,7 @@ use filex::settings::FolderIcon;
 
 use super::icon_art::{self, LABEL_BOX, SizeClass, Symbol};
 use super::icon_palette::{file_ramp, folder_ramp};
-use super::theme::{Theme, fixed};
+use super::theme::Theme;
 
 /// A themed UI glyph (chevrons, gear, search, markers…) from an asset
 /// path like `"icons/settings.svg"`. Caller sizes it (`.size(px(..))`)
@@ -62,18 +62,19 @@ pub fn thumbnail_icon(imagery: Arc<RenderImage>, edge: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// A file's icon: paper in its family's colours with the family symbol.
-/// Card sizes (32px and up) print the extension on the label, laid over
-/// the artwork as text so one raster serves every extension.
+/// A file's icon: a page in its family's colours with the family symbol.
+/// Card sizes (32px and up) set the extension straight on the page in the
+/// family's label colour, laid over the artwork as text so one raster
+/// serves every extension.
 pub fn file_icon(theme: &Theme, name: &str, edge: f32) -> AnyElement {
     let family = FileFamily::of_name(name);
     let class = SizeClass::of(edge);
     let label = extension_label(name).filter(|_| class == SizeClass::Card);
+    let ramp = file_ramp(family, theme.is_dark());
     let key = ArtKey::File {
         family,
         class,
         dark: theme.is_dark(),
-        labelled: label.is_some(),
         raster: raster_edge(edge),
     };
     let mut cell = div().relative().size(px(edge)).flex_none();
@@ -83,7 +84,7 @@ pub fn file_icon(theme: &Theme, name: &str, edge: f32) -> AnyElement {
         None => cell.child(
             ui_icon(
                 Symbol::of_family(family).unwrap_or(Symbol::Text).path(),
-                file_ramp(family, theme.is_dark()).ink,
+                ramp.ink,
             )
             .size_full(),
         ),
@@ -91,7 +92,7 @@ pub fn file_icon(theme: &Theme, name: &str, edge: f32) -> AnyElement {
     if let Some(label) = label {
         let unit = edge / 32.;
         let (x, y, w, h) = LABEL_BOX;
-        let size = if label.chars().count() > 3 { 3.5 } else { 3.9 };
+        let size = if label.chars().count() > 3 { 4. } else { 4.6 };
         cell = cell.child(
             div()
                 .absolute()
@@ -105,7 +106,7 @@ pub fn file_icon(theme: &Theme, name: &str, edge: f32) -> AnyElement {
                 .text_size(px(size * unit))
                 .line_height(px(h * unit))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(fixed::white())
+                .text_color(ramp.label)
                 .child(label),
         );
     }
@@ -120,7 +121,6 @@ enum ArtKey {
         family: FileFamily,
         class: SizeClass,
         dark: bool,
-        labelled: bool,
         raster: u32,
     },
     Folder {
@@ -160,10 +160,9 @@ fn cached_art(key: ArtKey) -> Option<Arc<RenderImage>> {
             family,
             class,
             dark,
-            labelled,
             raster,
         } => (
-            icon_art::file_svg(family, &file_ramp(family, dark), class, dark, labelled),
+            icon_art::file_svg(family, &file_ramp(family, dark), class, dark),
             raster,
         ),
         ArtKey::Folder {
@@ -387,7 +386,6 @@ mod tests {
             family: FileFamily::Pdf,
             class: SizeClass::Card,
             dark: false,
-            labelled: true,
             raster: 128,
         };
         let image = cached_art(key).unwrap();

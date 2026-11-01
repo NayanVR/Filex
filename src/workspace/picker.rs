@@ -566,31 +566,46 @@ impl Workspace {
             .into_owned();
         Some(ui::modal::present(
             "picker-replace-in",
-            ui::modal::backdrop("picker-replace-backdrop")
+            ui::modal::backdrop(&theme, "picker-replace-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.picker_resolve_replace(false, cx);
                 }))
                 .child(
                     ui::modal::panel(&theme, "picker-replace-panel")
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(ui::modal::title(&theme, format!("“{name}” already exists")))
-                        .child(ui::modal::message(&theme, "Do you want to replace it?"))
+                        .child(ui::modal::intro(
+                            ui::modal::glyph(
+                                &theme,
+                                "icons/triangle-alert.svg",
+                                ui::modal::Tone::Danger,
+                            ),
+                            ui::modal::title(&theme, format!("“{name}” already exists")),
+                            ui::modal::message(
+                                &theme,
+                                "Replacing it overwrites the existing file.",
+                            ),
+                        ))
                         .child(
-                            ui::modal::buttons()
+                            ui::modal::buttons(&theme)
                                 .child(
-                                    ui::modal::button(&theme, "picker-replace-no", "No", false)
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, _window, cx| {
-                                                this.picker_resolve_replace(false, cx);
-                                            },
-                                        )),
+                                    ui::modal::button(
+                                        &theme,
+                                        "picker-replace-no",
+                                        "Cancel",
+                                        ui::button::Variant::Secondary,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _window, cx| {
+                                            this.picker_resolve_replace(false, cx);
+                                        },
+                                    )),
                                 )
                                 .child(
                                     ui::modal::button(
                                         &theme,
                                         "picker-replace-yes",
                                         "Replace",
-                                        true,
+                                        ui::button::Variant::Danger,
                                     )
                                     .on_click(cx.listener(
                                         |this, _: &ClickEvent, _window, cx| {

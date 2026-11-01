@@ -213,7 +213,7 @@ impl Workspace {
                             &theme,
                             "magic-select-all",
                             "Select all",
-                            ui::button::Variant::Secondary,
+                            ui::button::Variant::Subtle,
                             ui::button::Size::Regular,
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -226,7 +226,7 @@ impl Workspace {
                             &theme,
                             "magic-deselect-all",
                             "Deselect all",
-                            ui::button::Variant::Secondary,
+                            ui::button::Variant::Subtle,
                             ui::button::Size::Regular,
                         )
                         .on_click(cx.listener(|this, _, window, cx| {

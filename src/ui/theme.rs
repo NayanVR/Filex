@@ -62,8 +62,8 @@ fn with_alpha(c: Rgba, a: f32) -> Rgba {
     Rgba { alpha: a, ..c }
 }
 
-/// `c` moved fraction `t` of the way toward white — the lit top of a
-/// glossy fill (see [`super::button`]'s primary gradient).
+/// `c` moved fraction `t` of the way toward white: a filled button's
+/// hover (see [`super::button`]).
 pub fn lift(c: Rgba, t: f32) -> Rgba {
     Rgba {
         alpha: c.alpha,
@@ -71,9 +71,19 @@ pub fn lift(c: Rgba, t: f32) -> Rgba {
     }
 }
 
+/// `c` moved fraction `t` of the way toward black: a filled button while
+/// pressed.
+pub fn sink(c: Rgba, t: f32) -> Rgba {
+    Rgba {
+        alpha: c.alpha,
+        ..blend(c, rgb(0x000000), t)
+    }
+}
+
 /// How far the shell's top-left glow leans toward the accent: enough to
-/// read as a tint under the glass, not as a coloured window.
-const LIGHT_GLOW_MIX: f32 = 0.16;
+/// read as a tint under the glass, not as a coloured window. Light stays
+/// low so `text_dim` sidebar labels at the top left keep 4.5:1.
+const LIGHT_GLOW_MIX: f32 = 0.06;
 const DARK_GLOW_MIX: f32 = 0.12;
 
 /// Default backdrop blur (px) behind glass surfaces.
@@ -132,11 +142,32 @@ pub struct Theme {
     pub on_accent: Rgba,
     /// [`Theme::accent`] at low alpha — the text-selection highlight.
     pub accent_selection: Rgba,
-    /// Warnings (failed roots, missing permissions, destructive menu
-    /// items).
+    /// Warnings and errors: failed roots, missing permissions, error rings
+    /// on fields. Not for destructive actions; those are
+    /// [`Theme::danger`].
     pub warn: Rgba,
     /// Success / healthy state.
     pub success: Rgba,
+    /// Destructive actions: Danger buttons, destructive menu rows and a
+    /// destructive dialog's glyph. Red, so it reads as loss rather than
+    /// as a warning.
+    pub danger: Rgba,
+    /// Label ink on a [`Theme::danger`] fill (white on light, dark ink on
+    /// the lighter dark-theme red, as [`Theme::on_accent`] does).
+    pub on_danger: Rgba,
+    /// Tile behind a destructive dialog's glyph.
+    pub danger_tint: Rgba,
+    /// Fill of Secondary buttons: a pressable surface on any background.
+    pub control: Rgba,
+    /// [`Theme::control`] under the pointer.
+    pub control_hover: Rgba,
+    /// 1px edge of a [`Theme::control`] fill.
+    pub control_border: Rgba,
+    /// The recessed band behind a dialog's buttons, a step below
+    /// [`Theme::elevated`].
+    pub dialog_footer: Rgba,
+    /// The full-window dim behind a modal dialog. Never blurred.
+    pub scrim: Rgba,
     /// Glass: the translucent fill of floating surfaces (menus, dialogs,
     /// tooltips). It tints a blurred copy of what's behind it
     /// ([`Theme::blur`]); with transparency off it is just
@@ -190,6 +221,14 @@ impl Theme {
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
+            danger: rgb(0xf26b63),
+            on_danger: rgb(0x1a0d0c),
+            danger_tint: rgb(0x3d2321),
+            control: rgb(0x34353b),
+            control_hover: rgb(0x3c3d44),
+            control_border: rgb(0x45474e),
+            dialog_footer: rgb(0x202126),
+            scrim: rgba(0x00000080),
             glass: rgba(0x2a2b31c7),
             glass_edge: rgba(0xffffff1c),
             sheen: rgba(0xffffff14),
@@ -216,12 +255,20 @@ impl Theme {
             stripe: rgb(0xf7f8fa),
             border: rgb(0xdfe3e9),
             text: rgb(0x1a2230),
-            text_dim: rgb(0x667085),
+            text_dim: rgb(0x5f6878),
             accent: rgb(0x087eaf),
             on_accent: rgb(0xffffff),
             accent_selection: rgba(0x087eaf3d),
-            warn: rgb(0xc0851a),
+            warn: rgb(0x9a5f08),
             success: rgb(0x2ba55a),
+            danger: rgb(0xc4312b),
+            on_danger: rgb(0xffffff),
+            danger_tint: rgb(0xfde8e7),
+            control: rgb(0xffffff),
+            control_hover: rgb(0xf4f6f8),
+            control_border: rgb(0xd0d5dd),
+            dialog_footer: rgb(0xf7f8fa),
+            scrim: rgba(0x1018284d),
             glass: rgba(0xfcfdfed6),
             glass_edge: rgba(0x1018281a),
             sheen: rgba(0xffffffd9),
@@ -255,6 +302,14 @@ impl Theme {
             accent_selection: rgba(0x5ac8fa40),
             warn: rgb(0xe5c07b),
             success: rgb(0x7ec699),
+            danger: rgb(0xf26b63),
+            on_danger: rgb(0x1a0d0c),
+            danger_tint: rgb(0x2e1716),
+            control: rgb(0x1f2023),
+            control_hover: rgb(0x292a2e),
+            control_border: rgb(0x3a3b40),
+            dialog_footer: rgb(0x0e0e10),
+            scrim: rgba(0x000000a6),
             glass: rgba(0x151517d9),
             glass_edge: rgba(0xffffff1c),
             sheen: rgba(0xffffff12),
@@ -392,15 +447,16 @@ pub mod fixed {
         rgb(0xffffff)
     }
 
-    /// The specular top edge of a filled (accent / warn) button: white
+    /// The faint lit top edge of a filled (accent / danger) button: white
     /// light catching the rim, whatever the fill colour.
     pub fn gloss() -> Rgba {
-        rgba(0xffffff47)
+        rgba(0xffffff33)
     }
 
-    /// The full-window dim behind a modal dialog.
-    pub fn scrim() -> Rgba {
-        rgba(0x00000099)
+    /// The darker bottom lip of a filled button, so it sits on the
+    /// surface instead of floating as a flat chip.
+    pub fn lip() -> Rgba {
+        rgba(0x0000001f)
     }
 
     /// Solid dot colour for each Finder tag colour. Vivid and
@@ -611,5 +667,72 @@ mod tests {
             .accent,
             plain.accent
         );
+    }
+
+    fn assert_contrast(name: &str, fg: Rgba, bg: Rgba, min: f32) {
+        let ratio = super::super::icon_palette::contrast(fg, bg);
+        assert!(ratio >= min, "{name}: {ratio:.2} < {min}");
+    }
+
+    /// Text on the surfaces it lands on reads at 4.5:1 in every palette.
+    /// Regression: light `text_dim` was 4.35:1 on the shell, `warn` text
+    /// 3.2:1, and white on the amber Danger button 3.2:1.
+    #[test]
+    fn text_and_fills_meet_contrast_targets() {
+        for (label, theme) in [
+            ("light", Theme::light()),
+            ("dark", Theme::dark()),
+            ("oled", Theme::oled()),
+        ] {
+            let pairs = [
+                ("text_dim on bg", theme.text_dim, theme.bg),
+                ("text_dim on panel", theme.text_dim, theme.panel),
+                ("text_dim on glow", theme.text_dim, theme.glow),
+                (
+                    "text_dim on dialog_footer",
+                    theme.text_dim,
+                    theme.dialog_footer,
+                ),
+                ("warn on bg", theme.warn, theme.bg),
+                ("danger on elevated", theme.danger, theme.elevated),
+                ("on_danger on danger", theme.on_danger, theme.danger),
+                ("text on control", theme.text, theme.control),
+                ("text on control_hover", theme.text, theme.control_hover),
+                ("on_accent on accent", theme.on_accent, theme.accent),
+            ];
+            for (name, fg, bg) in pairs {
+                assert_contrast(&format!("{label} {name}"), fg, bg, 4.5);
+            }
+            // A glyph, not text: 3:1.
+            assert_contrast(
+                &format!("{label} danger on danger_tint"),
+                theme.danger,
+                theme.danger_tint,
+                3.0,
+            );
+        }
+    }
+
+    /// Sidebar labels stay legible on the shell glow whichever accent
+    /// preset tints it.
+    #[test]
+    fn glow_keeps_labels_legible_for_every_preset() {
+        for accent in ACCENT_PRESETS {
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                let theme = Theme::resolve(mode, WindowAppearance::Light, accent);
+                assert_contrast(
+                    &format!("{accent:?} {mode:?} text_dim on glow"),
+                    theme.text_dim,
+                    theme.glow,
+                    4.5,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sink_darkens_and_keeps_alpha() {
+        let sunk = sink(rgba(0xffffff80), 0.5);
+        assert_eq!((sunk.red, sunk.alpha), (0.5, rgba(0xffffff80).alpha));
     }
 }

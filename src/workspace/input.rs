@@ -15,6 +15,10 @@ impl Workspace {
         if keystroke.modifiers.platform || keystroke.modifiers.control {
             return; // shortcuts are handled by actions
         }
+        if self.settings_open {
+            // Keys belong to the Settings modal and its text fields.
+            return;
+        }
         if self.conflict.is_some() {
             // Enter = the primary (keep both); escape arrives as the
             // input's ClearInput action, handled in render().

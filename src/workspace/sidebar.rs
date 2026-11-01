@@ -265,7 +265,7 @@ impl Workspace {
         };
         Some(ui::modal::present(
             "feedback-backdrop-in",
-            ui::modal::backdrop("feedback-backdrop")
+            ui::modal::backdrop(&theme, "feedback-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.cancel_feedback(window, cx);
                 }))
@@ -281,22 +281,32 @@ impl Workspace {
                         .child(field(&draft.message))
                         .child(field(&draft.email))
                         .child(
-                            ui::modal::buttons()
+                            ui::modal::buttons(&theme)
                                 .child(
-                                    ui::modal::button(&theme, "feedback-cancel", "Cancel", false)
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, window, cx| {
-                                                this.cancel_feedback(window, cx);
-                                            },
-                                        )),
+                                    ui::modal::button(
+                                        &theme,
+                                        "feedback-cancel",
+                                        "Cancel",
+                                        ui::button::Variant::Secondary,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, window, cx| {
+                                            this.cancel_feedback(window, cx);
+                                        },
+                                    )),
                                 )
                                 .child(
-                                    ui::modal::button(&theme, "feedback-send", "Send", true)
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, window, cx| {
-                                                this.submit_feedback(window, cx);
-                                            },
-                                        )),
+                                    ui::modal::button(
+                                        &theme,
+                                        "feedback-send",
+                                        "Send",
+                                        ui::button::Variant::Primary,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, window, cx| {
+                                            this.submit_feedback(window, cx);
+                                        },
+                                    )),
                                 ),
                         ),
                 ),
@@ -307,13 +317,7 @@ impl Workspace {
         let theme = *cx.theme();
         let favorites = self.settings.read(cx).settings().favorites.clone();
 
-        let mut content = div()
-            .id("sidebar-scroll")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll();
+        let mut content = div();
 
         // PLACES.
         let (header, collapsed) = self.section_header(&theme, "places", "Places", cx);
@@ -499,7 +503,8 @@ impl Workspace {
             }
         }
 
-        let sidebar = ui::sidebar::sidebar_panel().child(content);
+        let sidebar =
+            ui::sidebar::sidebar_panel().child(ui::sidebar::scroll_area("sidebar-scroll", content));
 
         // The FDA banner stays pinned below the scrollable sections.
         #[cfg(target_os = "macos")]

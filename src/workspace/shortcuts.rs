@@ -15,7 +15,7 @@ pub struct Shortcut {
 pub fn catalog() -> Vec<Shortcut> {
     let mac = cfg!(target_os = "macos");
     macro_rules! entry {
-        ($id:literal, $label:literal, $group:literal, $key:expr, $aliases:expr, $editor:expr, $action:expr) => {
+        ($id:literal, $label:expr, $group:literal, $key:expr, $aliases:expr, $editor:expr, $action:expr) => {
             Shortcut {
                 id: $id,
                 label: $label,
@@ -215,14 +215,30 @@ pub fn catalog() -> Vec<Shortcut> {
             false,
             ShowProperties
         ),
+        // As in the platform's file manager: Delete moves to the Recycle
+        // Bin / Trash (Explorer also takes Ctrl+D), Shift+Delete deletes
+        // for good; Finder uses ⌘⌫ and ⌥⌘⌫.
         entry!(
             "trash",
-            "Move to Trash",
+            menu_model::DELETE_LABEL,
             "Selection & files",
-            if mac { "cmd-backspace" } else { "ctrl-delete" },
-            &[],
+            if mac { "cmd-backspace" } else { "delete" },
+            if cfg!(windows) { &["ctrl-d"] } else { &[] },
             false,
             DeleteSelected
+        ),
+        entry!(
+            "delete_permanently",
+            "Delete permanently",
+            "Selection & files",
+            if mac {
+                "cmd-alt-backspace"
+            } else {
+                "shift-delete"
+            },
+            &[],
+            false,
+            DeletePermanently
         ),
         entry!(
             "undo",
@@ -552,6 +568,21 @@ fn label_for(chord: &str, mac: bool) -> String {
     parts.join(if mac { "" } else { "+" })
 }
 
+/// Whether `spec` matches the Keyboard settings search: every word of
+/// `query` must appear (case-insensitively) in the action's name, its
+/// group, or one of its current keys as the platform writes them ("ctrl",
+/// "f2", "shift+delete"). An empty query matches everything.
+pub fn matches_search(spec: &Shortcut, overrides: &BTreeMap<String, String>, query: &str) -> bool {
+    let keys: Vec<String> = active_keys(spec, overrides)
+        .iter()
+        .map(|chord| label(chord))
+        .collect();
+    let haystack = format!("{} {} {}", spec.label, spec.group, keys.join(" ")).to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| haystack.contains(&word.to_lowercase()))
+}
+
 pub fn hint(id: &str, overrides: &BTreeMap<String, String>) -> String {
     catalog()
         .iter()
@@ -582,6 +613,34 @@ mod tests {
         assert!(validate("quick_look", "space", &overrides).is_ok());
         assert!(validate("search", "space", &overrides).is_err());
         assert_eq!(label("space"), "Space");
+    }
+
+    /// Windows follows File Explorer: Delete (and Ctrl+D) send to the
+    /// Recycle Bin, Shift+Delete deletes for good. Regression: the trash
+    /// was on Ctrl+Delete. Neither fires while typing in a text field.
+    #[cfg(windows)]
+    #[test]
+    fn delete_keys_match_file_explorer() {
+        let none = BTreeMap::new();
+        assert_eq!(active_keys(&spec("trash"), &none), ["delete", "ctrl-d"]);
+        assert_eq!(spec("trash").label, "Delete");
+        assert_eq!(
+            active_keys(&spec("delete_permanently"), &none),
+            ["shift-delete"]
+        );
+        for chord in ["delete", "shift-delete"] {
+            let in_list = actions_for(chord, &["Workspace"], &none);
+            assert!(
+                in_list.iter().any(|a| a.starts_with("filex::Delete")),
+                "{chord}: {in_list:?}"
+            );
+            // In a text field the key edits text instead.
+            let typing = actions_for(chord, &["Workspace", "SearchInput"], &none);
+            assert!(
+                !typing.iter().any(|a| a.starts_with("filex::Delete")),
+                "{chord} must stay a text-editing key: {typing:?}"
+            );
+        }
     }
 
     #[test]
@@ -703,6 +762,36 @@ mod tests {
         assert!(validate("search", "escape", &BTreeMap::new()).is_err());
         assert!(validate("search", "ctrl-k ctrl-l", &BTreeMap::new()).is_err());
     }
+    fn spec(id: &str) -> Shortcut {
+        catalog()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("in the catalog")
+    }
+
+    #[test]
+    fn shortcut_search_matches_name_group_and_keys() {
+        let none = BTreeMap::new();
+        let rename = spec("rename");
+        assert!(matches_search(&rename, &none, ""));
+        assert!(matches_search(&rename, &none, "RENAME"));
+        assert!(matches_search(&rename, &none, "selection"));
+        assert!(matches_search(&rename, &none, "f2"));
+        // Every word must match somewhere.
+        assert!(matches_search(&rename, &none, "rename f2"));
+        assert!(!matches_search(&rename, &none, "rename tab"));
+        assert!(!matches_search(&rename, &none, "zoom"));
+    }
+
+    /// A remapped shortcut is found by its new keys, not the default.
+    #[test]
+    fn shortcut_search_follows_overrides() {
+        let rename = spec("rename");
+        let remapped = BTreeMap::from([("rename".to_owned(), "f6".to_owned())]);
+        assert!(matches_search(&rename, &remapped, "f6"));
+        assert!(!matches_search(&rename, &remapped, "f2"));
+    }
+
     #[test]
     fn invalid_persisted_shortcuts_do_not_panic() {
         assert!(

@@ -29,7 +29,7 @@ impl Workspace {
         self.load_error = None;
         self.selection.clear();
         self.renaming = None;
-        self.pending_delete = None;
+        self.delete_prompt = None;
         self.sync_path(cx);
         self.refresh_drives(cx);
         self.refresh_preview(cx);

@@ -339,39 +339,49 @@ impl Workspace {
             .into_owned();
         Some(ui::modal::present(
             "conflict-backdrop-in",
-            ui::modal::backdrop("conflict-backdrop")
+            ui::modal::backdrop(&theme, "conflict-backdrop")
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.resolve_conflict(false, cx);
                 }))
                 .child(
                     ui::modal::panel(&theme, "conflict-panel")
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(ui::modal::title(
-                            &theme,
-                            format!("“{name}” already exists here"),
-                        ))
-                        .child(ui::modal::message(
-                            &theme,
-                            "Nothing is overwritten: keep both renames the new one to a \
-                             free “name 2” variant.",
+                        .child(ui::modal::intro(
+                            ui::modal::glyph(&theme, "icons/copy.svg", ui::modal::Tone::Neutral),
+                            ui::modal::title(&theme, format!("“{name}” already exists here")),
+                            ui::modal::message(
+                                &theme,
+                                "Nothing is overwritten: keep both renames the new one to a \
+                                 free “name 2” variant.",
+                            ),
                         ))
                         .child(
-                            ui::modal::buttons()
+                            ui::modal::buttons(&theme)
                                 .child(
-                                    ui::modal::button(&theme, "conflict-cancel", "Cancel", false)
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, _window, cx| {
-                                                this.resolve_conflict(false, cx);
-                                            },
-                                        )),
+                                    ui::modal::button(
+                                        &theme,
+                                        "conflict-cancel",
+                                        "Cancel",
+                                        ui::button::Variant::Secondary,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _window, cx| {
+                                            this.resolve_conflict(false, cx);
+                                        },
+                                    )),
                                 )
                                 .child(
-                                    ui::modal::button(&theme, "conflict-keep", "Keep Both", true)
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, _window, cx| {
-                                                this.resolve_conflict(true, cx);
-                                            },
-                                        )),
+                                    ui::modal::button(
+                                        &theme,
+                                        "conflict-keep",
+                                        "Keep Both",
+                                        ui::button::Variant::Primary,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _window, cx| {
+                                            this.resolve_conflict(true, cx);
+                                        },
+                                    )),
                                 ),
                         ),
                 ),

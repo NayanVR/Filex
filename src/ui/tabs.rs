@@ -49,6 +49,12 @@ pub fn tab_group() -> Div {
         .items_center()
         .gap_1()
         .overflow_hidden()
+        // The clip would also cut the active tab's raised shadow (it
+        // reaches ~3px past the tab), so pad the clip box by 4px and
+        // pull the group back out by the same amount: the shadow fits
+        // and nothing moves.
+        .p_1()
+        .m_neg_1()
 }
 
 /// The empty run of the bar after the tabs. Tagged as the window's drag

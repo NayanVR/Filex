@@ -59,6 +59,7 @@ actions!(
         PrevTab,
         RenameSelected,
         DeleteSelected,
+        DeletePermanently,
         Undo,
         FocusSearch,
         FocusPath,
@@ -425,6 +426,10 @@ struct Workspace {
     _accent_hex_subscription: gpui::Subscription,
     /// The "add a folder name" field of the index exclude list (FIL-28).
     excluded_folder_input: gpui::Entity<SearchInput>,
+    /// The search field on the Keyboard settings page; filters the list as
+    /// you type.
+    shortcut_search: gpui::Entity<SearchInput>,
+    _shortcut_search_subscription: gpui::Subscription,
     results: Vec<SearchRow>,
     /// Request-to-results time of the first search for the query it names
     /// (debounce excluded), shown by onboarding's live search demo. Live
@@ -472,9 +477,8 @@ struct Workspace {
     renaming: Option<RenameState>,
     /// Undo stack of completed file operations.
     journal: ops::Journal,
-    /// Two-press delete confirmation: the set of paths armed by the
-    /// first press; a second press on the same set deletes.
-    pending_delete: Option<Vec<PathBuf>>,
+    /// The open delete confirmation (Recycle Bin / Trash or permanent).
+    delete_prompt: Option<delete_prompt::DeletePrompt>,
     /// Internal file clipboard (cmd-c / cmd-x). Holds every path from
     /// the selection at copy/cut time.
     clipboard: Option<(Vec<PathBuf>, ClipMode)>,
@@ -562,6 +566,7 @@ struct Workspace {
 
 mod app;
 mod connect;
+mod delete_prompt;
 mod file_ops;
 mod input;
 mod integration;
@@ -654,6 +659,16 @@ impl Workspace {
             input.set_propagate_empty(false);
             input.set_placeholder("Folder name, e.g. build", cx);
         });
+        let shortcut_search = cx.new(SearchInput::new);
+        shortcut_search.update(cx, |input, cx| {
+            input.set_propagate_empty(false);
+            input.set_placeholder("Search shortcuts", cx);
+        });
+        let shortcut_search_subscription = cx.subscribe(&shortcut_search, |_, _, event, cx| {
+            if let SearchInputEvent::Changed(_) = event {
+                cx.notify();
+            }
+        });
         let settings = cx.new(SettingsStore::new);
         // Settings changes re-derive everything visible that depends on
         // them (the hidden-file filter on the browse list, and the
@@ -740,6 +755,8 @@ impl Workspace {
             accent_hex,
             _accent_hex_subscription: accent_hex_subscription,
             excluded_folder_input,
+            shortcut_search,
+            _shortcut_search_subscription: shortcut_search_subscription,
             results: Vec::new(),
             search_latency: None,
             search_generation: 0,
@@ -759,7 +776,7 @@ impl Workspace {
             reveal: None,
             renaming: None,
             journal: ops::Journal::default(),
-            pending_delete: None,
+            delete_prompt: None,
             clipboard: None,
             conflict: None,
             jobs: Vec::new(),

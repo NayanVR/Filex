@@ -54,16 +54,38 @@ pub fn oklch((l, c, h): Lch) -> Rgba {
     Rgba::new(encode(rgb[0]), encode(rgb[1]), encode(rgb[2]), 1.)
 }
 
-/// The OKLCH hue (degrees) of an sRGB colour.
-pub fn hue_of(color: Rgba) -> f32 {
+/// The OKLab opponent axes (a, b) of an sRGB colour.
+fn lab_ab(color: Rgba) -> (f32, f32) {
     let [r, g, b] = [color.red, color.green, color.blue].map(decode);
     let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
     let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
     let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
-    let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
-    let b = 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s;
+    (
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    )
+}
+
+/// The OKLCH hue (degrees) of an sRGB colour. Meaningless for greys:
+/// check [`chroma_of`] first.
+pub fn hue_of(color: Rgba) -> f32 {
+    let (a, b) = lab_ab(color);
     b.atan2(a).to_degrees().rem_euclid(360.)
 }
+
+/// The OKLCH chroma of an sRGB colour (0 for greys).
+fn chroma_of(color: Rgba) -> f32 {
+    let (a, b) = lab_ab(color);
+    a.hypot(b)
+}
+
+/// Below this chroma an accent is effectively grey and its hue is noise
+/// (`#808080` and `#7f8080` would give salmon and cyan folders).
+const GREY_ACCENT_CHROMA: f32 = 0.03;
+
+/// Folders for a grey accent: a cool graphite (the App and Other
+/// families' hue) at a small share of the usual chroma.
+const NEUTRAL_FOLDER: (f32, f32) = (260., 0.15);
 
 /// WCAG relative luminance.
 #[cfg(test)]
@@ -74,7 +96,7 @@ fn luminance(c: Rgba) -> f32 {
 
 /// WCAG contrast ratio between two opaque colours.
 #[cfg(test)]
-fn contrast(a: Rgba, b: Rgba) -> f32 {
+pub(super) fn contrast(a: Rgba, b: Rgba) -> f32 {
     let (x, y) = (luminance(a), luminance(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
@@ -120,7 +142,7 @@ pub struct FileRamp {
     pub edge: Rgba,
     /// The symbol.
     pub ink: Rgba,
-    /// The extension label's fill (white text sits on it).
+    /// The extension, set as bold type straight on the page at card size.
     pub label: Rgba,
 }
 
@@ -132,7 +154,7 @@ const LIGHT_ROLES: [(f32, f32); 6] = [
     (0.885, 0.060),
     (0.620, 0.080),
     (0.575, 0.150),
-    (0.530, 0.150),
+    (0.500, 0.150),
 ];
 const DARK_ROLES: [(f32, f32); 6] = [
     (0.940, 0.012),
@@ -140,7 +162,7 @@ const DARK_ROLES: [(f32, f32); 6] = [
     (0.800, 0.065),
     (0.300, 0.030),
     (0.545, 0.150),
-    (0.515, 0.150),
+    (0.460, 0.150),
 ];
 
 pub fn file_ramp(family: FileFamily, dark: bool) -> FileRamp {
@@ -164,28 +186,24 @@ pub struct FolderRamp {
     pub back_bottom: Rgba,
     pub front_top: Rgba,
     pub front_bottom: Rgba,
-    /// The light catching the front panel's top edge.
-    pub lip: Rgba,
-    /// A pressed-in special-folder symbol.
+    /// A special folder's debossed mark.
     pub mark: Rgba,
-    /// The rear sheet of paper showing in the opening.
-    pub sheet: Rgba,
-    pub edge: Rgba,
 }
 
 pub fn folder_ramp(accent: Rgba, dark: bool) -> FolderRamp {
-    let hue = hue_of(accent);
-    let at = |l: f32, c: f32| oklch((l, c, hue));
+    let (hue, share) = if chroma_of(accent) < GREY_ACCENT_CHROMA {
+        NEUTRAL_FOLDER
+    } else {
+        (hue_of(accent), 1.)
+    };
+    let at = |l: f32, c: f32| oklch((l, c * share, hue));
     if dark {
         FolderRamp {
             back_top: at(0.630, 0.130),
             back_bottom: at(0.540, 0.140),
             front_top: at(0.790, 0.125),
             front_bottom: at(0.680, 0.150),
-            lip: at(0.900, 0.060),
             mark: at(0.430, 0.120),
-            sheet: at(0.900, 0.020),
-            edge: at(0.200, 0.030),
         }
     } else {
         FolderRamp {
@@ -193,10 +211,7 @@ pub fn folder_ramp(accent: Rgba, dark: bool) -> FolderRamp {
             back_bottom: at(0.600, 0.145),
             front_top: at(0.840, 0.120),
             front_bottom: at(0.730, 0.150),
-            lip: at(0.940, 0.050),
             mark: at(0.470, 0.130),
-            sheet: at(0.955, 0.020),
-            edge: at(0.420, 0.080),
         }
     }
 }
@@ -205,20 +220,18 @@ pub fn folder_ramp(accent: Rgba, dark: bool) -> FolderRamp {
 mod tests {
     use super::*;
 
-    fn white() -> Rgba {
-        Rgba::new(1., 1., 1., 1.)
-    }
-
     /// The design's promise: every symbol reads on its paper (3:1, the
-    /// WCAG graphics target) and every label's white text reads on its
-    /// fill (4.5:1), in both themes.
+    /// WCAG graphics target) and every extension, set as type in `label`
+    /// on the page, reads as text (4.5:1), in both themes.
     #[test]
     fn every_family_meets_its_contrast_targets() {
         for dark in [false, true] {
             for family in FileFamily::ALL {
                 let ramp = file_ramp(family, dark);
                 let symbol = contrast(ramp.ink, ramp.paper_bottom);
-                let label = contrast(white(), ramp.label);
+                // The extension is type in `label` set on the page, so it
+                // must read on the page's lightest-to-darkest stretch.
+                let label = contrast(ramp.label, ramp.paper_bottom);
                 assert!(symbol >= 3.0, "{family:?} dark={dark}: symbol {symbol:.2}");
                 assert!(label >= 4.5, "{family:?} dark={dark}: label {label:.2}");
             }
@@ -260,20 +273,50 @@ mod tests {
     }
 
     /// The folder's front sits a step in front of (lighter than) its back,
-    /// and the mark is darker than the panel it's pressed into, for any
-    /// accent.
+    /// and the mark is darker than the panel it's pressed into, for both
+    /// default accents, every preset, and extreme custom accents.
     #[test]
     fn folders_keep_their_depth_for_every_accent() {
-        for accent in [0x087eaf, 0x8b5cf6, 0x22c55e, 0xf97316, 0xef4444] {
+        let presets = crate::ui::theme::ACCENT_PRESETS
+            .map(|accent| crate::ui::theme::accent_rgb(accent).unwrap_or(gpui::rgb(0)));
+        let customs = [
+            0x087eaf, 0x5ac8fa, 0x101010, 0xf8f8f8, 0x808080, 0xffff00, 0x000080,
+        ]
+        .map(gpui::rgb);
+        for accent in presets.into_iter().chain(customs) {
             for dark in [false, true] {
-                let ramp = folder_ramp(gpui::rgb(accent), dark);
-                assert!(luminance(ramp.front_top) > luminance(ramp.back_top));
+                let ramp = folder_ramp(accent, dark);
+                let label = hex(accent);
+                assert!(
+                    luminance(ramp.front_top) > luminance(ramp.back_top),
+                    "{label} dark={dark}"
+                );
                 assert!(
                     contrast(ramp.mark, ramp.front_top) >= 3.0,
-                    "{accent:x} dark={dark}"
+                    "{label} dark={dark}"
                 );
             }
         }
+    }
+
+    /// Regression: a grey accent has no real hue, so near-identical greys
+    /// gave folders in unrelated colours (salmon for `#808080`, cyan for
+    /// `#7f8080`). Greys now share one calm, nearly neutral folder.
+    #[test]
+    fn grey_accents_give_one_neutral_folder() {
+        let greys =
+            [0x808080, 0x7f8080, 0x101010, 0xf8f8f8].map(|g| folder_ramp(gpui::rgb(g), false));
+        assert!(greys.iter().all(|ramp| *ramp == greys[0]));
+        assert!(
+            chroma_of(greys[0].front_top) < 0.03,
+            "{}",
+            hex(greys[0].front_top)
+        );
+        // A real accent still colours its folders. (Measured on the back
+        // panel: at the front's lightness sRGB caps a blue's chroma.)
+        let blue = folder_ramp(gpui::rgb(0x3b82f6), false);
+        assert!(chroma_of(blue.back_bottom) > 0.08);
+        assert!(chroma_of(greys[0].back_bottom) < 0.03);
     }
 
     #[test]

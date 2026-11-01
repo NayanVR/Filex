@@ -7,15 +7,26 @@ this page says where to look and what not to do.
 
 - **Semantic slots** on `Theme` (`bg`, `panel`, `elevated`, `hover`,
   `field`, `shadow`, `selected`, `stripe`, `border`, `text`, `text_dim`,
-  `accent`, `on_accent`, `accent_selection`, `warn`, `success`, and the
-  material slots `glass`, `glass_edge`, `sheen`, `float_shadow`, `glow`,
-  `blur`). `hover` and `field` are translucent, so one value reads on both
-  surfaces below.
+  `accent`, `on_accent`, `accent_selection`, `warn`, `success`, `danger`,
+  `on_danger`, `danger_tint`, the control slots `control`,
+  `control_hover`, `control_border`, the dialog slots `dialog_footer`,
+  `scrim`, and the material slots `glass`, `glass_edge`, `sheen`,
+  `float_shadow`, `glow`, `blur`). `hover` and `field` are translucent, so
+  one value reads on both surfaces below.
   Read via `cx.theme()`. Dark, light and OLED palettes; accent presets
   and custom hex are applied by `Theme::resolve`.
+- **`warn` vs `danger`:** `warn` is for warnings and errors (failed roots,
+  error rings on fields). Destructive actions (Danger buttons, Delete in
+  menus, a destructive dialog's glyph) use red `danger`: amber read as a
+  warning, not as loss.
+- **Contrast is tested** (`text_and_fills_meet_contrast_targets`): text on
+  every surface it lands on, `warn` text and the ink on accent and danger
+  fills hold 4.5:1 in all three palettes, and `text_dim` on the shell glow
+  holds 4.5:1 for every accent preset. Light `text_dim`, `warn` and the
+  glow mix (6%) were tuned on 2026-11-01 to pass.
 - **Fixed palettes** in `theme::fixed`: identity colours that don't change
-  with the theme (file-kind tints, Finder tag colours, paper artwork,
-  modal scrim).
+  with the theme (brand blues, Finder tag colours, the filled-button
+  `gloss` and `lip`).
 - **Icon colours** live in `ui::icon_palette`: computed from OKLCH hue
   angles, never spelled (docs/design-icons.md).
 - **Rule:** `theme.rs` is the only UI file that spells a hex value. A new
@@ -58,8 +69,16 @@ fill now reads as dated. Filex gets there without a translucent window:
   anyway.
 - **Lit edges** (`ui::sheen`, `ui::raised`): a 1px inset highlight on
   raised things — the canvas, active tab and segment, focused field, the
-  active sidebar row, outlined buttons. Filled buttons get a top-lit
-  gradient plus `fixed::gloss`.
+  active sidebar row, Secondary buttons. Filled buttons are a flat fill
+  with a faint `fixed::gloss` top edge and a darker `fixed::lip` bottom
+  edge (the visible top-lit gradient was dropped on 2026-11-01).
+- **Dialogs** (`ui::modal`): a 420px solid card with 24px padding and a
+  deeper `dialog_shadow`; an optional `glyph` tile beside the title and
+  message (`intro`) says what kind of decision it is (`Tone::Danger` on
+  `danger_tint`, `Tone::Neutral` on `selected`; leave it out of plain
+  forms); `buttons(theme)` is a footer band on `dialog_footer` that spans
+  the card below a `glass_edge` rule. The `scrim` is themed (30% ink on
+  light, 50% black on dark), never blurred.
 - **Cost:** a blur pass only while a menu or tooltip is on screen, never
   on the canvas, the shell or anything inside a virtualized list. The
   shell gradient is one quad. Search and navigation paths are unchanged.
@@ -146,7 +165,7 @@ fill now reads as dated. Filex gets there without a translucent window:
 | Dialog or card holding its own fills | `ui::solid_card` |
 | Glass on a custom shape (tooltip) | `ui::glass(element, theme)` |
 | Raised selection / lit edge | `ui::raised`, `ui::sheen` |
-| Dialog | `modal::{backdrop, panel, title, message, buttons, button}` |
+| Dialog | `modal::{backdrop, panel, intro, glyph, title, message, buttons, button}` |
 | Context menu | `menu::{overlay, panel, scroll_panel, model_row, icon_bar, icon_button, separator, heading}`; contents from `filex::context_menu` |
 | Tooltip | `tooltip::text_tooltip` |
 | Key hint | `kbd::keycap` |
@@ -157,8 +176,15 @@ fill now reads as dated. Filex gets there without a translucent window:
 | Window caption buttons | `window_controls::caption_buttons` |
 
 **Button variants:** `Primary` (accent fill, the Enter-key choice),
-`Secondary` (outlined), `Danger` (warn fill, for irreversible actions).
-Filled buttons dim on hover rather than losing their fill. **Sizes:**
+`Secondary` (a filled `control` surface with a `control_border` edge),
+`Danger` (`danger` fill with `on_danger` ink, for actions that lose data:
+delete, replace), `Subtle` (accent text, no fill until hovered, for
+low-stakes actions beside others: "Select all", "Undo"). Labels are Medium
+weight. Filled buttons lighten 12% on hover and darken 12% while pressed;
+Secondary takes `control_hover`, then `field` while pressed. Disabled
+(`disabled_button`) is a `field` fill with `text_dim`, at full opacity. In
+dialogs, `modal::button` takes a `Variant` and a 96px minimum width.
+**Sizes:**
 `Regular` (32px, dialogs and panes), `Small` (22px, slim bars and inline
 editors). **Icon sizes:** `Large` 30/18 (toolbar), `Medium` 24/16 (tab
 strip), `Small` 20/12 (inline ✕).

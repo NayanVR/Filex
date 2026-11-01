@@ -1,4 +1,4 @@
-//! The app's asset source: bundled SVG icons (Lucide, ISC — see
+//! The app's asset source: bundled SVG icons (Phosphor Regular, MIT — see
 //! `assets/icons/LICENSE`).
 //!
 //! gpui's `svg()` element loads an icon by path through the
@@ -8,11 +8,11 @@
 //! stays a single self-contained artifact and an icon can never fail to
 //! load because of a missing file at runtime.
 //!
-//! Symbols (`assets/symbols/`, Filex's own) are the icon system's
+//! Symbols (`assets/symbols/`, Phosphor Duotone) are the icon system's
 //! two-tone set; see docs/design-icons.md.
 //!
 //! Icons are single-color: gpui rasterizes the SVG to a coverage mask
-//! and fills it with the element's `text_color`, so the stroke geometry
+//! and fills it with the element's `text_color`, so the shape geometry
 //! is what matters and every glyph is tinted from the active theme.
 
 use std::borrow::Cow;
@@ -110,12 +110,12 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("folder-search"),
     icon!("palette"),
     // Window caption buttons (Windows): hairline 10px glyphs drawn for
-    // filex in the Fluent caption style, not Lucide.
+    // filex in the Fluent caption style, not Phosphor.
     icon!("caption-minimize"),
     icon!("caption-maximize"),
     icon!("caption-restore"),
     icon!("caption-close"),
-    // Icon-system symbols (two-tone: the secondary layer is 35% coverage,
+    // Icon-system symbols (two-tone: the secondary layer is 20% coverage,
     // so a tinted mask still shows both tones).
     symbol!("text"),
     symbol!("pdf"),

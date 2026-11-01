@@ -132,7 +132,7 @@ pub fn item(
         .rounded_md()
         .cursor_pointer()
         .text_sm()
-        .text_color(if danger { theme.warn } else { theme.text })
+        .text_color(if danger { theme.danger } else { theme.text })
         .hover(move |s| s.bg(hover))
         .child(label.into())
 }
@@ -149,11 +149,15 @@ pub fn model_row(
     shortcut: Option<SharedString>,
     highlighted: bool,
 ) -> Stateful<Div> {
-    let color = if item.danger { theme.warn } else { theme.text };
+    let color = if item.danger {
+        theme.danger
+    } else {
+        theme.text
+    };
     // Glyphs a step quieter than the label (Fluent menus do the same),
-    // except a destructive row, which stays warn throughout.
+    // except a destructive row, which stays danger red throughout.
     let glyph = if item.danger {
-        theme.warn
+        theme.danger
     } else {
         theme.text_dim
     };
@@ -223,7 +227,11 @@ pub fn icon_button(
     item: &Item,
     highlighted: bool,
 ) -> Stateful<Div> {
-    let color = if item.danger { theme.warn } else { theme.text };
+    let color = if item.danger {
+        theme.danger
+    } else {
+        theme.text
+    };
     div()
         .id(id)
         .size(px(32.))

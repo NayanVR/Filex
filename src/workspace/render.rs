@@ -690,7 +690,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &PageUp, _, cx| this.page_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page_selection(1, cx)))
             .on_action(cx.listener(|this, _: &OpenSelected, window, cx| {
-                if this.conflict.is_some() {
+                if this.delete_prompt.is_some() {
+                    this.resolve_delete(true, cx);
+                } else if this.conflict.is_some() {
                     this.resolve_conflict(true, cx);
                 } else if this.renaming.is_some() {
                     this.commit_rename(window, cx);
@@ -741,7 +743,10 @@ impl Render for Workspace {
                 this.start_rename(window, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteSelected, _window, cx| {
-                this.delete_selected(cx);
+                this.delete_selected(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeletePermanently, _window, cx| {
+                this.delete_selected(true, cx);
             }))
             // Bubbled up from the (empty) search input: file-level
             // clipboard operations on the selected row.
@@ -775,6 +780,8 @@ impl Render for Workspace {
                         this.close_menu(cx);
                     } else if this.scope_menu.is_some() {
                         this.close_scope_menu(cx);
+                    } else if this.delete_prompt.is_some() {
+                        this.resolve_delete(false, cx);
                     } else if this.conflict.is_some() {
                         this.resolve_conflict(false, cx);
                     } else if this.settings_open {
@@ -896,6 +903,7 @@ impl Render for Workspace {
             .children(self.render_context_menu(cx))
             .children(self.render_settings_modal(window, cx))
             .children(self.render_conflict_modal(cx))
+            .children(self.render_delete_modal(cx))
             .children(self.render_feedback_modal(cx))
             .children(self.render_connect_modal(cx))
             .children(self.render_picker_filter_menu(cx))
