@@ -273,6 +273,129 @@ mod tests {
         assert!(!dest.exists());
     }
 
+    /// Reads one entry's bytes out of `zip`.
+    fn entry_bytes(zip: &Path, name: &str) -> Vec<u8> {
+        let mut archive = zip::ZipArchive::new(File::open(zip).unwrap()).unwrap();
+        let mut body = Vec::new();
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_end(&mut body)
+            .unwrap();
+        body
+    }
+
+    fn set_mtime(path: &Path, time: std::time::SystemTime) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_folders_are_skipped_even_when_they_form_a_cycle() {
+        let dir = tree();
+        let photos = dir.path().join("photos");
+        // A link back to an ancestor: following it would never end.
+        std::os::unix::fs::symlink(dir.path(), photos.join("loop")).unwrap();
+        std::os::unix::fs::symlink(photos.join("empty"), photos.join("linked")).unwrap();
+        let dest = dir.path().join("out.zip");
+        compress(&[photos], &dest, &OpProgress::default()).unwrap();
+        assert_eq!(names(&dest), ["photos/", "photos/a.jpg", "photos/empty/"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_files_are_stored_as_their_target() {
+        let dir = tree();
+        let photos = dir.path().join("photos");
+        std::os::unix::fs::symlink(dir.path().join("report.pdf"), photos.join("alias.pdf"))
+            .unwrap();
+        let dest = dir.path().join("out.zip");
+        compress(&[photos], &dest, &OpProgress::default()).unwrap();
+        assert!(names(&dest).contains(&"photos/alias.pdf".to_string()));
+        assert_eq!(entry_bytes(&dest, "photos/alias.pdf"), b"pdf bytes");
+    }
+
+    #[test]
+    fn data_larger_than_one_chunk_round_trips_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        // ~700 KiB, so the read loop runs three times; a non-repeating
+        // pattern catches a chunk written twice, dropped or reordered.
+        let data: Vec<u8> = (0..700 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        assert!(data.len() > 2 * CHUNK);
+        let file = dir.path().join("big.bin");
+        fs::write(&file, &data).unwrap();
+        let dest = dir.path().join("out.zip");
+        compress(&[file], &dest, &OpProgress::default()).unwrap();
+        assert_eq!(entry_bytes(&dest, "big.bin"), data);
+    }
+
+    #[test]
+    fn progress_ends_with_done_equal_to_total_file_bytes() {
+        let dir = tree();
+        let dest = dir.path().join("out.zip");
+        let sources = [dir.path().join("report.pdf"), dir.path().join("photos")];
+        let progress = OpProgress::default();
+        compress(&sources, &dest, &progress).unwrap();
+        let expected = (b"pdf bytes".len() + 300_000) as u64;
+        assert_eq!(progress.bytes(), (expected, expected));
+    }
+
+    #[test]
+    fn stored_entries_carry_the_file_modification_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("dated.txt");
+        fs::write(&file, b"x").unwrap();
+        // 2024-03-15 10:20:30 UTC (an even second: DOS time has 2 s steps).
+        let days = 19_797;
+        let time = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(days * 86_400 + 10 * 3600 + 20 * 60 + 30);
+        set_mtime(&file, time);
+        let dest = dir.path().join("out.zip");
+        compress(&[file], &dest, &OpProgress::default()).unwrap();
+        let mut archive = zip::ZipArchive::new(File::open(&dest).unwrap()).unwrap();
+        let stamp = archive
+            .by_name("dated.txt")
+            .unwrap()
+            .last_modified()
+            .unwrap();
+        assert_eq!(
+            (
+                stamp.year(),
+                stamp.month(),
+                stamp.day(),
+                stamp.hour(),
+                stamp.minute()
+            ),
+            (2024, 3, 15, 10, 20)
+        );
+        assert!(
+            stamp.second().abs_diff(30) <= 1,
+            "second {}",
+            stamp.second()
+        );
+    }
+
+    #[test]
+    fn mtime_past_dos_range_still_produces_a_valid_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("future.txt");
+        fs::write(&file, b"from the future").unwrap();
+        // Year 2200: past what a DOS timestamp can hold.
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(7_258_118_400);
+        assert_eq!(zip_time(time), None);
+        set_mtime(&file, time);
+        let dest = dir.path().join("out.zip");
+        compress(&[file], &dest, &OpProgress::default()).unwrap();
+        assert_eq!(entry_bytes(&dest, "future.txt"), b"from the future");
+    }
+
     #[test]
     fn civil_dates_round_trip_known_days() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
