@@ -189,7 +189,11 @@ impl Element for TextElement {
         // Everything the input paints is clipped to its box, so scrolled
         // text (and the caret/selection) can't bleed over the toolbar.
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-            if let Some(selection) = prepaint.selection.take() {
+            // A selection is only live while the field has focus; left
+            // painted after blur it reads as a stuck highlight.
+            if let Some(selection) = prepaint.selection.take()
+                && focus_handle.is_focused(window)
+            {
                 window.paint_quad(selection)
             }
             let origin = point(bounds.left() - scroll, bounds.top());

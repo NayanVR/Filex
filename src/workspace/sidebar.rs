@@ -493,8 +493,9 @@ impl Workspace {
                 }));
                 content = content.child(
                     ui::sidebar::sidebar_row(&theme, "connect-to-server")
-                        .text_color(theme.text_dim)
-                        .child(ui::icon::ui_icon("icons/server.svg", theme.text_dim).size(px(14.)))
+                        // A "+", not a drive glyph: it's an action, not a
+                        // mounted volume.
+                        .child(ui::icon::ui_icon("icons/plus.svg", theme.text_dim).size(px(14.)))
                         .child(ui::sidebar::sidebar_label("Connect to Server…"))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.open_connect(None, None, window, cx);

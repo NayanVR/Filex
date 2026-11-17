@@ -20,6 +20,14 @@ use std::path::{Path, PathBuf};
 use crate::ops::FileOp;
 use crate::search::filter::{Filter, parse_query};
 use crate::search::phrases;
+use crate::tags::{Tag, TagColor};
+
+mod intent;
+mod natural;
+pub use intent::{
+    AppCommand, Go, Intent, Question, Suggestion, SuggestionAction, interpret, suggest,
+};
+pub use natural::{Understood, did_you_mean, name_distance, understand};
 
 /// The most operations one Magic plan may contain. The bound is about
 /// *review* — nobody reads ten thousand rows before clicking confirm.
@@ -32,6 +40,12 @@ pub enum Verb {
     Move,
     Copy,
     Rename,
+    /// Pack the matches into one ZIP ([`crate::archive`]).
+    Compress,
+    Tag,
+    Untag,
+    /// Sort a folder's files into subfolders (a create-folder + move plan).
+    Organize,
 }
 
 impl Verb {
@@ -42,6 +56,10 @@ impl Verb {
             Self::Move => "Move",
             Self::Copy => "Copy",
             Self::Rename => "Rename",
+            Self::Compress => "Compress",
+            Self::Tag => "Tag",
+            Self::Untag => "Untag",
+            Self::Organize => "Organize",
         }
     }
 
@@ -52,6 +70,10 @@ impl Verb {
             Self::Move => "moved",
             Self::Copy => "copied",
             Self::Rename => "renamed",
+            Self::Compress => "compressed",
+            Self::Tag => "tagged",
+            Self::Untag => "untagged",
+            Self::Organize => "organized",
         }
     }
 }
@@ -66,6 +88,12 @@ pub struct Selection {
     pub text: String,
     /// Filters from `key:value` tokens and phrases alike. All AND.
     pub filters: Vec<Filter>,
+    /// `from Downloads` / `in Archive`: only files under this folder.
+    /// Resolved like a destination, then used as the search scope.
+    pub within: Option<Destination>,
+    /// "selected" / "these": the files selected in the list. No search
+    /// runs; the plan is built from the selection itself.
+    pub picked: bool,
 }
 
 /// Where a move or copy is headed, as spelled. [`resolve_destination`]
@@ -74,6 +102,9 @@ pub struct Selection {
 pub struct Destination {
     /// The cleaned-up folder name ("documents", "project archive").
     pub name: String,
+    /// `to new folder Archive`: make it in the folder on screen when it
+    /// isn't there yet, instead of refusing.
+    pub create: bool,
 }
 
 /// What the command does to each matched file.
@@ -83,6 +114,38 @@ pub enum Action {
     Move(Destination),
     Copy(Destination),
     Rename(NamePattern),
+    Compress,
+    Tag(Tag),
+    /// Remove one tag by name, or every tag.
+    Untag(Option<String>),
+    Organize(OrganizeBy),
+}
+
+/// What an `organize` plan names its subfolders after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrganizeBy {
+    /// `Images`, `Documents`, … ([`FileKind`]).
+    Kind,
+    /// `PDF`, `PNG`, …
+    Extension,
+    /// `2026-11`, from the modified time.
+    Month,
+    /// `2026`.
+    Year,
+}
+
+/// What a move or copy does when the destination already holds a file of
+/// that name. Two matches sharing a name always keep both, whatever this
+/// says — "replace" between them would silently drop one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConflictPolicy {
+    /// Retarget to the first free `name 2` variant.
+    #[default]
+    KeepBoth,
+    /// Leave that file where it is.
+    Skip,
+    /// Trash the existing file first (undo brings it back).
+    Replace,
 }
 
 /// A parsed natural-language command.
@@ -103,6 +166,37 @@ pub struct Plan {
     /// How many matches were left out for that reason, so the card can
     /// account for the difference against what the search found.
     pub skipped: usize,
+    /// Folders to make before the ops run (`to new folder X`, organize's
+    /// buckets). Not ops themselves: a move can't be kept while the
+    /// folder it lands in is unchecked.
+    pub creates: Vec<PathBuf>,
+    /// Matches whose name is already taken in the destination — what
+    /// [`ConflictPolicy`] decided for. Zero hides the policy control.
+    pub conflicts: usize,
+    /// The files a compress or tag plan acts on. Those verbs have no
+    /// per-file [`FileOp`], so `ops` is empty and this is the review list.
+    pub targets: Vec<PathBuf>,
+    /// Where a compress plan writes its ZIP.
+    pub archive: Option<PathBuf>,
+}
+
+impl Plan {
+    /// Rows in the review list.
+    pub fn len(&self) -> usize {
+        self.ops.len() + self.targets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The file row `ix` acts on.
+    pub fn source(&self, ix: usize) -> Option<&Path> {
+        match self.ops.get(ix) {
+            Some(op) => Some(op.source()),
+            None => self.targets.get(ix - self.ops.len()).map(PathBuf::as_path),
+        }
+    }
 }
 
 /// Why a parsed command could not become a plan. Each suppresses the
@@ -111,6 +205,8 @@ pub struct Plan {
 pub enum PlanError {
     /// The selection matched no files.
     NoMatches,
+    /// The command is about "selected" files and none are.
+    NothingSelected,
     /// More matches than [`MAX_PLAN_OPS`].
     TooMany(usize),
     /// Every match was already in the requested state.
@@ -130,6 +226,9 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoMatches => write!(f, "nothing matched"),
+            Self::NothingSelected => {
+                write!(f, "nothing is selected — select files in the list first")
+            }
             // Not "{count} matched": callers fetch exactly one past the
             // cap, so the count is always MAX_PLAN_OPS + 1.
             Self::TooMany(_) => write!(
@@ -165,24 +264,48 @@ pub fn parse(raw: &str, now: i64) -> Option<Command> {
     parse_with_gate(raw, now, true)
 }
 
-/// [`parse`], with control over the delete gate — the only difference
-/// between the two entry paths into magic mode. `true` (auto-switch)
-/// requires a delete to carry a filter, so `delete reminder` can't arm a
-/// delete off a filename; `false` (explicit toggle) takes the user at
-/// their word. See `docs/design-magic-mode.md` §"Where the delete gate
-/// goes".
-pub fn parse_with_gate(raw: &str, now: i64, require_delete_evidence: bool) -> Option<Command> {
+/// [`parse`], with control over how strict the reading is — the only
+/// difference between the two entry paths into magic mode.
+///
+/// `auto = true` is the reading that may flip a normal search into magic
+/// view by itself, so it accepts only what was measured safe against real
+/// filenames (`tests/magic_false_positives.rs`): move/copy/rename, and a
+/// delete that carries a filter. `auto = false` (the user asked for magic
+/// mode) takes them at their word: any delete, the newer verbs (compress,
+/// tag, untag, organize) and "selected" as a target. See
+/// `docs/design-magic-mode.md` §"Where the delete gate goes".
+pub fn parse_with_gate(raw: &str, now: i64, auto: bool) -> Option<Command> {
     let words: Vec<&str> = raw.split_whitespace().collect();
     let (first, rest) = words.split_first()?;
-    let verb = verb_of(&first.to_ascii_lowercase())?;
-    let rest = strip_quantifier(rest);
-    if rest.is_empty() {
+    let mut verb = verb_of(&first.to_ascii_lowercase())?;
+    let mut rest = strip_quantifier(rest);
+    // "remove tag Work from invoices" — a delete verb, but of a tag.
+    let mut tag_named = None;
+    if verb == Verb::Delete
+        && rest.first().is_some_and(|w| w.eq_ignore_ascii_case("tag"))
+        && let Some(at) = rest.iter().position(|w| w.eq_ignore_ascii_case("from"))
+        && at > 1
+    {
+        tag_named = Some(rest[1..at].join(" "));
+        rest = strip_quantifier(&rest[at + 1..]);
+        verb = Verb::Untag;
+    }
+    if auto && !matches!(verb, Verb::Delete | Verb::Move | Verb::Copy | Verb::Rename) {
+        return None;
+    }
+    if rest.is_empty() && verb != Verb::Organize {
         return None;
     }
 
     let (target, action) = match verb {
         Verb::Delete => (rest, Action::Delete),
-        Verb::Move | Verb::Copy | Verb::Rename => {
+        Verb::Compress => (rest, Action::Compress),
+        Verb::Untag => (rest, Action::Untag(tag_named)),
+        Verb::Organize => match rest.iter().rposition(|w| w.eq_ignore_ascii_case("by")) {
+            Some(at) => (&rest[..at], Action::Organize(organize_by(&rest[at + 1..])?)),
+            None => (rest, Action::Organize(OrganizeBy::Kind)),
+        },
+        Verb::Move | Verb::Copy | Verb::Rename | Verb::Tag => {
             // Last separator wins, so a folder named "to" in the target
             // half can't steal the split.
             let at = rest.iter().rposition(|word| is_separator(word, verb))?;
@@ -194,14 +317,18 @@ pub fn parse_with_gate(raw: &str, now: i64, require_delete_evidence: bool) -> Op
                 Verb::Move => Action::Move(parse_destination(tail)?),
                 Verb::Copy => Action::Copy(parse_destination(tail)?),
                 Verb::Rename => Action::Rename(NamePattern::parse(&tail.join(" "))?),
-                Verb::Delete => unreachable!("delete takes no separator"),
+                _ => Action::Tag(tag_from(tail)),
             };
             (target, action)
         }
     };
 
-    let selection = selection_from(target, now)?;
-    if require_delete_evidence && !clears_delete_gate(verb, &selection) {
+    let selection = if verb == Verb::Organize {
+        organize_target(target)
+    } else {
+        selection_from(target, now, !auto, false)?
+    };
+    if auto && !clears_delete_gate(verb, &selection) {
         return None;
     }
     Some(Command {
@@ -231,6 +358,10 @@ fn verb_of(word: &str) -> Option<Verb> {
         "move" => Verb::Move,
         "copy" => Verb::Copy,
         "rename" => Verb::Rename,
+        "compress" | "zip" | "archive" => Verb::Compress,
+        "tag" | "label" => Verb::Tag,
+        "untag" => Verb::Untag,
+        "organize" | "organise" | "tidy" | "sort" => Verb::Organize,
         _ => return None,
     })
 }
@@ -242,7 +373,8 @@ fn is_separator(word: &str, verb: Verb) -> bool {
     match verb {
         Verb::Move | Verb::Copy => word == "to" || word == "into",
         Verb::Rename => word == "to",
-        Verb::Delete => false,
+        Verb::Tag => word == "as" || word == "with",
+        _ => false,
     }
 }
 
@@ -258,12 +390,52 @@ fn strip_quantifier<'a, 'b>(words: &'a [&'b str]) -> &'a [&'b str] {
     }
 }
 
+/// Targets that mean "what I have selected" rather than describing files.
+const PICKED: &[&str] = &[
+    "selected",
+    "selection",
+    "these",
+    "them",
+    "it",
+    "this",
+    "those",
+    "that",
+    "this file",
+    "these ones",
+    "selected ones",
+    "what i selected",
+    "everything selected",
+    "selected files",
+    "selected items",
+    "these files",
+    "these items",
+];
+
+/// Targets that mean "whatever is there": no name to match on.
+const EVERYTHING: &[&str] = &["everything", "anything", "files", "items", "stuff", "*"];
+
 /// Run the target words through the ordinary search parse, so a command's
 /// target supports exactly the search bar's vocabulary. `None` when
-/// nothing survives — the "verb with no target" case.
-fn selection_from(words: &[&str], now: i64) -> Option<Selection> {
+/// nothing survives — the "verb with no target" case. `explicit` allows
+/// "selected"; `allow_all` lets a question be about every file.
+pub(crate) fn selection_from(
+    words: &[&str],
+    now: i64,
+    explicit: bool,
+    allow_all: bool,
+) -> Option<Selection> {
     let source = words.join(" ");
-    let parsed = parse_query(&source, now);
+    if explicit && PICKED.contains(&source.to_ascii_lowercase().as_str()) {
+        return Some(Selection {
+            source,
+            text: String::new(),
+            filters: Vec::new(),
+            within: None,
+            picked: true,
+        });
+    }
+    let (words, within) = split_within(words, now);
+    let parsed = parse_query(&words.join(" "), now);
     // `expand_as_description`, not `expand`: the verb already established
     // these words describe a set, so the single-word filename rule must
     // not apply — else `delete screenshots` means files *named* that.
@@ -275,23 +447,164 @@ fn selection_from(words: &[&str], now: i64) -> Option<Selection> {
             filters.push(filter);
         }
     }
-    if expansion.text.is_empty() && filters.is_empty() {
+    let mut text = expansion.text;
+    let everything = EVERYTHING.contains(&text.to_ascii_lowercase().as_str());
+    if everything && (within.is_some() || allow_all || !filters.is_empty()) {
+        text.clear();
+    }
+    if text.is_empty() && filters.is_empty() && within.is_none() && !(allow_all && everything) {
         return None;
     }
     Some(Selection {
         source,
-        text: expansion.text,
+        text,
         filters,
+        within,
+        picked: false,
     })
 }
 
+/// Split a trailing `from <folder>` / `in <folder>` off the target words.
+/// "photos from last week" keeps its words: a tail that reads as a date is
+/// a date, not a place.
+fn split_within<'a, 'b>(words: &'a [&'b str], now: i64) -> (&'a [&'b str], Option<Destination>) {
+    let Some(at) = words
+        .iter()
+        .rposition(|word| matches!(word.to_ascii_lowercase().as_str(), "from" | "in" | "inside"))
+    else {
+        return (words, None);
+    };
+    let tail = &words[at + 1..];
+    if tail.iter().any(|word| word.contains(':')) {
+        return (words, None);
+    }
+    let dated = phrases::expand_as_description(&tail.join(" "), now)
+        .filters()
+        .iter()
+        .any(|filter| matches!(filter, Filter::Modified(_)));
+    match parse_destination(tail) {
+        Some(dest) if !dated => (
+            &words[..at],
+            Some(Destination {
+                create: false,
+                ..dest
+            }),
+        ),
+        _ => (words, None),
+    }
+}
+
+/// What an `organize` command sorts: the selection, a named folder, or
+/// (nothing / "here" / "this folder") the folder on screen.
+fn organize_target(words: &[&str]) -> Selection {
+    let source = words.join(" ");
+    // "everything here", "all the files in Downloads": the folder is
+    // what's left once the words for "its contents" are gone.
+    let mut words = words;
+    while let Some((first, rest)) = words.split_first()
+        && matches!(
+            first.to_ascii_lowercase().as_str(),
+            "everything" | "all" | "the" | "my" | "files" | "items" | "stuff" | "in" | "inside"
+        )
+    {
+        words = rest;
+    }
+    let lower = words.join(" ").to_ascii_lowercase();
+    let here = [
+        "",
+        "here",
+        "this",
+        "this folder",
+        "this directory",
+        "current folder",
+    ];
+    Selection {
+        text: String::new(),
+        filters: Vec::new(),
+        picked: PICKED.contains(&lower.as_str()),
+        within: if here.contains(&lower.as_str()) || PICKED.contains(&lower.as_str()) {
+            None
+        } else {
+            parse_destination(words)
+        },
+        source,
+    }
+}
+
+fn organize_by(words: &[&str]) -> Option<OrganizeBy> {
+    Some(match words.join(" ").to_ascii_lowercase().as_str() {
+        "type" | "kind" | "file type" => OrganizeBy::Kind,
+        "extension" | "ext" => OrganizeBy::Extension,
+        "month" | "date" => OrganizeBy::Month,
+        "year" => OrganizeBy::Year,
+        _ => return None,
+    })
+}
+
+/// A tag from the words after `as`: `red` is Finder's red "Red" tag,
+/// `red urgent` a red tag named "urgent", anything else a plain name.
+fn tag_from(words: &[&str]) -> Tag {
+    let color = |word: &str| {
+        Some(match word.to_ascii_lowercase().as_str() {
+            "grey" | "gray" => TagColor::Grey,
+            "green" => TagColor::Green,
+            "purple" => TagColor::Purple,
+            "blue" => TagColor::Blue,
+            "yellow" => TagColor::Yellow,
+            "red" => TagColor::Red,
+            "orange" => TagColor::Orange,
+            _ => return None,
+        })
+    };
+    match (color(words[0]), words) {
+        (Some(color), [only]) => {
+            let mut name = only.to_ascii_lowercase();
+            name[..1].make_ascii_uppercase();
+            Tag::colored(name, color)
+        }
+        (Some(color), [_, rest @ ..]) => Tag::colored(rest.join(" "), color),
+        _ => Tag::new(words.join(" ")),
+    }
+}
+
 /// Clean a destination phrase to a folder name: drop leading filler and a
-/// trailing "folder"/"directory". `None` if nothing is left.
+/// trailing "folder"/"directory". `new folder X` (optionally `a new
+/// folder called X`) asks for it to be made. `None` if nothing is left.
 fn parse_destination(words: &[&str]) -> Option<Destination> {
+    let is = |word: &&str, options: &[&str]| options.contains(&word.to_ascii_lowercase().as_str());
     let mut words = strip_quantifier(words);
+    if words.first().is_some_and(|w| is(w, &["a"])) && words.len() > 1 {
+        words = &words[1..];
+    }
+    if let [new, folder, name @ ..] = words
+        && is(new, &["new"])
+        && is(folder, &["folder", "directory"])
+    {
+        let name = match name.split_first() {
+            Some((first, rest)) if is(first, &["called", "named"]) => rest,
+            _ => name,
+        };
+        // No name left: a folder literally called "new", handled below.
+        if !name.is_empty() {
+            return Some(Destination {
+                name: name.join(" "),
+                create: true,
+            });
+        }
+    }
+    // "a folder called Trip": that folder, made if it isn't there.
+    if let [folder, called, name @ ..] = words
+        && is(folder, &["folder", "directory"])
+        && is(called, &["called", "named"])
+        && !name.is_empty()
+    {
+        return Some(Destination {
+            name: name.join(" "),
+            create: true,
+        });
+    }
     while let Some((last, rest)) = words.split_last() {
-        let last = last.to_ascii_lowercase();
-        if last == "folder" || last == "directory" {
+        if is(last, &["folder", "directory"]) {
             words = rest;
         } else {
             break;
@@ -302,6 +615,7 @@ fn parse_destination(words: &[&str]) -> Option<Destination> {
     }
     Some(Destination {
         name: words.join(" "),
+        create: false,
     })
 }
 
@@ -451,27 +765,95 @@ pub struct PlanContext<'a> {
     /// The folder being browsed; destinations resolve here first.
     pub cwd: &'a Path,
     pub dirs: &'a UserDirs,
+    pub conflicts: ConflictPolicy,
 }
 
 /// Turn a spelled destination into a real directory. A subfolder of the
 /// folder on screen wins over a same-named known folder ("move these to
 /// Archive" means the one you're looking at); known folders are the
-/// fallback, which is what makes "to Documents" work from anywhere.
+/// fallback, which is what makes "to Documents" work from anywhere. A
+/// typed path (`~/Desktop/old`, `/tmp`) names itself.
 ///
 /// The current-folder lookup scans the directory preferring an exact-case
 /// hit, rather than probing `cwd.join(name)`. A join probe succeeds on
 /// case-insensitive Windows/macOS and hands back the user's spelling
 /// while resolving nothing on Linux — one command, a different
 /// destination per OS. Scanning yields the true on-disk name everywhere.
+///
+/// A `create` destination that isn't there yet resolves to where it will
+/// be made — inside the folder on screen — so the result may not exist.
 pub fn resolve_destination(dest: &Destination, ctx: &PlanContext) -> Result<PathBuf, PlanError> {
+    let unknown = || PlanError::UnknownDestination(dest.name.clone());
+    if let Some(path) = typed_path(&dest.name, ctx.dirs) {
+        return path.is_dir().then_some(path).ok_or_else(unknown);
+    }
     if let Some(dir) = destination_in(ctx.cwd, &dest.name) {
         return Ok(dir);
     }
-    ctx.dirs
-        .get(&dest.name)
-        .filter(|path| path.is_dir())
-        .map(Path::to_path_buf)
-        .ok_or_else(|| PlanError::UnknownDestination(dest.name.clone()))
+    // "from here", "in this folder": the folder on screen — unless a
+    // folder really called that is in it (above).
+    if !dest.create
+        && ctx.cwd.is_absolute()
+        && [
+            "here",
+            "this",
+            "current",
+            "this folder",
+            "current folder",
+            "the current folder",
+            "this directory",
+        ]
+        .contains(&dest.name.to_ascii_lowercase().as_str())
+    {
+        return Ok(ctx.cwd.to_path_buf());
+    }
+    if dest.create {
+        if !ctx.cwd.is_absolute() {
+            return Err(unknown());
+        }
+        if !is_valid_file_name(&dest.name) {
+            return Err(PlanError::InvalidName(dest.name.clone()));
+        }
+        return Ok(ctx.cwd.join(&dest.name));
+    }
+    if let Some(path) = ctx.dirs.get(&dest.name).filter(|path| path.is_dir()) {
+        return Ok(path.to_path_buf());
+    }
+    // A near miss ("documnets", "Donwloads"): one folder here or among
+    // the well-known ones is a single slip away. The plan shows the real
+    // path, so the fix is visible before anything moves.
+    let here = if ctx.cwd.is_absolute() {
+        names_in(ctx.cwd)
+    } else {
+        HashSet::new()
+    };
+    let candidates = here
+        .iter()
+        .map(String::as_str)
+        .chain(ctx.dirs.by_name.keys().map(String::as_str));
+    let near = natural::nearest(&dest.name, candidates).ok_or_else(unknown)?;
+    destination_in(ctx.cwd, near)
+        .or_else(|| {
+            ctx.dirs
+                .get(near)
+                .filter(|path| path.is_dir())
+                .map(Path::to_path_buf)
+        })
+        .ok_or_else(unknown)
+}
+
+/// `name` as a path, when it is spelled like one: absolute, or under `~`.
+pub fn typed_path(name: &str, dirs: &UserDirs) -> Option<PathBuf> {
+    if name == "~" {
+        return dirs.get("home").map(Path::to_path_buf);
+    }
+    if let Some(rest) = name.strip_prefix("~/").or_else(|| name.strip_prefix("~\\")) {
+        return dirs.get("home").map(|home| home.join(rest));
+    }
+    let path = Path::new(name);
+    // `has_root`, not `is_absolute`: on Windows `\Users` and `/x` have a
+    // root but no drive, and are still a typed path, not a name to search.
+    path.has_root().then(|| path.to_path_buf())
 }
 
 /// The folder `name` inside `cwd`, exact case first. A relative `cwd`
@@ -510,7 +892,8 @@ fn destination_in(cwd: &Path, name: &str) -> Option<PathBuf> {
 // Plan building
 // ---------------------------------------------------------------------
 
-/// Resolve `command` against the files the search matched.
+/// Resolve `command` against the files it targets — what the search
+/// matched, the selection, or (organize) a folder's own files.
 ///
 /// `matches` is sorted by path first, so a plan — and a rename's `{n}`
 /// numbering in particular — depends only on *which* files matched, not
@@ -527,25 +910,80 @@ pub fn build(command: &Command, matches: &[PathBuf], ctx: &PlanContext) -> Resul
     let mut matches = matches.to_vec();
     matches.sort();
 
-    let ops = match &command.action {
-        Action::Delete => matches
-            .iter()
-            .map(|path| FileOp::Delete { path: path.clone() })
-            .collect(),
-        Action::Move(dest) => transfer_ops(&matches, dest, ctx, true)?,
-        Action::Copy(dest) => transfer_ops(&matches, dest, ctx, false)?,
-        Action::Rename(pattern) => rename_ops(&matches, pattern)?,
+    let mut plan = Plan {
+        verb: command.verb,
+        ops: Vec::new(),
+        skipped: 0,
+        creates: Vec::new(),
+        conflicts: 0,
+        targets: Vec::new(),
+        archive: None,
     };
+    match &command.action {
+        Action::Delete => {
+            plan.ops = matches
+                .iter()
+                .map(|path| FileOp::Delete { path: path.clone() })
+                .collect();
+        }
+        Action::Move(dest) => transfer_ops(&matches, dest, ctx, true, &mut plan)?,
+        Action::Copy(dest) => transfer_ops(&matches, dest, ctx, false, &mut plan)?,
+        Action::Rename(pattern) => {
+            plan.ops = rename_ops(&matches, pattern)?;
+            plan.skipped = matches.len() - plan.ops.len();
+        }
+        Action::Compress => {
+            // A ZIP stores each item under its own name at the root, so
+            // two matches sharing a name can't both go in.
+            let mut names = HashSet::new();
+            plan.targets = matches
+                .iter()
+                .filter(|path| path.file_name().is_some_and(|name| names.insert(name)))
+                .cloned()
+                .collect();
+            plan.skipped = matches.len() - plan.targets.len();
+            plan.archive = archive_dest(&plan.targets, ctx);
+        }
+        Action::Tag(_) | Action::Untag(_) => plan.targets = matches.clone(),
+        Action::Organize(by) => organize_ops(&matches, *by, &mut plan)?,
+    }
 
-    if ops.is_empty() {
+    if plan.is_empty() {
         return Err(PlanError::NothingToDo);
     }
-    check_collisions(&ops)?;
-    Ok(Plan {
-        verb: command.verb,
-        skipped: matches.len() - ops.len(),
-        ops,
-    })
+    check_collisions(&plan.ops)?;
+    Ok(plan)
+}
+
+/// Where a compress plan writes: beside the files when they share a
+/// folder, else the folder on screen. Named after a lone item, `Archive`
+/// otherwise. Execution retargets an occupied name.
+fn archive_dest(targets: &[PathBuf], ctx: &PlanContext) -> Option<PathBuf> {
+    let first = targets.first()?;
+    let parent = first.parent()?;
+    let together = targets.iter().all(|path| path.parent() == Some(parent));
+    let dir = if together || !ctx.cwd.is_absolute() {
+        parent
+    } else {
+        ctx.cwd
+    };
+    let stem = match targets {
+        [only] => only.file_stem()?.to_string_lossy().into_owned(),
+        _ => "Archive".to_owned(),
+    };
+    Some(dir.join(format!("{stem}.zip")))
+}
+
+/// The names already in `dir` — one `read_dir`, so name clashes are
+/// answered in memory instead of with a stat per file. Empty when `dir`
+/// doesn't exist yet.
+fn names_in(dir: &Path) -> HashSet<String> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect()
 }
 
 /// Move/copy operations into a resolved destination directory.
@@ -554,39 +992,44 @@ pub fn build(command: &Command, matches: &[PathBuf], ctx: &PlanContext) -> Resul
 /// directory that *contains* the destination (moving a folder inside
 /// itself) — so one degenerate match doesn't void a fine plan.
 ///
-/// **Collisions are resolved, not refused.** Two matches sharing a base
-/// name retarget to the first free `name 2` variant, as the execute,
-/// paste and drag paths already do, so the preview shows the real
-/// outcome. One `read_dir` up front, not a stat per file.
+/// **Collisions are resolved, not refused**, per [`ConflictPolicy`]: by
+/// default a taken name retargets to the first free `name 2` variant, as
+/// the paste and drag paths already do, so the preview shows the real
+/// outcome.
 fn transfer_ops(
     matches: &[PathBuf],
     dest: &Destination,
     ctx: &PlanContext,
     moving: bool,
-) -> Result<Vec<FileOp>, PlanError> {
+    plan: &mut Plan,
+) -> Result<(), PlanError> {
     let dir = resolve_destination(dest, ctx)?;
-    // Names spoken for in `dir`: on disk now, plus what earlier ops in
-    // this plan claimed. In memory, so no per-file I/O.
-    let mut taken: HashSet<String> = HashSet::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                taken.insert(name.to_owned());
-            }
-        }
+    if !dir.is_dir() {
+        plan.creates.push(dir.clone());
     }
-    let mut ops = Vec::with_capacity(matches.len());
+    let on_disk = names_in(&dir);
+    // Names earlier ops in this plan claimed.
+    let mut claimed: HashSet<String> = HashSet::new();
     for from in matches {
-        if from.parent() == Some(dir.as_path()) || dir.starts_with(from) {
+        // Anywhere under the destination is already there: "move pdfs to
+        // Downloads" must not pull Downloads/Taxes/*.pdf up a level.
+        if from.starts_with(&dir) || dir.starts_with(from) {
+            plan.skipped += 1;
             continue;
         }
         let Some(name) = from.file_name().and_then(|n| n.to_str()) else {
             return Err(PlanError::InvalidName(from.display().to_string()));
         };
-        let free = free_variant(name, &taken);
-        taken.insert(free.clone());
+        let clash = on_disk.contains(name);
+        plan.conflicts += usize::from(clash);
+        let free = match ctx.conflicts {
+            ConflictPolicy::Skip if clash => continue,
+            ConflictPolicy::Replace if clash && !claimed.contains(name) => name.to_owned(),
+            _ => free_variant(name, |n| on_disk.contains(n) || claimed.contains(n)),
+        };
+        claimed.insert(free.clone());
         let to = dir.join(&free);
-        ops.push(if moving {
+        plan.ops.push(if moving {
             FileOp::Move {
                 from: from.clone(),
                 to,
@@ -598,13 +1041,88 @@ fn transfer_ops(
             }
         });
     }
-    Ok(ops)
+    Ok(())
 }
 
-/// The first of `name`, `name 2`, `name 3`… not in `taken` (Finder's
+/// Sort each file into a subfolder of the folder it is in, named by
+/// `by`. Folders and dotfiles stay put: a folder isn't a "kind", and
+/// moving `.DS_Store`-style files breaks whatever owns them.
+///
+/// Assumes `matches` are the files to sort, not a recursive listing —
+/// the caller reads one folder's direct children.
+fn organize_ops(matches: &[PathBuf], by: OrganizeBy, plan: &mut Plan) -> Result<(), PlanError> {
+    // Bucket folder → names taken in it (on disk, plus earlier ops).
+    let mut buckets: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    for from in matches {
+        let (Some(base), Some(name)) = (from.parent(), from.file_name().and_then(|n| n.to_str()))
+        else {
+            return Err(PlanError::InvalidName(from.display().to_string()));
+        };
+        if name.starts_with('.') || from.is_dir() {
+            plan.skipped += 1;
+            continue;
+        }
+        let bucket = base.join(bucket_name(from, name, by));
+        let taken = buckets.entry(bucket.clone()).or_insert_with(|| {
+            if !bucket.is_dir() {
+                plan.creates.push(bucket.clone());
+            }
+            names_in(&bucket)
+        });
+        let free = free_variant(name, |n| taken.contains(n));
+        taken.insert(free.clone());
+        plan.ops.push(FileOp::Move {
+            from: from.clone(),
+            to: bucket.join(free),
+        });
+    }
+    Ok(())
+}
+
+/// The subfolder `organize` files `name` under.
+fn bucket_name(path: &Path, name: &str, by: OrganizeBy) -> String {
+    use crate::listing::FileKind;
+    let ext = Path::new(name).extension().and_then(|e| e.to_str());
+    match by {
+        OrganizeBy::Kind => match FileKind::of(name, false) {
+            FileKind::Image => "Images",
+            FileKind::Video => "Videos",
+            FileKind::Audio => "Audio",
+            FileKind::Archive => "Archives",
+            FileKind::Code => "Code",
+            FileKind::Document => "Documents",
+            FileKind::Directory | FileKind::Other => "Other",
+        }
+        .to_owned(),
+        OrganizeBy::Extension => {
+            ext.map_or_else(|| "No extension".to_owned(), str::to_ascii_uppercase)
+        }
+        OrganizeBy::Month | OrganizeBy::Year => {
+            let modified = std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+            let Some(secs) = modified else {
+                return "Undated".to_owned();
+            };
+            // ponytail: UTC, so a file saved within hours of a month
+            // boundary can land a month off local time. Use the local
+            // offset if that ever matters.
+            let days = (secs.as_secs() as i64).div_euclid(crate::search::filter::SECS_PER_DAY);
+            let (year, month, _) = crate::search::filter::civil_from_days(days);
+            if by == OrganizeBy::Year {
+                format!("{year}")
+            } else {
+                format!("{year}-{month:02}")
+            }
+        }
+    }
+}
+
+/// The first of `name`, `name 2`, `name 3`… that isn't `taken` (Finder's
 /// convention, split at the last dot so `x.tar.gz` → `x.tar 2.gz`).
-fn free_variant(name: &str, taken: &HashSet<String>) -> String {
-    if !taken.contains(name) {
+fn free_variant(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(name) {
         return name.to_owned();
     }
     let path = Path::new(name);
@@ -615,7 +1133,7 @@ fn free_variant(name: &str, taken: &HashSet<String>) -> String {
             Some(ext) => format!("{stem} {n}.{ext}"),
             None => format!("{stem} {n}"),
         };
-        if !taken.contains(&candidate) {
+        if !taken(&candidate) {
             return candidate;
         }
     }
@@ -653,9 +1171,9 @@ fn rename_ops(matches: &[PathBuf], pattern: &NamePattern) -> Result<Vec<FileOp>,
 /// Reject a plan whose own ops would land two files on one path — what a
 /// bad rename pattern produces, caught before the preview shows it.
 fn check_collisions(ops: &[FileOp]) -> Result<(), PlanError> {
-    // A set, not `Vec` + `contains`: this runs on the UI thread per
-    // rebuild, and the linear scan was quadratic (~240k `PathBuf`
-    // comparisons for a 697-file plan).
+    // A set, not `Vec` + `contains`: this runs per rebuild, and the
+    // linear scan was quadratic (~240k `PathBuf` comparisons for a
+    // 697-file plan).
     let mut seen: HashSet<PathBuf> = HashSet::with_capacity(ops.len());
     for op in ops {
         if let Some(dest) = op.destination()
@@ -688,7 +1206,11 @@ mod tests {
     /// A context whose cwd is an empty tempdir and whose known folders
     /// are only what a test registers.
     fn ctx<'a>(cwd: &'a Path, dirs: &'a UserDirs) -> PlanContext<'a> {
-        PlanContext { cwd, dirs }
+        PlanContext {
+            cwd,
+            dirs,
+            conflicts: ConflictPolicy::KeepBoth,
+        }
     }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
@@ -746,7 +1268,8 @@ mod tests {
         assert_eq!(
             command.action,
             Action::Move(Destination {
-                name: "Documents".into()
+                name: "Documents".into(),
+                create: false,
             })
         );
         assert_eq!(
@@ -776,7 +1299,8 @@ mod tests {
         assert_eq!(
             command.action,
             Action::Move(Destination {
-                name: "Archive".into()
+                name: "Archive".into(),
+                create: false,
             })
         );
         assert_eq!(command.selection.source, "notes to self");
@@ -816,7 +1340,8 @@ mod tests {
         assert_eq!(
             command.action,
             Action::Move(Destination {
-                name: "Archive".into()
+                name: "Archive".into(),
+                create: false,
             })
         );
     }
@@ -1129,6 +1654,22 @@ mod tests {
         );
     }
 
+    /// Regression: "move pdfs to Downloads" planned to move PDFs out of
+    /// Downloads' own subfolders into Downloads (with renames).
+    #[test]
+    fn files_inside_the_destination_at_any_depth_stay_put() {
+        let cwd = tempfile::tempdir().unwrap();
+        let archive = cwd.path().join("Archive");
+        std::fs::create_dir_all(archive.join("2024")).unwrap();
+        let dirs = UserDirs::default();
+        let command = cmd("move screenshots to Archive").unwrap();
+        let nested = archive.join("2024").join("c.png");
+        let outside = cwd.path().join("a.png");
+        let plan = build(&command, &[outside, nested], &ctx(cwd.path(), &dirs)).unwrap();
+        assert_eq!(plan.ops.len(), 1);
+        assert_eq!(plan.skipped, 1);
+    }
+
     #[test]
     fn files_already_in_the_destination_are_skipped_and_counted() {
         let cwd = tempfile::tempdir().unwrap();
@@ -1395,5 +1936,370 @@ mod tests {
                     | FileOp::Rename { .. }
             ));
         }
+    }
+
+    // -- explicit-mode grammar ------------------------------------------
+
+    /// What the user gets once they have asked for magic mode.
+    fn explicit(raw: &str) -> Option<Command> {
+        parse_with_gate(raw, NOW, false)
+    }
+
+    #[test]
+    fn the_newer_verbs_never_switch_the_mode_on_their_own() {
+        // None of these were measured against real filenames, and
+        // `zip-files.sh` or `tag-release.yml` are ordinary things to
+        // search for. They need the explicit entry.
+        for query in [
+            "zip pdfs older than 30 days",
+            "tag invoices as Work",
+            "untag screenshots",
+            "organize Downloads by type",
+            "delete selected",
+        ] {
+            assert!(cmd(query).is_none(), "{query:?} must not auto-switch");
+            assert!(explicit(query).is_some(), "{query:?} should parse");
+        }
+    }
+
+    #[test]
+    fn from_a_folder_scopes_the_selection_instead_of_naming_files() {
+        // Regression: "from" was dropped as filler and "downloads"
+        // became filename text, so this matched pdfs *named* downloads.
+        let command = cmd("move pdfs from downloads to Documents").unwrap();
+        assert_eq!(command.selection.filters, vec![Filter::Ext("pdf".into())]);
+        assert_eq!(command.selection.text, "");
+        assert_eq!(
+            command.selection.within,
+            Some(Destination {
+                name: "downloads".into(),
+                create: false
+            })
+        );
+        // "everything in X" is the folder's contents, not a file name.
+        let command = explicit("delete everything in the Scratch folder").unwrap();
+        assert_eq!(command.selection.text, "");
+        assert_eq!(command.selection.within.unwrap().name, "Scratch");
+    }
+
+    #[test]
+    fn a_date_after_from_is_still_a_date() {
+        let command = cmd("delete photos from last week").unwrap();
+        assert_eq!(command.selection.within, None);
+        assert!(
+            command
+                .selection
+                .filters
+                .iter()
+                .any(|f| matches!(f, Filter::Modified(_)))
+        );
+    }
+
+    #[test]
+    fn selected_targets_the_selection_without_a_search() {
+        for query in [
+            "delete selected",
+            "move these to Archive",
+            "zip selected files",
+        ] {
+            let command = explicit(query).unwrap();
+            assert!(command.selection.picked, "{query:?}");
+            assert!(command.selection.filters.is_empty());
+        }
+        // A file can be called "selected"; auto mode keeps reading it so.
+        assert!(!cmd("move selected to Archive").unwrap().selection.picked);
+    }
+
+    #[test]
+    fn a_new_folder_destination_is_created_in_the_current_folder() {
+        let cwd = tempfile::tempdir().unwrap();
+        let dirs = UserDirs::default();
+        let command = cmd("move screenshots to a new folder called Old Shots").unwrap();
+        assert_eq!(
+            command.action,
+            Action::Move(Destination {
+                name: "Old Shots".into(),
+                create: true
+            })
+        );
+        let source = cwd.path().join("a.png");
+        let plan = build(
+            &command,
+            std::slice::from_ref(&source),
+            &ctx(cwd.path(), &dirs),
+        )
+        .unwrap();
+        let made = cwd.path().join("Old Shots");
+        assert_eq!(plan.creates, vec![made.clone()]);
+        assert_eq!(
+            plan.ops,
+            vec![FileOp::Move {
+                from: source.clone(),
+                to: made.join("a.png")
+            }]
+        );
+        // Already there: nothing to create, same destination.
+        std::fs::create_dir(&made).unwrap();
+        let plan = build(&command, &[source], &ctx(cwd.path(), &dirs)).unwrap();
+        assert!(plan.creates.is_empty());
+    }
+
+    #[test]
+    fn a_typed_path_is_its_own_destination() {
+        let cwd = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let mut dirs = UserDirs::default();
+        dirs.insert("home", elsewhere.path());
+        std::fs::create_dir(elsewhere.path().join("inbox")).unwrap();
+        let context = ctx(cwd.path(), &dirs);
+        let dest = |name: &str| Destination {
+            name: name.into(),
+            create: false,
+        };
+        assert_eq!(
+            resolve_destination(&dest("~/inbox"), &context),
+            Ok(elsewhere.path().join("inbox"))
+        );
+        assert_eq!(
+            resolve_destination(&dest(elsewhere.path().to_str().unwrap()), &context),
+            Ok(elsewhere.path().to_path_buf())
+        );
+        assert!(resolve_destination(&dest("~/nope"), &context).is_err());
+    }
+
+    #[test]
+    fn organize_reads_past_the_words_for_a_folders_contents() {
+        for here in [
+            "everything here",
+            "all the files in this folder",
+            "files",
+            "my stuff",
+        ] {
+            let target = organize_target(&here.split(' ').collect::<Vec<_>>());
+            assert_eq!((target.within, target.picked), (None, false), "{here}");
+        }
+        let target = organize_target(&["everything", "in", "Downloads"]);
+        assert_eq!(target.within.unwrap().name, "Downloads");
+        assert!(organize_target(&["these"]).picked);
+    }
+
+    #[test]
+    fn here_and_this_folder_mean_the_folder_on_screen() {
+        let cwd = tempfile::tempdir().unwrap();
+        let ctx = PlanContext {
+            cwd: cwd.path(),
+            dirs: &UserDirs::default(),
+            conflicts: Default::default(),
+        };
+        for spoken in [
+            "pdfs from here",
+            "pdfs in this folder",
+            "pdfs in the current folder",
+        ] {
+            let words: Vec<&str> = spoken.split(' ').collect();
+            let (rest, within) = split_within(&words, 0);
+            assert_eq!(rest, ["pdfs"], "{spoken}");
+            let within = within.unwrap_or_else(|| panic!("{spoken}: no folder"));
+            assert_eq!(
+                resolve_destination(&within, &ctx).unwrap(),
+                cwd.path(),
+                "{spoken}"
+            );
+        }
+        // A folder really called "here" is that folder.
+        std::fs::create_dir(cwd.path().join("here")).unwrap();
+        let here = Destination {
+            name: "here".into(),
+            create: false,
+        };
+        assert_eq!(
+            resolve_destination(&here, &ctx).unwrap(),
+            cwd.path().join("here")
+        );
+    }
+
+    #[test]
+    fn a_misspelt_folder_resolves_to_the_one_it_is_a_slip_from() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cwd.path().join("Invoices")).unwrap();
+        std::fs::write(cwd.path().join("Invoice"), b"a file, not a folder").unwrap();
+        let documents = tempfile::tempdir().unwrap();
+        let mut dirs = UserDirs::default();
+        dirs.insert("documents", documents.path());
+        let context = ctx(cwd.path(), &dirs);
+        let to = |name: &str| {
+            resolve_destination(
+                &Destination {
+                    name: name.into(),
+                    create: false,
+                },
+                &context,
+            )
+        };
+        assert_eq!(to("invocies"), Ok(cwd.path().join("Invoices")));
+        assert_eq!(to("documnets"), Ok(documents.path().to_path_buf()));
+        // Not close to anything: still unknown, never a guess.
+        assert_eq!(
+            to("Archive"),
+            Err(PlanError::UnknownDestination("Archive".into()))
+        );
+    }
+
+    #[test]
+    fn the_conflict_policy_decides_what_an_occupied_name_becomes() {
+        let cwd = tempfile::tempdir().unwrap();
+        let archive = cwd.path().join("Archive");
+        std::fs::create_dir(&archive).unwrap();
+        std::fs::write(archive.join("a.txt"), b"old").unwrap();
+        std::fs::create_dir(cwd.path().join("x")).unwrap();
+        std::fs::create_dir(cwd.path().join("y")).unwrap();
+        let dirs = UserDirs::default();
+        let command = cmd("move notes to Archive").unwrap();
+        // Two matches named a.txt (one clash on disk, one in-plan
+        // duplicate) and one free name.
+        let files = [
+            cwd.path().join("x/a.txt"),
+            cwd.path().join("y/a.txt"),
+            cwd.path().join("x/b.txt"),
+        ];
+        let targets = |policy| -> Vec<String> {
+            let context = PlanContext {
+                cwd: cwd.path(),
+                dirs: &dirs,
+                conflicts: policy,
+            };
+            let plan = build(&command, &files, &context).unwrap();
+            assert_eq!(plan.conflicts, 2);
+            plan.ops
+                .iter()
+                .map(|op| {
+                    let dest = op.destination().unwrap();
+                    dest.file_name().unwrap().to_string_lossy().into_owned()
+                })
+                .collect()
+        };
+        assert_eq!(
+            targets(ConflictPolicy::KeepBoth),
+            ["a 2.txt", "b.txt", "a 3.txt"]
+        );
+        assert_eq!(targets(ConflictPolicy::Skip), ["b.txt"]);
+        // Only one file can replace the original; the second keeps both
+        // rather than silently overwriting the first.
+        assert_eq!(
+            targets(ConflictPolicy::Replace),
+            ["a.txt", "b.txt", "a 2.txt"]
+        );
+    }
+
+    #[test]
+    fn organize_sorts_files_into_kind_folders_beside_them() {
+        let cwd = tempfile::tempdir().unwrap();
+        let dirs = UserDirs::default();
+        std::fs::create_dir(cwd.path().join("Images")).unwrap();
+        std::fs::write(cwd.path().join("Images/a.png"), b"").unwrap();
+        std::fs::create_dir(cwd.path().join("sub")).unwrap();
+        let command = explicit("organize by type").unwrap();
+        assert_eq!(command.action, Action::Organize(OrganizeBy::Kind));
+        assert_eq!(command.selection.within, None, "no target means here");
+
+        let files = [
+            cwd.path().join(".hidden"),
+            cwd.path().join("a.png"),
+            cwd.path().join("report.pdf"),
+            cwd.path().join("sub"),
+        ];
+        let plan = build(&command, &files, &ctx(cwd.path(), &dirs)).unwrap();
+        assert_eq!(
+            plan.ops,
+            vec![
+                // Images already holds an a.png: keep both.
+                FileOp::Move {
+                    from: files[1].clone(),
+                    to: cwd.path().join("Images/a 2.png")
+                },
+                FileOp::Move {
+                    from: files[2].clone(),
+                    to: cwd.path().join("Documents/report.pdf")
+                },
+            ]
+        );
+        // Only the missing bucket is created; dotfiles and folders stay.
+        assert_eq!(plan.creates, vec![cwd.path().join("Documents")]);
+        assert_eq!(plan.skipped, 2);
+    }
+
+    #[test]
+    fn organize_reads_its_folder_and_its_grouping() {
+        let command = explicit("organize my Downloads folder by extension").unwrap();
+        assert_eq!(command.action, Action::Organize(OrganizeBy::Extension));
+        assert_eq!(command.selection.within.unwrap().name, "Downloads");
+        assert!(explicit("tidy selected by month").unwrap().selection.picked);
+        // An unknown grouping is not guessed at.
+        assert!(explicit("organize Downloads by vibes").is_none());
+        assert_eq!(
+            bucket_name(Path::new("/x/a.PDF"), "a.PDF", OrganizeBy::Extension),
+            "PDF"
+        );
+        assert_eq!(
+            bucket_name(Path::new("/x/Makefile"), "Makefile", OrganizeBy::Extension),
+            "No extension"
+        );
+    }
+
+    #[test]
+    fn compress_lists_targets_and_names_the_archive() {
+        let cwd = tempfile::tempdir().unwrap();
+        let dirs = UserDirs::default();
+        let command = explicit("zip invoices").unwrap();
+        let context = ctx(cwd.path(), &dirs);
+
+        // One file: named after it, beside it.
+        let plan = build(&command, &[PathBuf::from("/a/inv.pdf")], &context).unwrap();
+        assert!(plan.ops.is_empty());
+        assert_eq!(plan.archive, Some(PathBuf::from("/a/inv.zip")));
+
+        // Across folders: in the folder on screen, and a repeated name
+        // is left out since a ZIP root holds each name once.
+        let files = [
+            PathBuf::from("/a/inv.pdf"),
+            PathBuf::from("/b/inv.pdf"),
+            PathBuf::from("/b/other.pdf"),
+        ];
+        let plan = build(&command, &files, &context).unwrap();
+        assert_eq!(plan.targets, vec![files[0].clone(), files[2].clone()]);
+        assert_eq!(plan.skipped, 1);
+        assert_eq!(plan.archive, Some(cwd.path().join("Archive.zip")));
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan.source(1), Some(files[2].as_path()));
+    }
+
+    #[test]
+    fn tags_read_a_colour_a_coloured_name_or_a_plain_name() {
+        let tag = |raw: &str| match explicit(raw).unwrap().action {
+            Action::Tag(tag) => tag,
+            other => panic!("expected a tag, got {other:?}"),
+        };
+        assert_eq!(
+            tag("tag invoices as red"),
+            Tag::colored("Red", TagColor::Red)
+        );
+        assert_eq!(
+            tag("tag invoices as blue Tax 2026"),
+            Tag::colored("Tax 2026", TagColor::Blue)
+        );
+        assert_eq!(tag("label invoices with Work"), Tag::new("Work"));
+    }
+
+    #[test]
+    fn untag_clears_every_tag_or_removes_one_by_name() {
+        assert_eq!(
+            explicit("untag invoices").unwrap().action,
+            Action::Untag(None)
+        );
+        let command = explicit("remove tag Work from invoices in Downloads").unwrap();
+        assert_eq!(command.verb, Verb::Untag);
+        assert_eq!(command.action, Action::Untag(Some("Work".into())));
+        assert_eq!(command.selection.text, "invoices");
+        assert_eq!(command.selection.within.unwrap().name, "Downloads");
     }
 }

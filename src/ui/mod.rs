@@ -124,3 +124,16 @@ pub fn card(theme: &theme::Theme) -> Div {
 pub fn solid_card(theme: &theme::Theme) -> Div {
     card(&theme.with_transparency(false))
 }
+
+/// One line of text that, when it doesn't fit, loses its *middle*
+/// ("Tropic Thunder 20…80p.mkv"), so a file name keeps its extension and
+/// a path keeps the folder it ends in. Callers set width, colour, size.
+pub fn middle_truncated(text: impl Into<gpui::SharedString>) -> gpui::Div {
+    use gpui::{div, prelude::*};
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis_middle()
+        .child(text.into())
+}

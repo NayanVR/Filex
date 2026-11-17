@@ -49,16 +49,19 @@ pub fn panel(theme: &Theme, width: f32) -> Stateful<Div> {
 }
 
 /// The large preview area holding an image or a big file icon, centered.
-pub fn preview_box(theme: &Theme) -> Div {
+/// `well` is false for an item with nothing to preview (a folder): its
+/// icon sits on the panel itself, half as tall, rather than in an empty
+/// dark tile that looked like a preview that failed to load.
+pub fn preview_box(theme: &Theme, well: bool) -> Div {
     div()
         .flex()
         .items_center()
         .justify_center()
         .w_full()
-        .h(px(180.))
+        .h(px(if well { 180. } else { 104. }))
         .flex_none()
         .rounded_xl()
-        .bg(theme.panel)
+        .when(well, |b| b.bg(theme.panel))
         .overflow_hidden()
 }
 
@@ -72,6 +75,8 @@ pub fn title(theme: &Theme, name: impl Into<SharedString>) -> Stateful<Div> {
         .w_full()
         .line_clamp(2)
         .text_ellipsis()
+        // Under the centred icon, as Finder's inspector has it.
+        .text_center()
         .text_base()
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text)

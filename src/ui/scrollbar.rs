@@ -41,6 +41,8 @@ const PAD: f32 = 2.;
 const MIN_THUMB: f32 = 28.;
 /// Width of the interactive strip on the right edge (hover + click-to-page).
 const TRACK_WIDTH: f32 = 14.;
+/// Room a list leaves at its right edge for the idle thumb.
+pub const GUTTER: f32 = 16.;
 
 /// Per-list drag/hover state that must survive across frames. Cheap to
 /// clone (an `Rc`), so the workspace holds one per scrollable list and
@@ -94,6 +96,18 @@ pub fn scrollbar(
         state,
         thumb: idle,
         thumb_hover: hover,
+        outset: 0.,
+    }
+}
+
+impl ScrollbarDecoration {
+    /// Draw the bar `by` px right of the list's padded area: a list that
+    /// pads its right edge (so rows stop short of the bar) gets its bar
+    /// in that gutter, not over the rows. gpui hands decorations the
+    /// *padded* bounds.
+    pub fn outset(mut self, by: f32) -> Self {
+        self.outset = by;
+        self
     }
 }
 
@@ -104,6 +118,7 @@ pub struct ScrollbarDecoration {
     state: ScrollbarState,
     thumb: Hsla,
     thumb_hover: Hsla,
+    outset: f32,
 }
 
 impl UniformListDecoration for ScrollbarDecoration {
@@ -125,6 +140,7 @@ impl UniformListDecoration for ScrollbarDecoration {
             scroll_top: (-f32::from(scroll_offset.y)).max(0.),
             thumb: self.thumb,
             thumb_hover: self.thumb_hover,
+            outset: self.outset,
         }
         .into_any_element()
     }
@@ -141,6 +157,7 @@ pub struct Scrollbar {
     scroll_top: f32,
     thumb: Hsla,
     thumb_hover: Hsla,
+    outset: f32,
 }
 
 /// Thumb size and position along the track. Kept as a plain-`f32` struct
@@ -275,7 +292,8 @@ impl Element for Scrollbar {
         let max_scroll = (self.content - viewport).max(0.);
 
         let thumb_top = track_top + thumb_offset;
-        let thumb_left = f32::from(bounds.origin.x) + f32::from(bounds.size.width) - width - MARGIN;
+        let right = f32::from(bounds.origin.x) + f32::from(bounds.size.width) + self.outset;
+        let thumb_left = right - width - MARGIN;
         let thumb_bounds = Bounds {
             origin: point(px(thumb_left), px(thumb_top)),
             size: size(px(width), px(thumb_height)),
@@ -283,10 +301,7 @@ impl Element for Scrollbar {
 
         // The full-height strip on the right captures hover and click-to-page.
         let track_bounds = Bounds {
-            origin: point(
-                px(f32::from(bounds.origin.x) + f32::from(bounds.size.width) - TRACK_WIDTH),
-                px(viewport_top),
-            ),
+            origin: point(px(right - TRACK_WIDTH), px(viewport_top)),
             size: size(px(TRACK_WIDTH), bounds.size.height),
         };
 

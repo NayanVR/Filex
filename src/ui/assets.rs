@@ -55,6 +55,8 @@ macro_rules! symbol {
 const ICONS: &[(&str, &[u8])] = &[
     // File-type marks.
     icon!("folder"),
+    icon!("tag"),
+    icon!("arrow-right"),
     icon!("image"),
     icon!("film"),
     icon!("music"),
@@ -94,7 +96,6 @@ const ICONS: &[(&str, &[u8])] = &[
     icon!("sparkles"),
     icon!("keyboard"),
     icon!("check"),
-    icon!("message-square"),
     icon!("info"),
     // Context-menu verbs.
     icon!("scissors"),

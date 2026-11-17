@@ -17,10 +17,10 @@ pub const CARD_SIZES: [f32; 4] = [104., 128., 156., 192.];
 
 /// Padding inside a card, on every side.
 const CARD_PAD: f32 = 8.;
-/// Height reserved under the icon for the (up to 2-line) name plus the
-/// detail line — see [`card_name`]. Fixed so every card is the same
+/// Height reserved under the icon for the (up to 2-line) name — see
+/// [`card_name`]. Fixed so every card is the same
 /// height and a long name can't push into the row below.
-const LABEL_HEIGHT: f32 = 72.;
+const LABEL_HEIGHT: f32 = 46.;
 /// Explicit metrics keep filename measurement and the two rendered lines in sync.
 const NAME_FONT_SIZE: f32 = 12.;
 const NAME_LINE_HEIGHT: f32 = 19.;
@@ -44,9 +44,19 @@ pub fn cell_width(size: f32) -> f32 {
     size + CARD_PAD * 2.
 }
 
+/// The icon area's height for an icon edge of `size`. Shorter than wide:
+/// icons are drawn at 80% and seated at its foot, so a full square left a
+/// band of empty space above every row.
+pub fn icon_area_height(size: f32) -> f32 {
+    (size * ICON_AREA_RATIO).round()
+}
+
+/// [`icon_area_height`] as a fraction of the icon edge.
+pub const ICON_AREA_RATIO: f32 = 0.84;
+
 /// Full height one grid row occupies.
 pub fn row_height(size: f32) -> f32 {
-    size + CARD_PAD * 2. + LABEL_HEIGHT
+    icon_area_height(size) + CARD_PAD * 2. + LABEL_HEIGHT
 }
 
 /// How many cards of `cell` width (separated by [`CARD_GAP`]) fit across
@@ -81,17 +91,10 @@ pub fn grid_row(size: f32) -> Div {
         .h(px(row_height(size)))
 }
 
-/// One card scaffold: a centered icon area over the name + detail lines.
-/// Callers add the icon element and the two text children, then chain
+/// One card scaffold: a centered icon area over the name. Callers add the
+/// icon element and the label, then chain
 /// click handlers.
-pub fn card(
-    theme: &Theme,
-    id: impl Into<ElementId>,
-    size: f32,
-    width: f32,
-    is_selected: bool,
-) -> Stateful<Div> {
-    let hover = theme.hover;
+pub fn card(id: impl Into<ElementId>, size: f32, width: f32) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -108,21 +111,30 @@ pub fn card(
         .rounded_xl()
         .cursor_pointer()
         .overflow_hidden()
-        .when(is_selected, |s| s.bg(theme.selected))
-        .when(!is_selected, move |s| s.hover(move |s| s.bg(hover)))
+        // Selection marks the icon and the name (see `card_icon_area`,
+        // `card_name`), not the whole cell: a filled tile per selected
+        // item read as one heavy block.
+        // Hover lights the icon tile, the same shape selection uses.
+        .group("grid-card")
 }
 
 /// The square that holds a card's icon or thumbnail, centered across
 /// and seated at the bottom, so a glyph smaller than the square (folders,
 /// documents) hugs its label instead of floating above a gap.
-pub fn card_icon_area(size: f32) -> Div {
+pub fn card_icon_area(theme: &Theme, size: f32, selected: bool) -> Div {
     div()
         .flex()
         .items_end()
         .justify_center()
         .w(px(size))
-        .h(px(size))
+        .h(px(icon_area_height(size)))
         .flex_none()
+        .rounded_lg()
+        .when(selected, |area| area.bg(theme.selected))
+        .when(!selected, |area| {
+            let hover = theme.hover;
+            area.group_hover("grid-card", move |s| s.bg(hover))
+        })
 }
 
 /// Two independently bounded lines. GPUI 0.2's combined line-clamp/ellipsis
@@ -131,9 +143,16 @@ pub fn card_icon_area(size: f32) -> Div {
 ///
 /// Returns the label and whether the name had to be cut (it needs more
 /// than two lines), so callers only add a full-name tooltip when it adds
-/// something. A one-line name takes one line, so the detail line sits
-/// right under it rather than below an empty second line.
-pub fn card_name(theme: &Theme, width: f32, name: &str, cx: &App) -> (Div, bool) {
+/// something.
+/// `selected` is `Some(focused)` for a selected item: an accent pill
+/// while the list has focus, grey otherwise.
+pub fn card_name(
+    theme: &Theme,
+    width: f32,
+    name: &str,
+    selected: Option<bool>,
+    cx: &App,
+) -> (Div, bool) {
     let width = px((width - CARD_PAD * 2.).max(1.));
     // Filenames may contain line breaks; treat those as spaces in the label.
     let name = name.replace(['\n', '\r', '\t'], " ");
@@ -143,33 +162,81 @@ pub fn card_name(theme: &Theme, width: f32, name: &str, cx: &App) -> (Div, bool)
     let fragments = [LineFragment::text(&name)];
     let mut boundaries = wrapper.wrap_line(&fragments, width);
     let boundary = boundaries.next().map_or(name.len(), |boundary| boundary.ix);
-    let truncated = boundaries.next().is_some();
-    let (first, second) = split_filename(&name, boundary);
-    let lines = if second.is_empty() {
-        vec![first]
-    } else {
-        vec![first, second]
-    };
+    drop(boundaries);
+    let (first, second) = split_filename(&name, friendly_break(&name, boundary));
+    // A second line that still doesn't fit loses its middle, not its end:
+    // the extension is the part that tells two long names apart.
+    let fits = wrapper
+        .wrap_line(&[LineFragment::text(second)], width)
+        .next();
+    let truncated = fits.is_some();
     let label = div()
         .flex()
         .flex_col()
         .w(width)
         .flex_none()
+        // Shrinks to one line for a short name, so its date sits right
+        // under it; a fixed two-line box left a floating gap instead.
         .max_h(px(NAME_HEIGHT))
+        .items_center()
         .text_center()
         .font_family(super::fonts::UI_FONT_FAMILY)
         .text_size(px(NAME_FONT_SIZE))
         .line_height(px(NAME_LINE_HEIGHT))
-        .text_color(theme.text)
-        .children(lines.into_iter().map(|line| {
-            div()
-                .w(width)
-                .h(px(NAME_LINE_HEIGHT))
-                .flex_none()
-                .truncate()
-                .child(line.to_owned())
-        }));
+        .text_color(if selected == Some(true) {
+            theme.on_accent
+        } else {
+            theme.text
+        });
+    // Each line hugs its text (max width, not width), so a selected name
+    // gets Finder's accent pill around the words, not a full-cell band.
+    let pill = |line: Div| {
+        line.max_w(width)
+            .h(px(NAME_LINE_HEIGHT))
+            .flex_none()
+            .px_1()
+            .rounded_sm()
+            .when_some(selected, |line, focused| {
+                line.bg(if focused { theme.accent } else { theme.control })
+            })
+    };
+    let label = label
+        .child(pill(div().truncate().child(first.to_owned())))
+        .children(
+            (!second.is_empty())
+                .then(|| pill(super::middle_truncated(second.to_owned()).text_center())),
+        );
     (label, truncated)
+}
+
+/// When the wrapper had to cut inside a word, back up to a separator, so
+/// a name breaks as "LICENSE-" / "APACHE" or "rust-" / "toolchain.toml"
+/// rather than one letter onto the second line.
+fn friendly_break(name: &str, boundary: usize) -> usize {
+    if boundary >= name.len()
+        || name[..boundary].ends_with(' ')
+        || name[boundary..].starts_with(' ')
+    {
+        return boundary;
+    }
+    name[..boundary]
+        .char_indices()
+        .rev()
+        // A word break well into the line (not so early that the rest
+        // can't fit either) beats a mid-word cut.
+        .find_map(|(i, c)| {
+            ((i + 1) * 4 >= boundary && matches!(c, '-' | '_' | ' ')).then_some(i + 1)
+        })
+        // A dot only as a last resort: "rust-toolchain" / ".toml" reads
+        // as a stray extension.
+        .or_else(|| {
+            name[..boundary]
+                .char_indices()
+                .rev()
+                .take_while(|(i, _)| *i * 2 >= boundary)
+                .find_map(|(i, c)| (c == '.').then_some(i))
+        })
+        .unwrap_or(boundary)
 }
 
 /// Keep the remainder intact for end truncation, without dividing a grapheme
@@ -201,6 +268,24 @@ mod tests {
             assert_eq!(second, name.strip_prefix("Background ").unwrap());
             assert!(second.starts_with("Verification"));
         }
+    }
+
+    /// Regression: "LICENSE-APACHE" wrapped as "LICENSE-APACH" / "E".
+    #[test]
+    fn a_forced_break_backs_up_to_a_separator() {
+        fn cut(name: &str, at: usize) -> (&str, &str) {
+            split_filename(name, friendly_break(name, at))
+        }
+        assert_eq!(cut("LICENSE-APACHE", 13), ("LICENSE-", "APACHE"));
+        assert_eq!(cut("rust-toolchain.toml", 17), ("rust-", "toolchain.toml"));
+        assert_eq!(
+            cut("verylongfilename.toml", 18),
+            ("verylongfilename", ".toml")
+        );
+        // No separator in the back half: the wrapper's cut stands.
+        assert_eq!(cut("a-verylongsinglewordname", 20).0.len(), 20);
+        // A break at a space is already a good one.
+        assert_eq!(cut("Background Verification.doc", 11).0, "Background");
     }
 
     #[test]

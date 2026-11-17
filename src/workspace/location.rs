@@ -78,7 +78,8 @@ fn read_location(
 
 impl Workspace {
     pub(super) fn sync_path(&mut self, cx: &mut Context<Self>) {
-        let path = display_path(&self.cwd);
+        // As every other surface writes it; `resolve` reads `~` back.
+        let path = tilde(display_path(&self.cwd), self.user_dirs.get("home"));
         if self.path_input.read(cx).text() != path {
             self.path_input
                 .update(cx, |input, cx| input.set_text(path, cx));
@@ -192,14 +193,146 @@ impl Workspace {
                     .size(px(15.))
                     .into_any_element()
             })
-            .child(div().flex_1().min_w_0().child(self.path_input.clone()))
-            .tooltip(self.action_tip("Edit the path, then press Enter", "location", cx))
+            .child(if focused || self.path_error.is_some() {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.path_input.clone())
+                    .into_any_element()
+            } else {
+                // At rest, breadcrumbs: each folder on the way is a click
+                // back to it, and the empty run after them edits the path
+                // as text. Ancestors shrink first; the folder you're in
+                // never does.
+                let trail = collapse(crumbs(&self.cwd, self.user_dirs.get("home")));
+                let last = trail.len().saturating_sub(1);
+                let mut row = div().flex_1().min_w_0().flex().items_center().gap_0p5();
+                for (i, (label, path)) in trail.into_iter().enumerate() {
+                    if i > 0 {
+                        row = row.child(
+                            ui::icon::ui_icon("icons/chevron-right.svg", theme.text_dim)
+                                .size(px(11.))
+                                .flex_none(),
+                        );
+                    }
+                    let crumb = div()
+                        .id(("crumb", i))
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.hover))
+                        .child(label);
+                    // Whole names, never cut inside: the folded "…" is
+                    // what absorbs depth. Only the parent may shrink, and
+                    // only when the last two alone overflow.
+                    row = row.child(if i == last {
+                        crumb.flex_none().font_weight(gpui::FontWeight::MEDIUM)
+                    } else {
+                        crumb
+                            .when(i + 1 == last, |c| c.min_w(px(28.)).truncate())
+                            .when(i + 1 != last, |c| c.flex_none())
+                            .text_color(theme.text_dim)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                // The folded middle ("…") opens the path
+                                // as text, where all of it can be read.
+                                if path.as_os_str().is_empty() {
+                                    this.focus_path(window, cx)
+                                } else {
+                                    this.navigate(path.clone(), cx)
+                                }
+                            }))
+                    });
+                }
+                row.child(
+                    div()
+                        .id("location-edit")
+                        .flex_1()
+                        .h_full()
+                        .min_w(px(24.))
+                        .cursor_text()
+                        .tooltip(self.action_tip("Type a path", "location", cx))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.focus_path(window, cx)
+                        })),
+                )
+                .into_any_element()
+            })
     }
+}
+
+/// A deep trail keeps its start and the last three folders, with the
+/// rest folded into one "…" crumb (an empty path): eight squeezed crumbs
+/// read as noise, where four full ones read as a path.
+fn collapse(mut trail: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
+    const KEEP: usize = 2;
+    if trail.len() > KEEP + 2 {
+        trail.splice(1..trail.len() - KEEP, [("…".to_owned(), PathBuf::new())]);
+    }
+    trail
+}
+
+/// The breadcrumb trail for `cwd`: each folder from the top down with the
+/// path it opens. A folder inside the home folder starts at "Home".
+fn crumbs(cwd: &Path, home: Option<&Path>) -> Vec<(String, PathBuf)> {
+    if filex::drives::is_this_pc(cwd) {
+        return vec![(display_path(cwd), cwd.to_path_buf())];
+    }
+    let mut trail: Vec<(String, PathBuf)> = cwd
+        .ancestors()
+        .map(|path| {
+            let label = match path.file_name() {
+                Some(name) => name.to_string_lossy().into_owned(),
+                // The top of the tree reads as the sidebar names it, not
+                // as a lone "/" beside the › separators.
+                None if path == Path::new("/") => platform::machine_place().1.to_owned(),
+                None => display_path(path),
+            };
+            (label, path.to_path_buf())
+        })
+        .collect();
+    trail.reverse();
+    if let Some(home) = home.filter(|_| !cfg!(windows))
+        && let Some(at) = trail.iter().position(|(_, path)| path == home)
+    {
+        trail.drain(..at);
+        trail[0].0 = "Home".into();
+    }
+    trail
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_breadcrumbs_start_at_home_or_the_root() {
+        let labels = |cwd: &str, home: Option<&str>| {
+            crumbs(Path::new(cwd), home.map(Path::new))
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>()
+        };
+        if cfg!(windows) {
+            return;
+        }
+        assert_eq!(
+            labels("/Users/me/code/x", Some("/Users/me")),
+            ["Home", "code", "x"]
+        );
+        assert_eq!(labels("/Users/me", Some("/Users/me")), ["Home"]);
+        assert_eq!(
+            labels("/tmp/a", Some("/Users/me")),
+            ["Computer", "tmp", "a"]
+        );
+        // Each crumb opens its own folder.
+        let trail = crumbs(Path::new("/tmp/a"), None);
+        assert_eq!(trail[1].1, Path::new("/tmp"));
+        // A deep one folds its middle.
+        let deep = collapse(crumbs(Path::new("/a/b/c/d/e/f"), None));
+        let deep: Vec<_> = deep.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(deep, ["Computer", "…", "e", "f"]);
+        assert_eq!(collapse(crumbs(Path::new("/a/b/c"), None)).len(), 4);
+    }
+
     #[test]
     fn only_readable_folders_are_accepted_as_destinations() {
         let dir = tempfile::tempdir().unwrap();

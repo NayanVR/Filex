@@ -102,7 +102,21 @@ impl Workspace {
             from_search,
             favorite: is_dir && self.is_favorite(&path, cx),
         };
-        let rows = menu_model::entry_menu(&facts, menu_model::Capabilities::current());
+        let mut rows = menu_model::entry_menu(&facts, menu_model::Capabilities::current());
+        // Offered only for a folder search doesn't reach yet: on one it
+        // already covers, the item read as "this folder is excluded".
+        if self
+            .settings
+            .read(cx)
+            .settings()
+            .roots
+            .iter()
+            .any(|root| path.starts_with(root))
+        {
+            rows.retain(|row| {
+                !matches!(row, menu_model::Row::Item(item) if item.command == menu_model::Command::IndexFolder)
+            });
+        }
         let target = MenuTarget::Entry {
             ix,
             path: path.clone(),
@@ -135,7 +149,12 @@ impl Workspace {
         let facts = menu_model::BackgroundFacts {
             can_paste: self.clipboard.is_some(),
         };
-        let rows = menu_model::background_menu(facts, menu_model::Capabilities::current());
+        let mut rows = menu_model::background_menu(facts, menu_model::Capabilities::current());
+        // Headed by the folder, as the item menu is by the item.
+        rows.insert(
+            0,
+            menu_model::Row::Heading(self.tab_title(self.active_tab).to_string()),
+        );
         self.show_menu(position, MenuTarget::Background, rows, window, cx);
     }
 
@@ -409,7 +428,7 @@ impl Workspace {
             (MenuPanel::Sub, Some(sub)) => &sub.rows,
             (MenuPanel::Sub, None) => return,
         };
-        let Some(item) = menu_model::item_at(rows, focus) else {
+        let Some(item) = menu_model::item_at(rows, focus).filter(|item| !item.disabled) else {
             return;
         };
         if item.submenu.is_some() {
@@ -541,6 +560,19 @@ impl Workspace {
                     self.open_target(path, is_dir, from_search, cx);
                 }
             }
+            Command::QuickLook => self.toggle_quick_look(window, cx),
+            Command::EditTags => {
+                // The tag editor lives in the details pane.
+                if !self.settings.read(cx).settings().preview_open {
+                    self.toggle_preview(cx);
+                }
+                self.open_tag_editor(None, window, cx);
+            }
+            Command::OpenInNewTab => {
+                if let Some(path) = path {
+                    self.open_tab(path, cx);
+                }
+            }
             Command::Reveal => {
                 if let Some(path) = path {
                     self.reveal(path, cx);
@@ -581,8 +613,14 @@ impl Workspace {
                     cx.notify();
                 }
             }
-            Command::NewFolder => self.new_folder(cx),
+            Command::NewFolder => self.new_folder_named(None, cx),
             Command::SetView(view) => self.update_settings(cx, |s| s.view = view),
+            Command::Zoom(delta) => {
+                // Icon size is a grid setting; asking for it in the list
+                // means wanting the grid.
+                self.update_settings(cx, |s| s.view = ViewMode::Grid);
+                self.zoom_grid(delta, cx);
+            }
             Command::SetSort(by) => self.update_settings(cx, |s| s.sort.by = by),
             Command::SetAscending(ascending) => {
                 self.update_settings(cx, |s| s.sort.ascending = ascending)
@@ -702,16 +740,24 @@ impl Workspace {
 
     /// New › Folder: make "New folder" (or the next free "New folder 2")
     /// in the folder on screen, then rename it in place, as Explorer does.
-    fn new_folder(&mut self, cx: &mut Context<Self>) {
+    /// Given a `name` (Magic's `new folder Projects`) it is made under
+    /// that name and just selected.
+    pub(super) fn new_folder_named(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         if self.at_this_pc() || !self.query.is_empty() {
             return;
         }
+        let rename = name.is_none();
         let dir = self.cwd.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut path = dir.join(NEW_FOLDER_NAME);
+                    let name = name.as_deref().unwrap_or(NEW_FOLDER_NAME);
+                    anyhow::ensure!(
+                        !name.contains(['/', '\\']) && name != "." && name != "..",
+                        "“{name}” isn’t a folder name"
+                    );
+                    let mut path = dir.join(name);
                     if std::fs::symlink_metadata(&path).is_ok() {
                         path = ops::next_free_name(&path)?;
                     }
@@ -725,7 +771,7 @@ impl Workspace {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        this.pending_rename = Some(name.clone());
+                        this.pending_rename = rename.then(|| name.clone());
                         let cwd = this.cwd.clone();
                         this.load_dir_selecting(&cwd, Some(name), cx);
                     }
@@ -749,6 +795,18 @@ impl Workspace {
         if sources.is_empty() || !self.validate_search_paths(&sources, cx) {
             return;
         }
+        self.spawn_compress(sources, None, cx);
+    }
+
+    /// Pack `sources` into a ZIP as a cancellable job. `dest` is where a
+    /// Magic plan said it would go (retargeted if that name got taken
+    /// since); `None` names it after the first item, beside it.
+    pub(super) fn spawn_compress(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dest: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let progress = std::sync::Arc::new(ops::OpProgress::default());
         let job_id = self.next_job_id;
         self.next_job_id += 1;
@@ -770,7 +828,13 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let dest = filex::archive::archive_path(&sources)?;
+                    let dest = match dest {
+                        Some(dest) if std::fs::symlink_metadata(&dest).is_ok() => {
+                            ops::next_free_name(&dest)?
+                        }
+                        Some(dest) => dest,
+                        None => filex::archive::archive_path(&sources)?,
+                    };
                     filex::archive::compress(&sources, &dest, &progress)?;
                     anyhow::Ok(dest)
                 })

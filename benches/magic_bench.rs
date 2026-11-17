@@ -103,6 +103,66 @@ fn bench_magic(c: &mut Criterion) {
         })
     });
 
+    // Explicit Magic mode reads every query as an intent: the fixed
+    // command table, the question and go prefixes, then the plan
+    // grammar. `interpret_miss` walks all of it and finds nothing — the
+    // worst case, paid per debounced keystroke while Magic is on.
+    group.bench_function("interpret_miss", |b| {
+        b.iter(|| {
+            black_box(filex::magic::interpret(
+                black_box("quarterly earnings deck"),
+                NOW,
+            ))
+        })
+    });
+
+    group.bench_function("interpret_command", |b| {
+        b.iter(|| black_box(filex::magic::interpret(black_box("show hidden files"), NOW)))
+    });
+
+    group.bench_function("interpret_plan", |b| {
+        b.iter(|| {
+            black_box(filex::magic::interpret(
+                black_box("move pdfs from Downloads to new folder Archive"),
+                NOW,
+            ))
+        })
+    });
+
+    // The natural layer, per keystroke in Magic: a paraphrase that reads
+    // after rewriting, a typo that costs a second parse, and the worst
+    // case — nothing reads, so every word is tried against the vocabulary.
+    group.bench_function("understand_paraphrase", |b| {
+        b.iter(|| {
+            black_box(filex::magic::understand(
+                black_box("could you please get rid of pdfs more than 30 days old"),
+                NOW,
+            ))
+        })
+    });
+    group.bench_function("understand_typo", |b| {
+        b.iter(|| {
+            black_box(filex::magic::understand(
+                black_box("mvoe pdfs form Downloads to Documents"),
+                NOW,
+            ))
+        })
+    });
+    group.bench_function("understand_miss", |b| {
+        b.iter(|| {
+            black_box(filex::magic::understand(
+                black_box("quarterly budget final v2 draft"),
+                NOW,
+            ))
+        })
+    });
+
+    // The suggestion list, rebuilt whenever a Magic query is not yet a
+    // command: a prefix scan of ~50 fixed rows.
+    group.bench_function("suggest", |b| {
+        b.iter(|| black_box(filex::magic::suggest(black_box("sort by"))))
+    });
+
     group.finish();
 }
 

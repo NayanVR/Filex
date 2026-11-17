@@ -64,14 +64,20 @@ pub fn content_header(
     subtitle: impl Into<SharedString>,
     controls: impl IntoElement,
 ) -> Div {
+    let subtitle = subtitle.into();
     div()
         .flex()
         .flex_none()
-        .items_center()
+        // Top-aligned at a fixed inset, title and controls alike: centred,
+        // the title moved whenever the subtitle or the controls beside it
+        // changed height between panes.
+        .items_start()
         .justify_between()
         .gap_3()
         .px_5()
-        .h(px(76.))
+        .pt(px(14.))
+        // A title alone needs less room than a title and a summary.
+        .h(px(if subtitle.is_empty() { 60. } else { 76. }))
         .child(
             div()
                 .flex()
@@ -87,14 +93,39 @@ pub fn content_header(
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(title.into()),
                 )
-                .child(
+                .children((!subtitle.is_empty()).then(|| {
                     div()
                         .w_full()
                         .truncate()
                         .text_xs()
                         .text_color(theme.text_dim)
-                        .child(subtitle.into()),
-                ),
+                        .child(subtitle)
+                })),
         )
-        .child(controls)
+        .child(
+            div()
+                .flex_none()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .child(controls),
+        )
+}
+
+/// A short fade over a scrolling list's foot, so a row or section header
+/// cut by the pane's edge (or a footer) dissolves instead of being sliced.
+/// The parent must be `relative`; lists keep a matching bottom padding so
+/// their last row clears it at the end of the scroll. Takes no input.
+pub fn bottom_fade(theme: &Theme) -> Div {
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .h(px(24.))
+        .bg(gpui::linear_gradient(
+            0.,
+            gpui::linear_color_stop(theme.bg, 0.),
+            gpui::linear_color_stop(super::theme::fixed::with_alpha(theme.bg, 0.), 1.),
+        ))
 }

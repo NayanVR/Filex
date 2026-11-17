@@ -91,6 +91,33 @@ pub fn label_for(filter: &Filter, source: &str) -> String {
     }
 }
 
+/// [`label_for`] in words instead of query syntax — "PDF files",
+/// "Images" — for Magic, where the user typed a sentence, not a filter.
+pub fn plain_label(filter: &Filter, source: &str) -> String {
+    match filter {
+        Filter::Kind(kind) => match kind {
+            FileKind::Directory => "Folders",
+            FileKind::Image => "Images",
+            FileKind::Video => "Videos",
+            FileKind::Audio => "Audio",
+            FileKind::Archive => "Archives",
+            FileKind::Code => "Code",
+            FileKind::Document => "Documents",
+            FileKind::Other => "Other files",
+        }
+        .to_owned(),
+        Filter::Ext(ext) => format!("{} files", ext.to_uppercase()),
+        Filter::Tag(name) => name.clone(),
+        Filter::Size(_) | Filter::Modified(_) => {
+            let mut text = source.to_owned();
+            if let Some(first) = text.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            text
+        }
+    }
+}
+
 fn kind_word(kind: FileKind) -> &'static str {
     match kind {
         FileKind::Directory => "folder",
@@ -740,6 +767,19 @@ fn month_range(y: i64, m: i64) -> (i64, i64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn magic_chips_read_as_words() {
+        assert_eq!(plain_label(&Filter::Ext("pdf".into()), "pdfs"), "PDF files");
+        assert_eq!(
+            plain_label(&Filter::Kind(FileKind::Image), "photos"),
+            "Images"
+        );
+        assert_eq!(
+            plain_label(&Filter::Modified(Bound::Lt(0)), "older than 30 days"),
+            "Older than 30 days"
+        );
+    }
+
     use super::*;
 
     /// 2026-07-26 12:00 UTC — the "now" every date test is anchored to.

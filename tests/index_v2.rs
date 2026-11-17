@@ -937,68 +937,90 @@ fn magic_indexed_predicates_match_full_scan_with_overlay_changes() {
         vec![Filter::Ext("missing".into())],
     ];
     // Independent oracle: evaluate every live record, without index planning.
-    let all: Vec<_> = view.records().collect();
-    for filters in filters {
-        for text in ["", "STRASSE", "latest", ".pdf", "missing"] {
-            for allowed in [
-                None,
-                Some(vec![
-                    "/test/latest.pdf".into(),
-                    "/test/native.Ä".into(),
-                    "/test/same-path.pdf".into(),
-                ]),
-            ] {
-                let q = Query {
-                    text: text.into(),
-                    filters: filters.clone(),
-                    allowed,
-                    limit: 1,
-                    fuzzy: true,
-                    ..Default::default()
-                };
-                let needle = filex::catalog::normalize::nfc_fold(text);
-                let expected: Vec<_> = all
-                    .iter()
-                    .filter_map(|r| {
-                        if r.parent == 0 {
-                            return None;
-                        }
-                        let tier = query::literal_tier(&r.name, &needle)?;
-                        let native = filex::catalog::segment::os_name(&r.name);
-                        let name = native.to_string_lossy();
-                        if !q.filters.iter().all(|f| {
-                            f.matches(&ItemMeta {
-                                name: &name,
-                                is_dir: r.is_dir(),
-                                size: r.size,
-                                mtime: r.mtime,
+    // Paths and display names don't depend on the query: resolve them once.
+    let all: Vec<_> = view
+        .records()
+        .filter(|r| r.parent != 0)
+        .filter_map(|r| {
+            let path = view.path(r.id)?;
+            let name = filex::catalog::segment::os_name(&r.name)
+                .to_string_lossy()
+                .into_owned();
+            Some((r, path, name))
+        })
+        .collect();
+    // Name tiers only depend on the needle: fold each name once per needle.
+    let texts = ["", "STRASSE", "latest", ".pdf", "missing"];
+    let tiers: Vec<Vec<_>> = texts
+        .iter()
+        .map(|text| {
+            let needle = filex::catalog::normalize::nfc_fold(text);
+            all.iter()
+                .map(|(r, ..)| query::literal_tier(&r.name, &needle))
+                .collect()
+        })
+        .collect();
+    // Filter sets are independent: check them in parallel.
+    std::thread::scope(|scope| {
+        for filters in filters {
+            let (view, all, tiers) = (&view, &all, &tiers);
+            scope.spawn(move || {
+                for (text, tiers) in texts.iter().zip(tiers) {
+                    for allowed in [
+                        None,
+                        Some(vec![
+                            "/test/latest.pdf".into(),
+                            "/test/native.Ä".into(),
+                            "/test/same-path.pdf".into(),
+                        ]),
+                    ] {
+                        let q = Query {
+                            text: (*text).into(),
+                            filters: filters.clone(),
+                            allowed,
+                            limit: 1,
+                            fuzzy: true,
+                            ..Default::default()
+                        };
+                        let expected: Vec<_> = all
+                            .iter()
+                            .zip(tiers)
+                            .filter_map(|((r, path, name), tier)| {
+                                let tier = (*tier)?;
+                                if !q.filters.iter().all(|f| {
+                                    f.matches(&ItemMeta {
+                                        name,
+                                        is_dir: r.is_dir(),
+                                        size: r.size,
+                                        mtime: r.mtime,
+                                    })
+                                }) {
+                                    return None;
+                                }
+                                if q.allowed
+                                    .as_ref()
+                                    .is_some_and(|paths| !paths.contains(path))
+                                {
+                                    return None;
+                                }
+                                Some((r.id, path.clone(), tier))
                             })
-                        }) {
-                            return None;
-                        }
-                        let path = view.path(r.id)?;
-                        if q.allowed
-                            .as_ref()
-                            .is_some_and(|paths| !paths.contains(&path))
-                        {
-                            return None;
-                        }
-                        Some((r.id, path, tier))
-                    })
-                    .collect();
-                let mut actual = Vec::new();
-                let mut total = None;
-                query::stream(&view, &q, &AtomicBool::new(false), |batch| {
-                    actual.extend(batch.hits.into_iter().map(|h| (h.id, h.path, h.tier)));
-                    total = batch.total;
-                    Ok(())
-                })
-                .unwrap();
-                assert_eq!(actual, expected, "{q:?}");
-                assert_eq!(total, Some(expected.len() as u64));
-            }
+                            .collect();
+                        let mut actual = Vec::new();
+                        let mut total = None;
+                        query::stream(&view, &q, &AtomicBool::new(false), |batch| {
+                            actual.extend(batch.hits.into_iter().map(|h| (h.id, h.path, h.tier)));
+                            total = batch.total;
+                            Ok(())
+                        })
+                        .unwrap();
+                        assert_eq!(actual, expected, "{q:?}");
+                        assert_eq!(total, Some(expected.len() as u64));
+                    }
+                }
+            });
         }
-    }
+    });
 }
 
 #[test]

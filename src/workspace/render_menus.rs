@@ -61,7 +61,13 @@ impl Workspace {
         // chip off the destination word, while the command carried only
         // `ext:pdf`.
         let source = match &self.magic {
+            // The selection or one folder: nothing was searched for.
+            Some(state) if state.local => return None,
+            // A refusal has no plan for the filters to change.
+            Some(state) if matches!(state.outcome, Some(Err(_))) => return None,
             Some(state) => state.command.selection.source.clone(),
+            // A place, a setting, a question: its words are not filters.
+            None if self.in_magic_view() => return None,
             None => self.query.clone(),
         };
         let tokens = filex::search::filter::filter_tokens(&source, now);
@@ -70,11 +76,25 @@ impl Workspace {
             Some(_) => filex::search::phrases::expand_as_description(&residual, now).phrases,
             None => filex::search::phrases::expand(&residual, now).phrases,
         };
-        if tokens.is_empty() && phrases.is_empty() {
+        // The words a command looks for in file names: not a filter to
+        // remove, but half of what "screenshots older than 30 days"
+        // matched, and a delete must not look broader than it is.
+        let named = self
+            .magic
+            .as_ref()
+            .map(|state| state.command.selection.text.clone())
+            .filter(|text| !text.is_empty());
+        if tokens.is_empty() && phrases.is_empty() && named.is_none() {
             return None;
         }
         let theme = *cx.theme();
         let mut strip = ui::top_bar::filter_chip_strip(&theme);
+        if let Some(named) = named {
+            strip = strip.child(ui::top_bar::plain_chip(
+                &theme,
+                format!("Name has “{named}”"),
+            ));
+        }
         for (i, (token, filter)) in tokens.into_iter().enumerate() {
             // `tag:` pills show the tag name with its color dot; the rest
             // show the raw token (`kind:image`, `size:>2mb`, …).
@@ -89,6 +109,9 @@ impl Workspace {
                         name.clone(),
                         Some(ui::details::tag_dot_color(&theme, color)),
                     )
+                }
+                _ if self.magic.is_some() => {
+                    (filex::search::phrases::plain_label(&filter, &token), None)
                 }
                 _ => (token.clone(), None),
             };
@@ -108,7 +131,11 @@ impl Workspace {
         let suggested = self.magic.is_none() && self.phrases_literal.as_ref() == Some(&self.query);
         for (i, phrase) in phrases.into_iter().enumerate() {
             for (j, filter) in phrase.filters.iter().enumerate() {
-                let label = filex::search::phrases::label_for(filter, &phrase.source);
+                let label = if self.magic.is_some() {
+                    filex::search::phrases::plain_label(filter, &phrase.source)
+                } else {
+                    filex::search::phrases::label_for(filter, &phrase.source)
+                };
                 let id = ("phrase-chip", i * 8 + j);
                 if suggested {
                     strip = strip.child(ui::top_bar::suggestion_chip(&theme, id, label).on_click(
@@ -172,12 +199,17 @@ impl Workspace {
             .into_iter()
             .enumerate()
             .map(|(i, scope)| {
-                let label = if scope == current {
-                    format!("✓ {}", scope.label())
-                } else {
-                    format!("   {}", scope.label())
-                };
-                ui::menu::item(&theme, ("scope-item", i), label, false)
+                // A fixed check column, so both labels start at one x.
+                ui::menu::item(&theme, ("scope-item", i), "", false)
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(div().w(px(14.)).flex_none().children(
+                        (scope == current).then(|| {
+                            ui::icon::ui_icon("icons/check.svg", theme.accent).size(px(12.))
+                        }),
+                    ))
+                    .child(scope.label())
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                         this.set_scope(scope, cx);
                     }))
@@ -195,7 +227,7 @@ impl Workspace {
                         this.close_scope_menu(cx);
                     }),
                 )
-                .child(ui::menu::panel(&theme, position, items))
+                .child(ui::menu::narrow_panel(&theme, position, 176., items))
                 .into_any_element(),
         )
     }
@@ -442,7 +474,14 @@ impl Workspace {
                 .into_any_element();
         };
         let kind = FileKind::of(&name, is_dir);
-        let preview = self.render_icon_cell(&name, &path, is_dir, 160., 1., cx);
+        let preview = self.render_icon_cell(
+            &name,
+            &path,
+            is_dir,
+            if is_dir { 96. } else { 160. },
+            1.,
+            cx,
+        );
         let meta = self.preview_meta.as_ref().filter(|m| m.path == path);
 
         let size_value: SharedString = if is_dir {
@@ -461,14 +500,28 @@ impl Workspace {
             Some(m) => format_timestamp(m.created).into(),
             None => "…".into(),
         };
-        let where_value: SharedString = path.parent().map(display_path).unwrap_or_default().into();
+        let where_value: SharedString = tilde(
+            path.parent().map(display_path).unwrap_or_default(),
+            self.user_dirs.get("home"),
+        )
+        .into();
 
         let mut panel = ui::details::panel(&theme, width)
-            .child(ui::details::preview_box(&theme).child(preview))
+            .child(ui::details::preview_box(&theme, !is_dir).child(preview))
             .child(ui::details::title(&theme, name))
             .child(ui::details::divider(&theme))
             .child(ui::details::meta_row(&theme, "Kind", kind.label()))
-            .child(ui::details::meta_row(&theme, "Size", size_value))
+            // A folder has no size of its own; what it holds instead.
+            .when(!is_dir, |panel| {
+                panel.child(ui::details::meta_row(&theme, "Size", size_value))
+            })
+            .when_some(meta.and_then(|m| m.items), |panel, items| {
+                panel.child(ui::details::meta_row(
+                    &theme,
+                    "Contains",
+                    ui::status_bar::item_count(items),
+                ))
+            })
             .child(ui::details::meta_row(&theme, "Modified", modified_value))
             .child(ui::details::meta_row(&theme, "Created", created_value));
         if let Some((w, h)) = meta.and_then(|m| m.dimensions) {

@@ -94,7 +94,8 @@ pub(super) fn machine_place() -> (&'static str, &'static str, PathBuf) {
     } else {
         (
             crate::ui::icon_art::Symbol::Drive.path(),
-            "Root",
+            // What GNOME and KDE call it; "Root" is jargon.
+            "Computer",
             PathBuf::from("/"),
         )
     }

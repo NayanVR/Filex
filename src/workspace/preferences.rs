@@ -36,7 +36,7 @@ impl SettingsSection {
     }
     fn icon(self) -> &'static str {
         match self {
-            Self::Appearance => "icons/layout-grid.svg",
+            Self::Appearance => "icons/palette.svg",
             Self::Browsing => "icons/folder.svg",
             Self::Search => "icons/search.svg",
             Self::Keyboard => "icons/keyboard.svg",
@@ -47,7 +47,7 @@ impl SettingsSection {
     }
     fn description(self) -> &'static str {
         match self {
-            Self::Appearance => "Make filex feel at home on your desktop.",
+            Self::Appearance => "Theme, accent color, density and transparency.",
             Self::Browsing => "Choose how your files are displayed and handled.",
             Self::Search => "Choose which folders search covers, and what it skips inside them.",
             Self::Keyboard => "Click a shortcut, then press your preferred combination.",
@@ -408,6 +408,23 @@ impl Workspace {
                     window.focus(&this.focus_handle, cx);
                 })),
             ))
+            .child(ui::settings_pane::action_row(
+                theme,
+                "Feedback",
+                "Report a problem or suggest something",
+                ui::button::button(
+                    theme,
+                    "send-feedback",
+                    "Send Feedback…",
+                    ui::button::Variant::Secondary,
+                    ui::button::Size::Small,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    // The dialog replaces Settings rather than stacking on it.
+                    this.toggle_settings(window, cx);
+                    this.open_feedback(window, cx);
+                })),
+            ))
     }
 
     /// The section's plain on/off settings, as one group.
@@ -650,7 +667,22 @@ impl Workspace {
                     .map(|k| shortcuts::label(k))
                     .collect::<Vec<_>>()
                     .join(" · ");
+                // The key chip ends at the card's edge, like the Reset all
+                // button above; a changed shortcut's reset sits before it.
                 let row = ui::settings_pane::shortcut_row(theme, spec.label, alternatives)
+                    .children(overrides.contains_key(id).then(|| {
+                        ui::top_bar::toolbar_button(
+                            theme,
+                            SharedString::from(format!("reset-{id}")),
+                            "icons/refresh-cw.svg",
+                            theme.text_dim,
+                        )
+                        .tooltip(ui::tooltip::text_tooltip(
+                            "Restore default shortcut",
+                            *theme,
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| this.reset_shortcut(id, cx)))
+                    }))
                     .child(
                         ui::settings_pane::shortcut_button(theme, id, key_label, recording)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -659,20 +691,6 @@ impl Workspace {
                                 window.focus(&this.settings_focus, cx);
                                 cx.notify();
                             })),
-                    )
-                    .child(
-                        ui::top_bar::toolbar_button(
-                            theme,
-                            SharedString::from(format!("reset-{id}")),
-                            "icons/refresh-cw.svg",
-                            theme.text_dim,
-                        )
-                        .when(!overrides.contains_key(id), |s| s.opacity(0.25))
-                        .tooltip(ui::tooltip::text_tooltip(
-                            "Restore default shortcut",
-                            *theme,
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| this.reset_shortcut(id, cx))),
                     );
                 group = group.child(row);
             }

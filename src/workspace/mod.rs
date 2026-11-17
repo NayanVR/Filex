@@ -74,6 +74,11 @@ actions!(
         OpenSelected,
         ToggleShortcuts,
         ToggleView,
+        ZoomIn,
+        ZoomOut,
+        NewFolderHere,
+        ToggleMagic,
+        ApplyPlan,
         CopyAsPath,
         ShowProperties,
         MenuPrev,
@@ -212,6 +217,8 @@ struct PreviewMeta {
     created: Option<std::time::SystemTime>,
     /// Pixel dimensions for images; `None` for everything else.
     dimensions: Option<(u32, u32)>,
+    /// How many entries a folder holds; `None` for files or unreadable.
+    items: Option<usize>,
 }
 
 /// Stat `path` and, for images, read its pixel dimensions from the
@@ -225,12 +232,19 @@ fn fetch_preview_meta(path: &Path) -> PreviewMeta {
     }
     // `image_dimensions` reads only the header and errors on non-images.
     let dimensions = image::image_dimensions(path).ok();
+    // ponytail: counts every entry of a huge folder; cap the walk if a
+    // 100k-entry folder makes the details pane visibly late.
+    let items = path
+        .is_dir()
+        .then(|| std::fs::read_dir(path).ok().map(Iterator::count))
+        .flatten();
     PreviewMeta {
         path: path.to_path_buf(),
         size,
         modified,
         created,
         dimensions,
+        items,
     }
 }
 
@@ -257,68 +271,234 @@ fn plural_items(n: usize) -> &'static str {
     if n == 1 { "item" } else { "items" }
 }
 
-/// One Magic-plan op as a review row: the three cells (source name, the
-/// folder it lives in, where it's going) plus the full
-/// `source → destination` string for the hover tooltip. The target is
-/// `None` for a delete — inventing "→ Trash" would imply a path the op
-/// does not have.
+/// One Magic-plan row for review: the file's name, where it ends up, and
+/// the full `source → destination` string for the hover tooltip. The
+/// folder it comes from is the group header, not a cell. `dest` is `None`
+/// where there is no per-file target — inventing "→ Trash" would imply a
+/// path the op does not have.
 struct PlanRow {
     name: SharedString,
-    location: SharedString,
     dest: Option<SharedString>,
     tooltip: SharedString,
 }
 
-fn describe_op(op: &FileOp) -> PlanRow {
-    let file_name = |path: &Path| -> String {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
+fn leaf(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Row `ix` of `plan`: one of its ops, or (compress, tag) one of the
+/// files it acts on.
+fn describe_row(plan: &filex::magic::Plan, ix: usize) -> Option<PlanRow> {
+    if let Some(op) = plan.ops.get(ix) {
+        return Some(describe_op(op));
+    }
+    let path = plan.source(ix)?;
+    Some(PlanRow {
+        name: leaf(path).into(),
+        dest: None,
+        tooltip: display_path(path).into(),
+    })
+}
+
+/// A folder for a narrow column: a long path keeps its last two names
+/// (`…/scratch/Docs`), since truncation would otherwise eat the end —
+/// the part that says where. The row's tooltip has it whole.
+fn short_path(folder: &Path) -> String {
+    let full = display_path(folder);
+    let mut tail: Vec<_> = folder.components().rev().take(2).collect();
+    if full.chars().count() <= 36 || tail.len() < 2 {
+        return full;
+    }
+    tail.reverse();
+    let tail: PathBuf = tail.into_iter().collect();
+    format!("…{}{}", std::path::MAIN_SEPARATOR, tail.display())
+}
+
+/// Why there is no plan, as the pane's message: the reason, then what
+/// to do about it.
+fn plan_error_advice(err: &filex::magic::PlanError) -> (String, &'static str) {
+    use filex::magic::PlanError;
+    match err {
+        PlanError::NoMatches => (
+            "Nothing matched".into(),
+            "Try a broader name, or widen the scope beside the search box.",
+        ),
+        PlanError::NothingSelected => (
+            "Nothing is selected".into(),
+            "Select files in the list first, then ask again.",
+        ),
+        PlanError::TooMany(_) => (
+            format!("More than {} files matched", filex::magic::MAX_PLAN_OPS),
+            "Narrow it down — add a folder (“from Downloads”) or an age — so the plan can be reviewed.",
+        ),
+        PlanError::NothingToDo => (
+            "Nothing to do".into(),
+            "Every match is already where it should be.",
+        ),
+        PlanError::UnknownDestination(name) => (
+            format!("No folder called “{name}”"),
+            "Check the spelling, or create it here.",
+        ),
+        other => {
+            let mut text = other.to_string();
+            if let Some(first) = text.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            (text, "")
+        }
+    }
+}
+
+/// `path` with the home folder written `~`, as paths are everywhere a
+/// Unix user reads them; unchanged on Windows, where nobody writes that.
+fn tilde(path: String, home: Option<&Path>) -> String {
+    let Some(home) = home.filter(|_| !cfg!(windows)).map(display_path) else {
+        return path;
     };
-    let parent = |path: &Path| -> String { path.parent().map(display_path).unwrap_or_default() };
+    match path.strip_prefix(&home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => path,
+    }
+}
+
+fn describe_op(op: &FileOp) -> PlanRow {
     match op {
         FileOp::Delete { path } => PlanRow {
-            name: file_name(path).into(),
-            location: parent(path).into(),
+            name: leaf(path).into(),
             dest: None,
             tooltip: format!("{} → Trash", display_path(path)).into(),
         },
         FileOp::Move { from, to } | FileOp::Copy { from, to } => {
-            // Full destination path when the plan retargeted to dodge a
-            // collision (`ROADMAP.md` → `ROADMAP 2.md`) so the rename is
-            // visible; otherwise just the folder, since the name is
-            // already in the source cell. No "→ " prefix — the arrow is a
-            // fixed-width gutter column in `op_row`, which is what aligns
-            // every row's destination.
-            let renamed = to.file_name() != from.file_name();
-            let dest = if renamed {
-                display_path(to)
+            // The destination folder — relative (`Images/`) when it is
+            // beside the file, as organize's buckets are. When the plan
+            // gave the file a new name to dodge a collision
+            // (`ROADMAP.md` → `ROADMAP 2.md`) that name is appended so
+            // the rename is visible. No "→ " prefix: the arrow is a
+            // fixed-width gutter column in `op_row`.
+            let folder = to.parent().unwrap_or(to.as_path());
+            let mut dest = if folder.parent().is_some() && folder.parent() == from.parent() {
+                format!("{}{}", leaf(folder), std::path::MAIN_SEPARATOR)
             } else {
-                display_path(to.parent().unwrap_or(to.as_path()))
+                short_path(folder)
             };
+            if to.file_name() != from.file_name() {
+                if !dest.ends_with(std::path::MAIN_SEPARATOR) {
+                    dest.push(std::path::MAIN_SEPARATOR);
+                }
+                dest.push_str(&leaf(to));
+            }
             PlanRow {
-                name: file_name(from).into(),
-                location: parent(from).into(),
+                name: leaf(from).into(),
                 dest: Some(dest.into()),
                 tooltip: format!("{} → {}", display_path(from), display_path(to)).into(),
             }
         }
         FileOp::Rename { path, new_name } => PlanRow {
-            name: file_name(path).into(),
-            location: parent(path).into(),
+            name: leaf(path).into(),
             // Bare, for the same reason as Move/Copy above.
             dest: Some(SharedString::from(new_name.clone())),
             tooltip: format!("{} → {new_name}", display_path(path)).into(),
         },
-        // Magic plans never create folders; described for completeness.
+        // Plans list the folders they make as a note, not as rows;
+        // described for completeness.
         FileOp::CreateFolder { path } => PlanRow {
-            name: file_name(path).into(),
-            location: parent(path).into(),
+            name: leaf(path).into(),
             dest: None,
             tooltip: format!("new folder {}", display_path(path)).into(),
         },
     }
+}
+
+/// What a plan does beyond its rows, as (icon, sentence) notes for the
+/// review header: folders it makes, where an archive lands, the tag,
+/// and what was left out.
+fn plan_notes(
+    command: &filex::magic::Command,
+    plan: &filex::magic::Plan,
+) -> Vec<(&'static str, String)> {
+    use filex::magic::{Action, Verb};
+    let mut notes = Vec::new();
+    match plan.creates.as_slice() {
+        [] => {}
+        [only] => notes.push((
+            "icons/plus.svg",
+            format!("Creates the folder “{}”", leaf(only)),
+        )),
+        many => {
+            let names: Vec<String> = many.iter().take(6).map(|path| leaf(path)).collect();
+            notes.push((
+                "icons/plus.svg",
+                format!(
+                    "Creates {} folders: {}{}",
+                    many.len(),
+                    names.join(", "),
+                    if many.len() > names.len() {
+                        ", …"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+    }
+    if let Some(archive) = &plan.archive {
+        notes.push((
+            "icons/archive.svg",
+            format!("Into {}", display_path(archive)),
+        ));
+    }
+    match &command.action {
+        Action::Tag(tag) => notes.push(("icons/dot.svg", format!("Adds the tag “{}”", tag.name))),
+        Action::Untag(Some(name)) => {
+            notes.push(("icons/dot.svg", format!("Removes the tag “{name}”")));
+        }
+        Action::Untag(None) => notes.push(("icons/dot.svg", "Removes every tag".to_owned())),
+        _ => {}
+    }
+    if plan.skipped > 0 {
+        let them = if plan.skipped == 1 { "it" } else { "them" };
+        notes.push((
+            "icons/info.svg",
+            match command.verb {
+                Verb::Rename => format!(
+                    "{} already named that — nothing to do for {them}",
+                    plan.skipped
+                ),
+                Verb::Compress => {
+                    format!("{} left out — a ZIP can hold each name once", plan.skipped)
+                }
+                Verb::Organize => format!("{} folders and hidden files stay put", plan.skipped),
+                _ => match &command.action {
+                    Action::Move(dest) | Action::Copy(dest) => {
+                        format!(
+                            "{} already in {} · left where they are",
+                            plan.skipped, dest.name
+                        )
+                    }
+                    _ => format!("{} already there — skipped", plan.skipped),
+                },
+            },
+        ));
+    }
+    notes
+}
+
+/// `query` with its destination changed to `new folder <name>` — what the
+/// "Create it here" button on an unknown destination types for the user.
+/// `None` when the query has no `to`/`into` to rewrite after.
+fn with_new_folder(query: &str, name: &str) -> Option<String> {
+    let lower = query.to_ascii_lowercase();
+    let (at, separator) = [" to ", " into "]
+        .iter()
+        .filter_map(|sep| lower.rfind(sep).map(|at| (at, *sep)))
+        .max()?;
+    Some(format!(
+        "{}new folder {name}",
+        &query[..at + separator.len()]
+    ))
 }
 
 /// Whether dragging `src` into directory `dest` is a meaningful move.
@@ -396,6 +576,9 @@ struct Workspace {
     service: Option<std::sync::Arc<filex::daemon::ipc::Client>>,
     daemon_status: filex::daemon::ipc::Status,
     search_hits: std::collections::HashMap<PathBuf, filex::daemon::ipc::Hit>,
+    /// Size and modified time of search hits, read off-thread after each
+    /// page lands; a row shows blanks until its entry arrives.
+    search_meta: std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
     search_more: bool,
     /// The query whose results came from its plain-filename reading
     /// because names matched it, so its phrases show as suggestions.
@@ -442,6 +625,19 @@ struct Workspace {
     /// How the search bar decides between normal search and magic mode;
     /// see [`MagicMode`].
     magic_mode: MagicMode,
+    /// The current Magic query read as something other than a file plan.
+    magic_instant: Option<MagicInstant>,
+    /// The query in the grammar's own words, when Magic read a paraphrase
+    /// or fixed a typo — shown so that is never done invisibly.
+    magic_read_as: Option<String>,
+    /// A typo-corrected query to offer when this one found nothing.
+    magic_did_you_mean: Option<String>,
+    /// What an unfinished Magic query could become; the idle pane's list.
+    magic_suggestions: Vec<filex::magic::Suggestion>,
+    /// The highlighted suggestion (up/down, Enter).
+    magic_cursor: usize,
+    /// What plans do about a taken name in the destination.
+    magic_conflicts: filex::magic::ConflictPolicy,
     /// Whether queries look everywhere or only under `cwd` — the search
     /// bar's scope dropdown. Applies to both normal and magic searches.
     search_scope: SearchScope,
@@ -571,6 +767,7 @@ mod file_ops;
 mod input;
 mod integration;
 mod location;
+mod magic;
 mod menus;
 mod navigation;
 mod onboarding;
@@ -619,6 +816,12 @@ impl Workspace {
         let subscription = cx.subscribe(&search_input, |this, _input, event, cx| match event {
             SearchInputEvent::Changed(text) => {
                 if this.query != *text {
+                    // `>` asks for a command, as in an editor's palette —
+                    // no filename starts with it.
+                    if text.starts_with('>') && this.magic_mode != MagicMode::On {
+                        this.magic_mode = MagicMode::On;
+                        this.sync_magic_placeholder(cx);
+                    }
                     this.query = text.clone();
                     this.update_search(cx);
                 }
@@ -732,6 +935,7 @@ impl Workspace {
             service: None,
             daemon_status: filex::daemon::ipc::Status::default(),
             search_hits: Default::default(),
+            search_meta: Default::default(),
             search_more: false,
             phrases_literal: None,
             phrases_forced: None,
@@ -762,6 +966,12 @@ impl Workspace {
             search_generation: 0,
             magic: None,
             magic_mode: MagicMode::Auto,
+            magic_instant: None,
+            magic_read_as: None,
+            magic_did_you_mean: None,
+            magic_suggestions: Vec::new(),
+            magic_cursor: 0,
+            magic_conflicts: Default::default(),
             search_scope: SearchScope::Anywhere,
             scope_menu: None,
             settings_section: preferences::SettingsSection::Appearance,
@@ -857,15 +1067,13 @@ mod magic_ui_tests {
     /// rest were subsequence matches on unrelated files, and every one of
     /// them would have been renamed on confirm.
     fn state(outcome: Result<Plan, filex::magic::PlanError>, checked: Vec<bool>) -> MagicState {
+        let query = "delete screenshots older than 30 days";
+        let command = filex::magic::parse(query, 1_785_067_200).expect("fixture should parse");
         MagicState {
-            source_query: "delete screenshots older than 30 days".into(),
-            command: filex::magic::parse("delete screenshots older than 30 days", 1_785_067_200)
-                .expect("fixture should parse"),
             outcome: Some(outcome),
             loading: false,
-            error: None,
-            progress: Default::default(),
             checked,
+            ..MagicState::new(query, command)
         }
     }
 
@@ -874,6 +1082,10 @@ mod magic_ui_tests {
             verb: Verb::Delete,
             skipped: 0,
             ops,
+            creates: Vec::new(),
+            conflicts: 0,
+            targets: Vec::new(),
+            archive: None,
         }
     }
 
@@ -884,14 +1096,62 @@ mod magic_ui_tests {
     }
 
     #[test]
+    fn the_layout_knows_a_shared_destination_and_what_is_hidden() {
+        let mv = |from: &str, to: &str| FileOp::Move {
+            from: PathBuf::from(from),
+            to: PathBuf::from(to),
+        };
+        let mut state = state(Err(filex::magic::PlanError::NoMatches), Vec::new());
+        // Everything to one folder, one name changed to fit.
+        state.install_plan(Ok(plan(vec![
+            mv("/a/x.pdf", "/dest/x.pdf"),
+            mv("/b/.cache/y.pdf", "/dest/y 2.pdf"),
+        ])));
+        assert_eq!(state.layout.dest.as_deref(), Some(Path::new("/dest")));
+        assert!(state.layout.renames);
+        assert_eq!(state.layout.hidden, [1]);
+        // App data starts unticked: nobody pointed the search at it.
+        assert_eq!(state.checked, [true, false]);
+        state.set_hidden(true);
+        assert_eq!(state.checked, [true, true]);
+        // Two destinations (organize): no single one to put in a title.
+        state.install_plan(Ok(plan(vec![
+            mv("/a/x.pdf", "/a/Docs/x.pdf"),
+            mv("/a/y.png", "/a/Images/y.png"),
+        ])));
+        assert_eq!(state.layout.dest, None);
+        assert!(!state.layout.renames);
+        assert!(state.layout.hidden.is_empty());
+        // A delete goes nowhere.
+        state.install_plan(Ok(plan(vec![delete("/a/.git/x")])));
+        assert_eq!(
+            (state.layout.dest.clone(), state.layout.hidden.len()),
+            (None, 1)
+        );
+    }
+
+    #[test]
+    fn a_refusal_leads_with_its_reason() {
+        use filex::magic::PlanError;
+        let (title, advice) = plan_error_advice(&PlanError::UnknownDestination("Nowhere".into()));
+        assert_eq!(title, "No folder called “Nowhere”");
+        assert!(!advice.is_empty());
+        // Reasons without their own wording still read as a sentence.
+        let (title, _) = plan_error_advice(&PlanError::PatternNotUnique);
+        assert!(title.starts_with("The new name"));
+    }
+
+    #[test]
     fn magic_status_counts_checkboxes_and_blocks_loading_or_failed_plans() {
         let mut state = state(
             Ok(plan(vec![delete("/a"), delete("/b")])),
             vec![false, true],
         );
-        assert_eq!(state.status(), "1 of 2 selected");
+        assert_eq!(state.status(), "1 checked · 1 left out");
+        state.checked.fill(true);
+        assert_eq!(state.status(), "2 checked");
         state.checked.fill(false);
-        assert_eq!(state.status(), "0 of 2 selected");
+        assert_eq!(state.status(), "0 checked · 2 left out");
         state.loading = true;
         assert!(state.selected_ops().is_empty());
         state
@@ -959,16 +1219,119 @@ mod magic_ui_tests {
     }
 
     #[test]
-    fn delete_rows_show_the_source_folder_and_no_destination() {
+    fn delete_rows_have_no_destination() {
         let row = describe_op(&delete("/photos/shot.png"));
         assert_eq!(row.name, SharedString::from("shot.png"));
-        // The folder the file lives in is shown so identical names in
-        // different folders are distinguishable.
-        assert_eq!(
-            row.location.to_string(),
-            Path::new("/photos").display().to_string()
-        );
         assert_eq!(row.dest, None);
+    }
+
+    #[test]
+    fn rows_are_grouped_under_the_folder_they_come_from() {
+        // Identical names in different folders are told apart by the
+        // group header above them, which also folds the group away.
+        let mut state = state(
+            Ok(plan(vec![
+                delete("/a/shot.png"),
+                delete("/b/shot.png"),
+                delete("/a/other.png"),
+            ])),
+            Vec::new(),
+        );
+        state.install_plan(Ok(plan(vec![
+            delete("/a/shot.png"),
+            delete("/b/shot.png"),
+            delete("/a/other.png"),
+        ])));
+        use PlanLine::{Group, Op};
+        assert_eq!(
+            state.layout.lines,
+            [Group(0), Op(0), Op(2), Group(1), Op(1)]
+        );
+        assert_eq!(state.layout.groups[0].0, PathBuf::from("/a"));
+
+        // The header's checkbox takes its whole folder, and only it.
+        state.checked = vec![true, true, false];
+        assert_eq!(state.group_count(0), (1, 2));
+        state.toggle_group(0);
+        assert_eq!(state.checked, vec![true, true, true]);
+        state.toggle_group(0);
+        assert_eq!(state.checked, vec![false, true, false]);
+
+        // Folding hides the rows without unchecking them.
+        state.layout.toggle_collapsed(1);
+        assert_eq!(state.layout.lines, [Group(0), Op(0), Op(2), Group(1)]);
+        assert_eq!(state.selected_ops(), vec![delete("/b/shot.png")]);
+    }
+
+    #[test]
+    fn a_plan_from_one_folder_has_no_group_headers() {
+        let mut state = state(Ok(plan(Vec::new())), Vec::new());
+        state.install_plan(Ok(plan(vec![delete("/a/x"), delete("/a/y")])));
+        assert_eq!(state.layout.lines, [PlanLine::Op(0), PlanLine::Op(1)]);
+    }
+
+    #[test]
+    fn a_plan_without_ops_reviews_and_selects_its_targets() {
+        // Compress and tag plans list files, not operations.
+        let mut state = state(Ok(plan(Vec::new())), Vec::new());
+        let mut targets = plan(Vec::new());
+        targets.targets = vec!["/a/x.pdf".into(), "/a/y.pdf".into()];
+        state.install_plan(Ok(targets));
+        assert_eq!(state.status(), "2 checked");
+        state.checked[0] = false;
+        assert_eq!(state.selected_targets(), vec![PathBuf::from("/a/y.pdf")]);
+        assert!(state.selected_ops().is_empty());
+    }
+
+    #[test]
+    fn a_bucket_beside_the_file_is_shown_relative() {
+        // Organize: "Images/" says more than the full path repeated on
+        // every row.
+        let row = describe_op(&FileOp::Move {
+            from: "/dl/shot.png".into(),
+            to: "/dl/Images/shot 2.png".into(),
+        });
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            row.dest.unwrap().to_string(),
+            format!("Images{sep}shot 2.png")
+        );
+    }
+
+    #[test]
+    fn an_unknown_destination_can_be_rewritten_to_create_it() {
+        assert_eq!(
+            with_new_folder("move pdfs to Old Stuff", "Old Stuff").as_deref(),
+            Some("move pdfs to new folder Old Stuff")
+        );
+        // The last separator is the destination's, as in the grammar.
+        assert_eq!(
+            with_new_folder("copy notes to self INTO archive", "archive").as_deref(),
+            Some("copy notes to self INTO new folder archive")
+        );
+        assert_eq!(with_new_folder("delete old logs", "x"), None);
+    }
+
+    #[test]
+    fn notes_say_what_a_plan_does_beyond_its_rows() {
+        let command = filex::magic::parse_with_gate("zip invoices", 0, false).unwrap();
+        let mut packed = plan(Vec::new());
+        packed.targets = vec!["/a/x.pdf".into()];
+        packed.archive = Some("/a/x.zip".into());
+        packed.skipped = 2;
+        let notes: Vec<String> = plan_notes(&command, &packed)
+            .into_iter()
+            .map(|(_, note)| note)
+            .collect();
+        assert!(notes[0].ends_with("x.zip"), "{notes:?}");
+        assert!(notes[1].starts_with("2 left out"), "{notes:?}");
+
+        let command = filex::magic::parse_with_gate("tag invoices as Work", 0, false).unwrap();
+        let mut made = plan(Vec::new());
+        made.creates = vec!["/a/One".into(), "/a/Two".into()];
+        let notes = plan_notes(&command, &made);
+        assert_eq!(notes[0].1, "Creates 2 folders: One, Two");
+        assert_eq!(notes[1].1, "Adds the tag “Work”");
     }
 
     #[test]
@@ -979,10 +1342,6 @@ mod magic_ui_tests {
         };
         let row = describe_op(&op);
         assert_eq!(row.name, SharedString::from("shot.png"));
-        assert_eq!(
-            row.location.to_string(),
-            Path::new("/a").display().to_string()
-        );
         // Same name at the destination → show the folder, not the file.
         // Bare: the "→" is a gutter column in the row, not part of the text.
         assert_eq!(
@@ -1003,7 +1362,11 @@ mod magic_ui_tests {
         let row = describe_op(&op);
         assert_eq!(
             row.dest.unwrap().to_string(),
-            Path::new("/b/shot 2.png").display().to_string()
+            format!(
+                "{}{}shot 2.png",
+                Path::new("/b").display(),
+                std::path::MAIN_SEPARATOR
+            )
         );
     }
 
@@ -1103,5 +1466,24 @@ mod drop_target_tests {
             Path::new("/a/b/c"),
             Path::new("/other/file.txt")
         ));
+    }
+    #[test]
+    #[cfg(not(windows))]
+    fn the_home_folder_is_written_as_a_tilde() {
+        let home = Some(Path::new("/Users/me"));
+        let tilde = |path: &str| super::tilde(path.to_owned(), home);
+        assert_eq!(tilde("/Users/me/Downloads"), "~/Downloads");
+        assert_eq!(tilde("/Users/me"), "~");
+        // A sibling that merely starts the same is not inside it.
+        assert_eq!(tilde("/Users/melissa/x"), "/Users/melissa/x");
+        assert_eq!(super::tilde("/srv/x".to_owned(), None), "/srv/x");
+    }
+
+    #[test]
+    fn a_long_destination_keeps_the_end_that_says_where() {
+        assert_eq!(super::short_path(Path::new("/srv/Docs")), "/srv/Docs");
+        let long = Path::new("/a-very-long-folder-name/another-long-one/scratch/Docs");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(super::short_path(long), format!("…{sep}scratch{sep}Docs"));
     }
 }

@@ -63,7 +63,7 @@ pub enum SearchInputEvent {
 }
 
 /// What an empty input says until a caller sets its own placeholder.
-pub const DEFAULT_PLACEHOLDER: &str = "type to search";
+pub const DEFAULT_PLACEHOLDER: &str = "Search files";
 
 pub struct SearchInput {
     focus_handle: FocusHandle,
@@ -114,6 +114,10 @@ impl SearchInput {
     /// that read the value on commit instead of subscribing to Changed.
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
     }
 
     pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -358,8 +362,17 @@ impl SearchInput {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.is_selecting = true;
-        if event.modifiers.shift {
+        // Double-click takes the word, triple-click the whole line. No
+        // drag-by-word after them (ponytail: add if anyone misses it).
+        self.is_selecting = event.click_count == 1;
+        if event.click_count >= 3 {
+            self.select_all_text(cx);
+        } else if event.click_count == 2 {
+            let at = self.index_for_mouse_position(event.position);
+            self.selected_range = word_at(&self.content, at);
+            self.selection_reversed = false;
+            cx.notify();
+        } else if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
         } else {
             self.move_to(self.index_for_mouse_position(event.position), cx)
@@ -479,6 +492,49 @@ impl SearchInput {
     fn next_word_boundary(&self, offset: usize) -> usize {
         next_word_boundary(&self.content, offset)
     }
+}
+
+/// The run around byte `offset` that a double-click selects: word
+/// characters (letters, digits, `_`), a run of whitespace, or a single
+/// other character, so `report.pdf` gives `report` or `pdf`. A click
+/// past the last character takes the run before it.
+fn word_at(text: &str, offset: usize) -> Range<usize> {
+    fn class(c: char) -> u8 {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    }
+    let Some(c) = text[offset..]
+        .chars()
+        .next()
+        .or_else(|| text[..offset].chars().next_back())
+    else {
+        return offset..offset;
+    };
+    let start_char = if offset < text.len() {
+        offset
+    } else {
+        offset - c.len_utf8()
+    };
+    let kind = class(c);
+    if kind == 2 {
+        return start_char..start_char + c.len_utf8();
+    }
+    let start = text[..start_char]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, ch)| class(ch) == kind)
+        .last()
+        .map_or(start_char, |(i, _)| i);
+    let end = text[start_char..]
+        .char_indices()
+        .find(|&(_, ch)| class(ch) != kind)
+        .map_or(text.len(), |(i, _)| start_char + i);
+    start..end
 }
 
 /// Byte offset one word to the left of `offset`: skip any whitespace
@@ -702,7 +758,21 @@ impl Focusable for SearchInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_word_boundary, prev_word_boundary};
+    use super::{next_word_boundary, prev_word_boundary, word_at};
+
+    /// Regression: double-clicking the field didn't select the word.
+    #[test]
+    fn double_click_takes_the_word_under_the_pointer() {
+        let s = "move report_final.pdf to café";
+        assert_eq!(&s[word_at(s, 0)], "move");
+        assert_eq!(&s[word_at(s, 8)], "report_final");
+        assert_eq!(&s[word_at(s, 17)], ".");
+        assert_eq!(&s[word_at(s, 19)], "pdf");
+        assert_eq!(&s[word_at(s, 4)], " ");
+        // Past the end: the last word, multibyte included.
+        assert_eq!(&s[word_at(s, s.len())], "café");
+        assert_eq!(word_at("", 0), 0..0);
+    }
 
     #[test]
     fn prev_word_deletes_trailing_word_then_leading() {

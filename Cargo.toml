@@ -205,6 +205,9 @@ raw-window-handle = { version = "0.6", optional = true }
 # Delete-to-trash: NSFileManager reports where the item landed, which
 # the `trash` crate discards — that handle is what makes undo possible.
 objc2-foundation = { version = "0.3.2", features = [
+  "NSDateFormatter",
+  "NSFormatter",
+  "NSLocale",
   "NSError",
   "NSFileManager",
   "NSString",

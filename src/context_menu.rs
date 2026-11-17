@@ -31,6 +31,9 @@ pub enum Command {
     Share,
     Delete,
     Open,
+    OpenInNewTab,
+    QuickLook,
+    EditTags,
     Reveal,
     AddToFavorites,
     RemoveFromFavorites,
@@ -43,6 +46,8 @@ pub enum Command {
     OpenInTerminal,
     NewFolder,
     SetView(ViewMode),
+    /// Grid icons a step larger (`1`) or smaller (`-1`).
+    Zoom(i8),
     SetSort(SortBy),
     SetAscending(bool),
     /// Launch the target in the `n`th app of the Open With list.
@@ -66,7 +71,6 @@ pub enum Submenu {
     OpenWith,
     View,
     SortBy,
-    New,
 }
 
 /// One activatable row (or one button of the icon bar).
@@ -82,6 +86,9 @@ pub struct Item {
     pub checked: bool,
     /// Destructive (warn colour).
     pub danger: bool,
+    /// Shown but inert (Paste with nothing to paste): a command whose
+    /// availability changes stays put, so the menu keeps its shape.
+    pub disabled: bool,
     pub submenu: Option<Submenu>,
 }
 
@@ -94,6 +101,7 @@ impl Item {
             shortcut: None,
             checked: false,
             danger: false,
+            disabled: false,
             submenu: None,
         }
     }
@@ -110,6 +118,11 @@ impl Item {
 
     fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
+        self
+    }
+
+    fn disabled_if(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -144,6 +157,9 @@ pub struct Capabilities {
     pub share: bool,
     /// A terminal can be launched in a folder.
     pub terminal: bool,
+    /// Cut/Copy/Rename/Delete as Explorer's icon strip. A Mac menu names
+    /// every command, with its key, so there they are rows instead.
+    pub icon_strip: bool,
 }
 
 impl Capabilities {
@@ -152,6 +168,7 @@ impl Capabilities {
         Self {
             share: cfg!(windows),
             terminal: true,
+            icon_strip: !cfg!(target_os = "macos"),
         }
     }
 }
@@ -162,6 +179,13 @@ pub const DELETE_LABEL: &str = if cfg!(windows) {
     "Delete"
 } else {
     "Move to Trash"
+};
+
+/// The inspector command in the platform's own words.
+pub const PROPERTIES_LABEL: &str = if cfg!(target_os = "macos") {
+    "Get Info"
+} else {
+    "Properties"
 };
 
 /// Facts about a file/folder row the menu was opened on.
@@ -184,13 +208,24 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
     let mut rows = vec![Row::Heading(facts.heading.clone())];
 
     let mut icons = vec![
-        Item::new(Command::Cut, "Cut").icon("icons/scissors.svg"),
-        Item::new(Command::Copy, "Copy").icon("icons/copy.svg"),
+        Item::new(Command::Cut, "Cut")
+            .icon("icons/scissors.svg")
+            .shortcut("cut"),
+        Item::new(Command::Copy, "Copy")
+            .icon("icons/copy.svg")
+            .shortcut("copy"),
     ];
     // Renaming edits a row of the folder on screen; search results reveal
     // instead.
     if single && !facts.from_search {
-        icons.push(Item::new(Command::Rename, "Rename").icon("icons/pencil.svg"));
+        let rename = Item::new(Command::Rename, "Rename").icon("icons/pencil.svg");
+        // F2 is Explorer's key; on a Mac keyboard it needs fn, so the menu
+        // doesn't advertise it there.
+        icons.push(if cfg!(target_os = "macos") {
+            rename
+        } else {
+            rename.shortcut("rename")
+        });
     }
     // Share sheets take files, not folders (Explorer greys it out too).
     if caps.share && !facts.is_dir {
@@ -199,8 +234,13 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
     icons.push(
         Item::new(Command::Delete, DELETE_LABEL)
             .icon("icons/trash-2.svg")
+            .shortcut("trash")
             .danger(),
     );
+    let strip = caps.icon_strip;
+    if !strip {
+        return named_menu(rows, icons, facts, caps);
+    }
     rows.push(Row::Icons(icons));
 
     if single {
@@ -209,7 +249,11 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
                 .icon("icons/external-link.svg")
                 .shortcut("open"),
         ));
-        if !facts.is_dir {
+        if facts.is_dir {
+            rows.push(Row::Item(
+                Item::new(Command::OpenInNewTab, "Open in New Tab").icon("icons/app-window.svg"),
+            ));
+        } else {
             rows.push(Row::Item(
                 Item::submenu("Open With", Submenu::OpenWith).icon("icons/app-window.svg"),
             ));
@@ -221,16 +265,15 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
         }
         rows.push(Row::Separator);
     }
-
     if single && facts.is_dir {
         rows.push(Row::Item(if facts.favorite {
-            Item::new(Command::RemoveFromFavorites, "Remove from Favorites").icon("icons/star.svg")
+            Item::new(Command::RemoveFromFavorites, "Remove from Sidebar").icon("icons/star.svg")
         } else {
-            Item::new(Command::AddToFavorites, "Add to Favorites").icon("icons/star.svg")
+            Item::new(Command::AddToFavorites, "Add to Sidebar").icon("icons/star.svg")
         }));
     }
     rows.push(Row::Item(
-        Item::new(Command::CompressToZip, "Compress to ZIP File").icon("icons/archive.svg"),
+        Item::new(Command::CompressToZip, "Compress to ZIP").icon("icons/archive.svg"),
     ));
     rows.push(Row::Item(
         Item::new(Command::CopyAsPath, "Copy as Path")
@@ -238,11 +281,13 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
             .shortcut("copy_path"),
     ));
     if single && facts.is_dir {
+        // Folder tools, apart from the file actions above.
+        rows.push(Row::Separator);
         rows.push(Row::Item(
-            Item::new(Command::IndexFolder, "Index This Folder").icon("icons/folder-search.svg"),
+            Item::new(Command::IndexFolder, "Include in Search").icon("icons/folder-search.svg"),
         ));
         rows.push(Row::Item(
-            Item::new(Command::FolderIcon, "Folder Icon…").icon("icons/palette.svg"),
+            Item::new(Command::FolderIcon, "Change Icon…").icon("icons/palette.svg"),
         ));
     }
     if single && facts.is_dir && caps.terminal && !facts.from_search {
@@ -252,7 +297,93 @@ pub fn entry_menu(facts: &EntryFacts, caps: Capabilities) -> Vec<Row> {
     }
     rows.push(Row::Separator);
     rows.push(Row::Item(
-        Item::new(Command::Properties, "Properties")
+        Item::new(Command::Properties, PROPERTIES_LABEL)
+            .icon("icons/info.svg")
+            .shortcut("properties"),
+    ));
+    rows
+}
+
+/// The entry menu with every command named (macOS): grouped as Finder
+/// groups them — open, then the clipboard and the item itself, then
+/// organising, then the item's appearance and info.
+fn named_menu(
+    mut rows: Vec<Row>,
+    file_actions: Vec<Item>,
+    facts: &EntryFacts,
+    caps: Capabilities,
+) -> Vec<Row> {
+    let single = facts.count <= 1;
+    let folder = single && facts.is_dir;
+    if single {
+        rows.push(Row::Item(
+            Item::new(Command::Open, "Open")
+                .icon("icons/external-link.svg")
+                .shortcut("open"),
+        ));
+        rows.push(Row::Item(if facts.is_dir {
+            Item::new(Command::OpenInNewTab, "Open in New Tab").icon("icons/app-window.svg")
+        } else {
+            Item::submenu("Open With", Submenu::OpenWith).icon("icons/app-window.svg")
+        }));
+        if folder && caps.terminal && !facts.from_search {
+            rows.push(Row::Item(
+                Item::new(Command::OpenInTerminal, "Open in Terminal").icon("icons/terminal.svg"),
+            ));
+        }
+        rows.push(Row::Item(
+            Item::new(Command::QuickLook, "Quick Look")
+                .icon("icons/image.svg")
+                .shortcut("quick_look"),
+        ));
+        if facts.from_search {
+            rows.push(Row::Item(
+                Item::new(Command::Reveal, "Reveal in Folder").icon("icons/folder.svg"),
+            ));
+        }
+        rows.push(Row::Separator);
+    }
+    // Cut, Copy, Copy as Path, then the rest (Rename, Share, Trash).
+    for item in file_actions {
+        let after_copy = item.command == Command::Copy;
+        rows.push(Row::Item(item));
+        if after_copy {
+            rows.push(Row::Item(
+                Item::new(Command::CopyAsPath, "Copy as Path")
+                    .icon("icons/link.svg")
+                    .shortcut("copy_path"),
+            ));
+        }
+    }
+    rows.push(Row::Separator);
+    if folder {
+        rows.push(Row::Item(if facts.favorite {
+            Item::new(Command::RemoveFromFavorites, "Remove from Sidebar").icon("icons/star.svg")
+        } else {
+            Item::new(Command::AddToFavorites, "Add to Sidebar").icon("icons/star.svg")
+        }));
+    }
+    rows.push(Row::Item(
+        Item::new(Command::CompressToZip, "Compress to ZIP").icon("icons/archive.svg"),
+    ));
+    if single {
+        rows.push(Row::Item(
+            Item::new(Command::EditTags, "Tags…").icon("icons/tag.svg"),
+        ));
+    }
+    if folder {
+        rows.push(Row::Item(
+            Item::new(Command::IndexFolder, "Include in Search").icon("icons/folder-search.svg"),
+        ));
+    }
+    rows.push(Row::Separator);
+    if folder {
+        rows.push(Row::Item(
+            Item::new(Command::FolderIcon, "Change Icon…").icon("icons/palette.svg"),
+        ));
+    }
+    rows.push(Row::Item(
+        Item::new(Command::Properties, PROPERTIES_LABEL)
             .icon("icons/info.svg")
             .shortcut("properties"),
     ));
@@ -272,15 +403,20 @@ pub fn background_menu(facts: BackgroundFacts, caps: Capabilities) -> Vec<Row> {
         Row::Item(Item::submenu("View", Submenu::View).icon("icons/layout-grid.svg")),
         Row::Item(Item::submenu("Sort By", Submenu::SortBy).icon("icons/arrow-up-down.svg")),
         Row::Separator,
-        Row::Item(Item::submenu("New", Submenu::New).icon("icons/plus.svg")),
+        // The submenu held one item; a row of its own is one click less.
+        Row::Item(
+            Item::new(Command::NewFolder, "New Folder")
+                .icon("icons/plus.svg")
+                .shortcut("new_folder"),
+        ),
     ];
-    if facts.can_paste {
-        rows.push(Row::Item(
-            Item::new(Command::Paste, "Paste")
-                .icon("icons/clipboard.svg")
-                .shortcut("paste"),
-        ));
-    }
+    // Always listed, greyed while there's nothing to paste.
+    rows.push(Row::Item(
+        Item::new(Command::Paste, "Paste")
+            .icon("icons/clipboard.svg")
+            .shortcut("paste")
+            .disabled_if(!facts.can_paste),
+    ));
     rows.push(Row::Separator);
     if caps.terminal {
         rows.push(Row::Item(
@@ -288,7 +424,7 @@ pub fn background_menu(facts: BackgroundFacts, caps: Capabilities) -> Vec<Row> {
         ));
     }
     rows.push(Row::Item(
-        Item::new(Command::Properties, "Properties")
+        Item::new(Command::Properties, PROPERTIES_LABEL)
             .icon("icons/info.svg")
             .shortcut("properties"),
     ));
@@ -302,9 +438,9 @@ pub fn favorite_menu(heading: String) -> Vec<Row> {
         Row::Item(Item::new(Command::MoveFavorite(-1), "Move Up")),
         Row::Item(Item::new(Command::MoveFavorite(1), "Move Down")),
         Row::Separator,
-        Row::Item(Item::new(Command::FolderIcon, "Folder Icon…")),
+        Row::Item(Item::new(Command::FolderIcon, "Change Icon…")),
         Row::Item(
-            Item::new(Command::RemoveFromFavorites, "Remove from Favorites")
+            Item::new(Command::RemoveFromFavorites, "Remove from Sidebar")
                 .icon("icons/star.svg")
                 .danger(),
         ),
@@ -367,6 +503,9 @@ pub fn static_submenu(submenu: Submenu, view: ViewMode, sort: SortSettings) -> V
                     .icon("icons/layout-grid.svg")
                     .checked(view == ViewMode::Grid),
             ),
+            Row::Separator,
+            Row::Item(Item::new(Command::Zoom(1), "Larger Icons").shortcut("zoom_in")),
+            Row::Item(Item::new(Command::Zoom(-1), "Smaller Icons").shortcut("zoom_out")),
         ],
         Submenu::SortBy => {
             let by = |key: SortBy, label: &'static str| {
@@ -386,9 +525,6 @@ pub fn static_submenu(submenu: Submenu, view: ViewMode, sort: SortSettings) -> V
                 ),
             ]
         }
-        Submenu::New => vec![Row::Item(
-            Item::new(Command::NewFolder, "Folder").icon("icons/folder.svg"),
-        )],
         Submenu::OpenWith => Vec::new(),
     }
 }
@@ -440,7 +576,7 @@ pub fn item_at(rows: &[Row], focus: Focus) -> Option<&Item> {
 
 fn focusable(row: &Row) -> bool {
     match row {
-        Row::Item(_) => true,
+        Row::Item(item) => !item.disabled,
         Row::Icons(items) => !items.is_empty(),
         Row::Heading(_) | Row::Separator => false,
     }
@@ -541,7 +677,28 @@ mod tests {
     const ALL: Capabilities = Capabilities {
         share: true,
         terminal: true,
+        icon_strip: true,
     };
+
+    /// A Mac menu names every file action, with its key, where Explorer
+    /// uses an unlabelled icon strip.
+    #[test]
+    fn without_the_strip_the_file_actions_are_named_rows() {
+        let caps = Capabilities {
+            icon_strip: false,
+            ..ALL
+        };
+        let rows = entry_menu(&file(1), caps);
+        assert!(!rows.iter().any(|row| matches!(row, Row::Icons(_))));
+        let named: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item(item) if item.command == Command::Delete => Some(item.shortcut),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, [Some("trash")]);
+    }
 
     fn file(count: usize) -> EntryFacts {
         EntryFacts {
@@ -678,6 +835,7 @@ mod tests {
         let none = Capabilities {
             share: false,
             terminal: false,
+            icon_strip: true,
         };
         let cmds = commands(&entry_menu(&file(1), none));
         assert!(!cmds.contains(&Command::Share));
@@ -686,12 +844,18 @@ mod tests {
     }
 
     #[test]
-    fn background_menu_has_view_sort_new_and_paste_only_with_a_clipboard() {
+    fn background_menu_has_view_sort_new_and_a_paste_greyed_without_a_clipboard() {
         let rows = background_menu(BackgroundFacts { can_paste: false }, ALL);
         assert!(submenu_row(&rows, Submenu::View).is_some());
         assert!(submenu_row(&rows, Submenu::SortBy).is_some());
-        assert!(submenu_row(&rows, Submenu::New).is_some());
-        assert!(!commands(&rows).contains(&Command::Paste));
+        assert!(commands(&rows).contains(&Command::NewFolder));
+        // Present but inert, and skipped by the arrow keys.
+        let paste = rows
+            .iter()
+            .position(|row| matches!(row, Row::Item(item) if item.command == Command::Paste))
+            .unwrap();
+        assert!(matches!(&rows[paste], Row::Item(item) if item.disabled));
+        assert!(!focusable(&rows[paste]));
         let rows = background_menu(BackgroundFacts { can_paste: true }, ALL);
         assert!(commands(&rows).contains(&Command::Paste));
         assert!(commands(&rows).contains(&Command::Properties));
