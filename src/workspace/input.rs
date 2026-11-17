@@ -61,8 +61,51 @@ impl Workspace {
         window: &Window,
     ) -> Point<Pixels> {
         let viewport = window.viewport_size();
-        let max_x = viewport.width - px(ui::menu::MENU_WIDTH + 8.);
-        let max_y = viewport.height - px(est_height);
-        gpui::point(raw.x.min(max_x).max(px(0.)), raw.y.min(max_y).max(px(0.)))
+        let (w, h) = (f32::from(viewport.width), f32::from(viewport.height));
+        let (x, y) = menu_origin(
+            (f32::from(raw.x), f32::from(raw.y)),
+            (ui::menu::MENU_WIDTH, est_height),
+            (w, h),
+        );
+        gpui::point(px(x), px(y))
+    }
+}
+
+/// Where a menu of `size` opened at `at` goes in a window of `window`:
+/// below and right of the pointer when it fits, otherwise flipped to open
+/// up or left from it (as native menus do), never closer than a margin to
+/// an edge. The height estimate gets slack for the card's padding and
+/// shadow, which it doesn't count.
+fn menu_origin(at: (f32, f32), size: (f32, f32), window: (f32, f32)) -> (f32, f32) {
+    const MARGIN: f32 = 8.;
+    let (w, h) = (size.0, size.1 + MARGIN);
+    let place = |pos: f32, len: f32, room: f32| {
+        let pos = if pos + len + MARGIN > room {
+            pos - len
+        } else {
+            pos
+        };
+        pos.min(room - len - MARGIN).max(MARGIN)
+    };
+    (place(at.0, w, window.0), place(at.1, h, window.1))
+}
+
+#[cfg(test)]
+mod menu_origin_tests {
+    use super::menu_origin;
+
+    /// Regression: a background menu opened near the bottom-right corner
+    /// sat 6px from the edges, over the status bar.
+    #[test]
+    fn a_menu_near_a_corner_opens_up_and_left() {
+        let (x, y) = menu_origin((1100., 740.), (248., 160.), (1120., 760.));
+        assert_eq!((x, y), (1100. - 248., 740. - 168.));
+        // Room to spare: it opens at the pointer.
+        assert_eq!(
+            menu_origin((100., 100.), (248., 160.), (1120., 760.)),
+            (100., 100.)
+        );
+        // Taller than the window: pinned to the top margin.
+        assert_eq!(menu_origin((10., 10.), (248., 900.), (1120., 760.)).1, 8.);
     }
 }

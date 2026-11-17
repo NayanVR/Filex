@@ -83,8 +83,8 @@ pub fn filter_chip_strip(theme: &Theme) -> Div {
         .flex_wrap()
         .items_center()
         .gap_1p5()
-        .px_3()
-        .pb(px(6.))
+        .px_5()
+        .pb(px(8.))
         .child(
             div()
                 .flex_none()
@@ -142,6 +142,24 @@ pub fn filter_chip(
             .group_hover("filter-chip", move |s| s.bg(hover))
             .child(icon::ui_icon("icons/x.svg", theme.text_dim).size(px(11.))),
     )
+}
+
+/// Part of what a command matched that isn't a removable filter — the
+/// words it looks for in file names. Same pill, no ✕, not a button.
+pub fn plain_chip(theme: &Theme, label: impl Into<SharedString>) -> Div {
+    // A pill like the others, outlined instead of filled and without an
+    // ×: the term the sentence searched for, not a filter laid on it.
+    div()
+        .flex()
+        .items_center()
+        .h(px(22.))
+        .px_2()
+        .rounded_full()
+        .border_1()
+        .border_color(theme.control_border)
+        .text_xs()
+        .text_color(theme.text)
+        .child(label.into())
 }
 
 /// An offered filter the search is *not* applying: an outlined pill with
@@ -203,7 +221,7 @@ pub fn magic_toggle(theme: &Theme, active: bool) -> Stateful<Div> {
 /// The scope dropdown at the search box's left edge: the current scope
 /// label and a chevron. `open` tints it accent so it reads as active
 /// while its menu is up. Callers chain `.on_mouse_down` to open the menu.
-pub fn scope_selector(theme: &Theme, label: &'static str, open: bool) -> Stateful<Div> {
+pub fn scope_selector(theme: &Theme, label: impl Into<SharedString>, open: bool) -> Stateful<Div> {
     let hover = theme.hover;
     let text = if open { theme.accent } else { theme.text_dim };
     div()
@@ -215,12 +233,16 @@ pub fn scope_selector(theme: &Theme, label: &'static str, open: bool) -> Statefu
         .pl_1()
         .pr_1p5()
         .py_0p5()
-        .rounded_md()
+        // A hairline after it, so "Anywhere" and the placeholder don't
+        // read as one phrase.
+        .border_r_1()
+        .border_color(theme.border)
+        .rounded_l_md()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .text_xs()
         .text_color(text)
-        .child(label)
+        .child(label.into())
         .child(icon::ui_icon("icons/chevron-down.svg", text).size(px(12.)))
 }
 

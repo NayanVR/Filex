@@ -6,6 +6,24 @@ use gpui::{Div, SharedString, div, prelude::*, px};
 
 use super::theme::Theme;
 
+/// A keycap inside a filled button: no box of its own, just a tint of the
+/// button's ink, so the shortcut reads as part of the action.
+pub fn keycap_on(ink: gpui::Rgba, label: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .h(px(18.))
+        .min_w(px(18.))
+        .px(px(5.))
+        .rounded(px(5.))
+        .bg(gpui::Rgba { alpha: 0.16, ..ink })
+        .text_xs()
+        .text_color(gpui::Rgba { alpha: 0.85, ..ink })
+        .child(label.into())
+}
+
 /// One keycap: a single short label ("/", "⌘", "R", "Esc") in a rounded,
 /// bordered box styled from the palette so it reads on light and dark.
 pub fn keycap(theme: &Theme, label: impl Into<SharedString>) -> Div {

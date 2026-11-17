@@ -1,6 +1,8 @@
 # Design: Magic mode — unified natural-language command search
 
-Status: **v1 shipped 2026-07-29 — grammar (`src/magic.rs`), card
+Status: **v3 (2026-11-14): the bar also navigates, runs app commands
+and answers questions, with new plan verbs and a grouped review screen —
+see "v3" below.** Before that: **v1 shipped 2026-07-29 — grammar (`src/magic.rs`), card
 (`src/ui/magic_card.rs`) and confirm→execute all in. Phase 1 (the
 classifier) was cut on measurement rather than built; see §1. Phase 5
 (LLM fallback) remains behind its own gate.** Written 2026-07-28 out of a
@@ -71,10 +73,9 @@ work. A live scoped query re-runs when you navigate (`load_dir`). This is
 also the pragmatic answer to the "from downloads" location problem below:
 scope to the folder instead of naming it in the sentence.
 
-**Still pending** (item 3's remaining clauses): richer per-row conflict
-choices (skip / overwrite / rename, beyond the automatic keep-both), an
-editable target/destination, and grouped source-folder drill-down for
-large plans.
+**Item 3's remaining clauses landed in v3** (below): a plan-wide conflict
+choice, a one-click "create this destination", and grouped source-folder
+drill-down.
 
 ### Where the delete gate goes
 
@@ -107,6 +108,226 @@ most destructive verb with nothing left to catch them.
   basename — near-certain at 697 files. Inline resolution replaces it;
   the plan-time refusal also contradicted the execute-time rule below
   ("occupied destinations retarget to the next free *name 2* variant").
+
+---
+
+## v3: the bar does everything (2026-11-14)
+
+The premise changed from "a batch-file tool behind a toggle" to "the one
+place you type what you want". Four kinds of thing are now understood
+(`magic::Intent`), of which the file plan is one:
+
+| Intent | Example | Runs |
+|---|---|---|
+| `Plan` | `move pdfs from Downloads to new folder Archive` | after review (click, or the *Apply Magic plan* shortcut) |
+| `Go` | `go to Documents`, `open ~/code in new tab` | Enter |
+| `App` | `dark mode`, `sort by size`, `new folder Tax`, `eject Backup` | Enter |
+| `Ask` | `how big is Downloads`, `how many pdfs`, `largest videos` | answers itself |
+
+### What may switch the mode by itself — nothing new
+
+The 329,767-query measurement (§1) covers move/copy/rename and gated
+delete, and those remain the **only** things `parse_with_gate(.., auto =
+true)` accepts. Everything added here is explicit-only: `settings`,
+`new tab`, `go to x`, `zip-files.sh` and `tag-release.yml` are ordinary
+things to search for. So the false-positive numbers still describe what
+they measured, and nothing needed re-measuring.
+
+Explicit entry is the sparkles toggle, the *Magic mode* shortcut
+(Cmd/Ctrl+J), or typing `>` first — no filename starts with it.
+
+### New plan verbs
+
+- **`zip` / `compress` / `archive`** — no per-file `FileOp`; the plan
+  lists `targets` and names the archive (`Plan::archive`). Runs through
+  the same job as the context menu's Compress.
+- **`tag … as <name|colour|colour name>`**, **`untag …`**, **`remove tag
+  X from …`** — also `targets`. Not journaled (the journal records file
+  operations); the opposite command is the undo.
+- **`organize <folder|selected|here> by type|extension|month|year`** —
+  ordinary `Move` ops into buckets beside each file. Reads one folder's
+  **direct children** off the disk rather than searching: the index
+  scope is a subtree, and organizing a subtree would flatten it. Folders
+  and dotfiles stay put.
+- **`to new folder X`** on move/copy. `Plan::creates` rather than
+  `CreateFolder` rows: a move can't be kept while the folder it lands in
+  is unchecked. Execution makes only the folders a checked op lands in,
+  first in the batch, so undo empties them before removing them.
+
+`plans_only_ever_use_existing_file_op_variants` still holds: no new
+`FileOp`, no new execution engine.
+
+### Selection grammar
+
+- **`from <folder>` / `in <folder>`** scopes the search
+  (`Selection::within`) — resolved like a destination, then passed as the
+  query scope. Fixes the documented example, which used to read
+  "downloads" as filename text and match nothing. A tail that reads as a
+  date stays a date (`photos from last week`). Cost, accepted: a
+  filename containing " in " after a verb (`move notes in progress to
+  Archive`) now reports an unknown folder rather than searching the
+  words.
+- **`selected` / `these`** (`Selection::picked`) is the browse
+  selection, which typing a query never disturbed. Explicit-only: a file
+  can be called `selected`.
+- Plans built from the selection or a folder listing are `local`: there
+  are no index hits, so the identity check that guards search-built
+  plans is skipped and a vanished file simply fails its op.
+
+### The review screen
+
+- Rows are **grouped under their source folder**, with a header that
+  folds the group and a tri-state checkbox for all of it
+  (`PlanLayout`). The "In folder" column is gone — it repeated the
+  header. A single-folder plan has no headers; the folder is in the
+  subtitle. Still one `uniform_list`, over the flattened lines.
+- **Conflicts**: when names are already taken in the destination, one
+  plan-wide choice — Keep both (default) / Skip / Replace
+  (`ConflictPolicy`). Replace trashes the existing file inside the same
+  undo batch. Per-row "skip" is the row's checkbox, so no per-row
+  control was added. Two matches sharing a name always keep both.
+  The choice resets with each new command.
+- **Unknown destination** offers *Create “X” here*, which rewrites the
+  command to `… to new folder X`.
+- Notes under the heading say what the rows can't: folders created,
+  where the archive goes, the tag, what was left out.
+
+### The idle pane
+
+Magic on with no complete command shows `magic::suggest`: worked
+templates plus every app command, narrowed by word-prefix as you type,
+up/down + Enter. A test parses every row, so the list can't teach syntax
+that doesn't work. Enter runs a command, and takes a template only while
+it *completes* what is typed — it never replaces half a sentence.
+
+### Answers
+
+The index hit carries no size, so sizes are a stat per file on the
+background executor, cancelled with the query. `largest …` asks the
+index for files over 1 GB first and widens (100 MB, 10 MB, 1 MB, all)
+only until it has 50, so a whole-disk question stats dozens of files,
+not millions. `how many` stats only the rows it shows. `how big is X`
+means the folder when one resolves; `how big are X` always describes
+files (`videos` is not the Videos folder).
+
+### Cost (measured, `benches/magic_bench.rs`, M-series)
+
+| Path | Time |
+|---|---|
+| ordinary keystroke, Magic off (`parse_rejects_filename`) | 82 ns — unchanged path |
+| `interpret`, nothing matches | 0.46 µs |
+| `interpret`, app command | 0.27 µs |
+| `interpret`, plan with scope + new folder | 2.1 µs |
+| `suggest` | 19 µs |
+
+All per debounced keystroke (50 ms), and the last four only while Magic
+is explicitly on. No new dependency; no asset.
+
+### A local model — looked at again, still not built
+
+§4's gate is unchanged and unmet: nobody has measured the grammar's miss
+rate on real queries. On top of that the constraint for this pass was
+that size and speed are critical, and a model loses on both: the
+smallest instruction-following models are hundreds of megabytes
+quantized — many times the whole app — and answer in hundreds of
+milliseconds against the microseconds above. The grammar's failure mode
+is also the better one for a tool that deletes files: it says "not
+understood" and shows what is, where a model produces a confident plan.
+The suggestion list is now the place a miss is visible, which is where a
+miss rate could be sampled if this is ever reopened.
+
+### Review screen, second pass (2026-11-14)
+
+Rated by a design-review subagent from screenshots of seven states, and
+iterated until it scored 9/10 (6.5 → 7.5 → 8 → 8.5 → 9). What changed:
+
+- **The title is the plan.** "Move 151 items to ~/Downloads", "27.7 GB",
+  "Largest videos" sit in the pane's title; the pane under it no longer
+  repeats verb, echo and counts on separate lines. Notes (read-as,
+  creates, skipped) are one wrapping strip that vanishes when empty.
+- **Rows.** No fill on ticked rows; a neutral checkbox with an accent
+  tick, so the *un*ticked row is what stands out. Select all is the
+  checkbox in the column header. Files sit indented under their folder,
+  whose leaf name is bright and path dim, `~` for home.
+- **One destination is said once.** When every row goes to the same
+  folder it is in the title, not on each row; the column then shows only
+  names that had to change ("Renamed to", amber, the end of the name),
+  and those rows and their folders sort first.
+- **App data is left out by default.** Rows under a dot folder or inside
+  an `.app` bundle start unticked and sort last, with an amber "N in
+  hidden or app folders left out · Include". Not applied to the
+  selection or to a folder the sentence names. (`state::is_app_data`.)
+- **Refusals lead with the reason** ("No folder called “X”") and, for a
+  missing folder, the apply shortcut runs "Create “X” and continue".
+- **Commands** are one highlighted row with their neighbours from the
+  command table under "Related"; answers have column headers, a total,
+  and sizes capped by what is allocated (a sparse 8 TB disk image is not
+  8 TB). Every list state has the same keys — ↑↓, ↩, esc — and says so.
+- The apply shortcut is drawn inside the primary button; the scope
+  control shows what the sentence fixed ("This folder", "Downloads").
+
+### Natural phrasing: rewrite, then parse (`magic/natural.rs`)
+
+The grammar stays strict — one spelling per idea — and is not taught
+paraphrases. Instead `understand` **rewrites the sentence into the
+grammar's spelling and hands that to the strict parser**. It works
+because Magic's language is a small closed vocabulary around a few open
+slots (which files, which folder); everything flexible is a table.
+
+1. *Trim* — punctuation, lead-ins ("could you please"), sign-offs.
+2. *App phrases* — strip the framing verb ("turn on", "switch to", "make
+   it", articles) and look the rest up in the command table.
+3. *Paraphrase* — fixed rewrites: verbs ("get rid of" → `delete`),
+   sentence shapes ("put X in Y" → `move X to Y`, "throw X away",
+   "which files are the largest"), comparatives ("more than 30 days
+   old" → `older than 30 days`), a bare trailing "here".
+4. *Typos* — **only if the sentence still doesn't read.** A word one
+   edit (two for 8+ letters) from exactly one vocabulary word is fixed
+   and the sentence tried again. Never touched: a word with a digit or
+   punctuation (a file name), and real words that happen to sit one edit
+   from the vocabulary (`here`/`where`, `game`/`name`, `films`/`files` —
+   the `REAL_WORDS` list, derived offline from a dictionary).
+
+Also: a misspelt *folder* resolves to the one folder on screen or among
+the well-known ones that is a single slip away; `here` / `this folder`
+is the folder on screen; `find X` / `where is X` hands X to the ordinary
+search; Enter on a sentence Magic can't read searches file names for it.
+
+The safety property is unchanged: whatever was rewritten is shown back
+as **Read as: …** in canonical words on the plan or card, in every
+state, before anything runs. A plan that matches nothing offers the
+typo-fixed sentence as *Did you mean …?* rather than applying it.
+
+`Auto` mode does not use any of this — it still acts only on the strict
+grammar and the measured gate.
+
+**The measure** is the corpus in `natural.rs` (`the_corpus_reads_as_
+intended`): ~135 phrasings with their intended reading. 62 were written
+after the tables, as a held-out probe: 46 read correctly cold, 11 more
+after table additions, and 5 are deliberately not read (below). New
+phrasings go in the corpus first.
+
+| Path | Time |
+|---|---|
+| `understand`, paraphrase + lead-in | 10 µs |
+| `understand`, typo (second parse) | 87 µs |
+| `understand`, nothing reads (every word tried) | 85 µs |
+
+Only while Magic is explicitly on. Cost in the binary: the tables and a
+~2.5 KB word list.
+
+### Not done
+
+- Compound commands ("sort by size descending"), "duplicate this"
+  (a copy beside the original), "number these files".
+- Magic follows the search scope: with *Anywhere* selected, "move the
+  pdfs to Docs" proposes every pdf on the disk. Reviewable, but worth
+  deciding whether a command with no `from` should default to the
+  folder on screen.
+- The `from`/`in` ambiguity above has no fallback to the literal words.
+- Tag plans aren't in the undo journal.
+- `organize … by month` buckets by UTC date.
+- Destination editing beyond *Create here* is still "edit the sentence".
 
 ---
 
@@ -311,8 +532,9 @@ of `docs/design-search-ranking.md`.
   `xstate-graph.development.cjs.js`, every one of which confirm would have
   renamed. Fuzzy is how you *find* a file you then look at; it is not
   evidence you meant to modify it. Ordinary searches are unchanged.
-  *Known gap:* Windows service mode sends no `MatchKind` over IPC, so the
-  filter cannot be applied there yet.
+  *Since closed:* command queries now ask the daemon for non-fuzzy
+  matches (`Query::fuzzy = false`), so the exclusion happens at the
+  source on every platform and `usable_in_plan` is gone.
 - **Filter chips describe the command, not the raw query.** Chips are
   derived from `selection.source` via `expand_as_description`, the same
   expansion the command itself used. Deriving them from the whole query

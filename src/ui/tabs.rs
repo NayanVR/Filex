@@ -33,7 +33,7 @@ pub fn tab_bar() -> Div {
         .pl_2();
     // Clear the inset traffic lights: three buttons from x=12 spanning ~52px.
     #[cfg(target_os = "macos")]
-    let bar = bar.pl(px(76.));
+    let bar = bar.pl(px(84.));
     bar
 }
 
@@ -90,11 +90,20 @@ pub fn tab(theme: &Theme, id: impl Into<ElementId>, active: bool) -> Stateful<Di
         .overflow_hidden();
     if active {
         base.bg(theme.bg)
+            // A hairline edge: on the dark shell the canvas fill alone
+            // is too close to the bar to pick the active tab out.
+            .border_1()
+            .border_color(theme.border)
             .shadow(super::raised(theme))
             .text_color(theme.text)
             .font_weight(gpui::FontWeight::MEDIUM)
     } else {
-        base.text_color(theme.text_dim).hover(move |s| s.bg(hover))
+        // A faint well of its own, so a background tab reads as a tab
+        // and not as the window's title.
+        base.border_1()
+            .border_color(theme.border)
+            .text_color(theme.text_dim)
+            .hover(move |s| s.bg(hover))
     }
 }
 

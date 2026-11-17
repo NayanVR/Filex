@@ -139,8 +139,8 @@ pub fn segment(
         .text_xs()
         .child(label.into());
     if selected {
-        base.bg(theme.elevated)
-            .shadow(super::raised(theme))
+        // Same as the plan header's segments: an accent-tinted fill.
+        base.bg(theme.selected)
             .text_color(theme.text)
             .font_weight(gpui::FontWeight::MEDIUM)
     } else {
@@ -349,8 +349,8 @@ pub fn shortcut_row(theme: &Theme, label: &'static str, aliases: String) -> Div 
         .items_center()
         .gap_2()
         .px_2()
-        .py_2()
-        .min_h(px(48.))
+        .py_1p5()
+        .min_h(px(40.))
         .child(
             div()
                 .flex()
@@ -376,20 +376,20 @@ pub fn shortcut_button(
         .flex_none()
         .items_center()
         .justify_center()
-        .min_w(px(86.))
-        .h(px(30.))
+        .min_w(px(52.))
+        .h(px(24.))
         .px_2()
         .rounded_md()
         .border_1()
         .border_color(if recording {
             theme.accent
         } else {
-            theme.border
+            theme.control_border
         })
         .bg(if recording {
             theme.selected
         } else {
-            theme.panel
+            theme.field
         })
         .text_xs()
         .text_color(if recording { theme.accent } else { theme.text })

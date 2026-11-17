@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result};
 
 use crate::settings::{SortBy, SortSettings};
 
+mod date_order;
 mod platform;
 
 /// A single directory entry, sorted for display. GUI-free so it can be unit
@@ -257,6 +258,59 @@ impl FileKind {
         }
     }
 
+    /// The Kind a list column shows for `name`: Finder-style specific
+    /// ("Rust Source", "PNG Image", "Markdown") rather than the bare kind,
+    /// which called most of a project "File" or "Code".
+    pub fn describe(name: &str, is_dir: bool) -> String {
+        if is_dir {
+            return "Folder".into();
+        }
+        let Some(ext) = name
+            .rsplit_once('.')
+            .map(|(stem, ext)| (stem, ext.to_ascii_lowercase()))
+            .filter(|(stem, _)| !stem.is_empty())
+            .map(|(_, ext)| ext)
+        else {
+            // The plain-text files projects ship without an extension.
+            let stem = name.split(['-', '_']).next().unwrap_or(name);
+            return match stem.to_ascii_uppercase().as_str() {
+                "LICENSE" | "LICENCE" | "README" | "CHANGELOG" | "AUTHORS" | "NOTICE"
+                | "COPYING" => "Plain Text".into(),
+                _ => "File".into(),
+            };
+        };
+        let named = match ext.as_str() {
+            "md" => "Markdown",
+            "txt" => "Plain Text",
+            "rs" => "Rust Source",
+            "py" => "Python Source",
+            "js" | "jsx" => "JavaScript",
+            "ts" | "tsx" => "TypeScript",
+            "json" => "JSON",
+            "toml" => "TOML",
+            "yaml" | "yml" => "YAML",
+            "html" => "HTML",
+            "css" => "CSS",
+            "sh" => "Shell Script",
+            "lock" => "Lock File",
+            "pdf" => "PDF Document",
+            _ => "",
+        };
+        if !named.is_empty() {
+            return named.into();
+        }
+        let ext = ext.to_ascii_uppercase();
+        match Self::of_extension(&ext.to_ascii_lowercase()) {
+            Self::Image => format!("{ext} Image"),
+            Self::Video => format!("{ext} Video"),
+            Self::Audio => format!("{ext} Audio"),
+            Self::Archive => format!("{ext} Archive"),
+            Self::Code => format!("{ext} Source"),
+            Self::Document => format!("{ext} Document"),
+            Self::Directory | Self::Other => format!("{ext} File"),
+        }
+    }
+
     /// Human-readable kind name for the details panel.
     pub fn label(self) -> &'static str {
         match self {
@@ -399,12 +453,12 @@ pub fn path_segments(path: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// The Modified column label, in the local time zone: the time for
-/// today ("3:04 PM"), "Yesterday", the weekday within the past week,
+/// today ("Today at 3:04 PM"), "Yesterday", the weekday within the past week,
 /// "Mar 4" earlier this year, else "Mar 4, 2024". "Just now" under a
 /// minute and for a future mtime (clock skew, restored backups) rather
 /// than a nonsense date; "—" when the mtime is unknown.
 pub fn format_modified(modified: Option<SystemTime>, now: SystemTime) -> String {
-    format_modified_in(modified, now, &chrono::Local)
+    format_modified_in(modified, now, &chrono::Local, date_order::day_first())
 }
 
 /// [`format_modified`] against an explicit time zone (tests pin UTC).
@@ -412,6 +466,7 @@ fn format_modified_in<Tz: chrono::TimeZone>(
     modified: Option<SystemTime>,
     now: SystemTime,
     tz: &Tz,
+    day_first: bool,
 ) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -429,39 +484,66 @@ where
     let then = DateTime::<Utc>::from(modified).with_timezone(tz);
     let today = DateTime::<Utc>::from(now).with_timezone(tz);
     match (today.date_naive() - then.date_naive()).num_days() {
-        0 => then.format("%-I:%M %p").to_string(),
+        // "Today at …": a bare time beside "Nov 1" read as a different
+        // kind of value.
+        0 => then.format("Today at %-I:%M %p").to_string(),
         1 => "Yesterday".to_string(),
         2..=6 => then.format("%A").to_string(),
-        _ if then.year() == today.year() => then.format("%b %-d").to_string(),
-        _ => then.format("%b %-d, %Y").to_string(),
+        _ if then.year() == today.year() => then
+            .format(if day_first { "%-d %b" } else { "%b %-d" })
+            .to_string(),
+        _ => then
+            .format(if day_first { "%-d %b %Y" } else { "%b %-d, %Y" })
+            .to_string(),
     }
 }
 
 /// A full local timestamp for the details panel ("Mar 4, 2024 at
 /// 3:04 PM"), where there's room for the exact moment; "—" if unknown.
 pub fn format_timestamp(time: Option<SystemTime>) -> String {
-    format_timestamp_in(time, &chrono::Local)
+    format_timestamp_in(time, &chrono::Local, date_order::day_first())
 }
 
-fn format_timestamp_in<Tz: chrono::TimeZone>(time: Option<SystemTime>, tz: &Tz) -> String
+fn format_timestamp_in<Tz: chrono::TimeZone>(
+    time: Option<SystemTime>,
+    tz: &Tz,
+    day_first: bool,
+) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
     match time {
         Some(time) => chrono::DateTime::<chrono::Utc>::from(time)
             .with_timezone(tz)
-            .format("%b %-d, %Y at %-I:%M %p")
+            .format(if day_first {
+                "%-d %b %Y at %-I:%M %p"
+            } else {
+                "%b %-d, %Y at %-I:%M %p"
+            })
             .to_string(),
         None => "—".to_string(),
     }
 }
 
 pub fn format_size(bytes: u64) -> String {
+    // Each platform's own convention, so a size here matches the one
+    // Finder (decimal) or Explorer (binary) shows for the same file.
+    format_size_in(
+        bytes,
+        if cfg!(target_os = "macos") {
+            1000.0
+        } else {
+            1024.0
+        },
+    )
+}
+
+fn format_size_in(bytes: u64, step: f64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
+    while value >= step && unit < UNITS.len() - 1 {
+        value /= step;
         unit += 1;
     }
     if unit == 0 {
@@ -473,6 +555,18 @@ pub fn format_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kinds_are_named_specifically() {
+        assert_eq!(FileKind::describe("main.rs", false), "Rust Source");
+        assert_eq!(FileKind::describe("Cargo.lock", false), "Lock File");
+        assert_eq!(FileKind::describe("shot.PNG", false), "PNG Image");
+        assert_eq!(FileKind::describe("data.parquet", false), "PARQUET File");
+        assert_eq!(FileKind::describe("LICENSE-MIT", false), "Plain Text");
+        assert_eq!(FileKind::describe("Makefile", false), "File");
+        assert_eq!(FileKind::describe(".gitignore", false), "File");
+        assert_eq!(FileKind::describe("src", true), "Folder");
+    }
+
     use super::*;
     use std::fs;
 
@@ -932,11 +1026,11 @@ mod tests {
         };
         // Thursday 2026-10-22, 15:30 UTC.
         let now = at(2026, 10, 22, 15, 30).unwrap();
-        let label = |t| format_modified_in(t, now, &Utc);
+        let label = |t| format_modified_in(t, now, &Utc, false);
         assert_eq!(label(None), "—");
         assert_eq!(label(at(2026, 10, 22, 15, 30)), "Just now");
-        assert_eq!(label(at(2026, 10, 22, 9, 5)), "9:05 AM");
-        assert_eq!(label(at(2026, 10, 22, 0, 0)), "12:00 AM");
+        assert_eq!(label(at(2026, 10, 22, 9, 5)), "Today at 9:05 AM");
+        assert_eq!(label(at(2026, 10, 22, 0, 0)), "Today at 12:00 AM");
         assert_eq!(label(at(2026, 10, 21, 23, 59)), "Yesterday");
         assert_eq!(label(at(2026, 10, 19, 8, 0)), "Monday");
         // Six days back is still "this week"; seven falls to a date.
@@ -957,26 +1051,54 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 10, 22, 1, 0, 0).unwrap(),
         ));
         let west = FixedOffset::west_opt(5 * 3600).unwrap();
-        assert_eq!(format_modified_in(then, now, &Utc), "1:00 AM");
-        assert_eq!(format_modified_in(then, now, &west), "8:00 PM");
+        assert_eq!(
+            format_modified_in(then, now, &Utc, false),
+            "Today at 1:00 AM"
+        );
+        assert_eq!(
+            format_modified_in(then, now, &west, false),
+            "Today at 8:00 PM"
+        );
     }
 
     #[test]
     fn formats_full_timestamps() {
         use chrono::{TimeZone as _, Utc};
         let t = SystemTime::from(Utc.with_ymd_and_hms(2024, 3, 4, 15, 4, 0).unwrap());
-        assert_eq!(format_timestamp_in(Some(t), &Utc), "Mar 4, 2024 at 3:04 PM");
-        assert_eq!(format_timestamp_in(None, &Utc), "—");
+        assert_eq!(
+            format_timestamp_in(Some(t), &Utc, false),
+            "Mar 4, 2024 at 3:04 PM"
+        );
+        assert_eq!(format_timestamp_in(None, &Utc, false), "—");
+        // Regression: Filex wrote "Nov 1" where Quick Look, in a day-first
+        // locale, wrote "1 Nov".
+        assert_eq!(
+            format_timestamp_in(Some(t), &Utc, true),
+            "4 Mar 2024 at 3:04 PM"
+        );
+        let now = SystemTime::from(Utc.with_ymd_and_hms(2024, 10, 22, 15, 0, 0).unwrap());
+        assert_eq!(format_modified_in(Some(t), now, &Utc, true), "4 Mar");
     }
 
     #[test]
     fn formats_sizes_across_units() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(1023), "1023 B");
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-        assert_eq!(format_size(1024 * 1024), "1.0 MB");
-        assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
-        assert_eq!(format_size(u64::MAX), "16777216.0 TB");
+        let binary = |b| format_size_in(b, 1024.0);
+        assert_eq!(binary(0), "0 B");
+        assert_eq!(binary(1023), "1023 B");
+        assert_eq!(binary(1024), "1.0 KB");
+        assert_eq!(binary(1536), "1.5 KB");
+        assert_eq!(binary(1024 * 1024), "1.0 MB");
+        assert_eq!(binary(5 * 1024 * 1024 * 1024), "5.0 GB");
+        assert_eq!(binary(u64::MAX), "16777216.0 TB");
+    }
+
+    /// Regression: Filex said 215.4 KB where Finder's Quick Look said
+    /// 221 KB for the same file.
+    #[test]
+    fn decimal_sizes_match_finder() {
+        let decimal = |b| format_size_in(b, 1000.0);
+        assert_eq!(decimal(999), "999 B");
+        assert_eq!(decimal(220_571), "220.6 KB");
+        assert_eq!(decimal(7_500_000_000), "7.5 GB");
     }
 }

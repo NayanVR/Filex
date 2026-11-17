@@ -26,7 +26,10 @@ pub fn status_bar(
         .justify_between()
         .h(px(28.))
         .flex_none()
-        .px_4()
+        // Starts where the content card does: under the sidebar it read
+        // as the sidebar's footer, not a fact about the folder.
+        .pl(px(super::sidebar::SIDEBAR_WIDTH + 12.))
+        .pr_4()
         // On the shell, below the canvas: no divider or fill of its own.
         .text_xs()
         .text_color(theme.text_dim)

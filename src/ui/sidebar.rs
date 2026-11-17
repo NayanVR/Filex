@@ -77,10 +77,12 @@ pub fn collapsible_header(
     // One right-pointing chevron that turns to point down when the
     // section opens; the id carries the state so each toggle replays it.
     let (from, to) = if collapsed { (90., 0.) } else { (0., 90.) };
+    // Shown on every section, dimmer when open, so it reads as "these
+    // sections fold" rather than as a link on the one that's closed.
     let rest = if collapsed {
         dim
     } else {
-        fixed::with_alpha(dim, 0.)
+        fixed::with_alpha(dim, 0.45)
     };
     div()
         .id(id)

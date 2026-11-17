@@ -42,6 +42,24 @@ pub fn catalog() -> Vec<Shortcut> {
             FocusSearch
         ),
         entry!(
+            "magic",
+            "Magic mode",
+            "Navigation",
+            if mac { "cmd-j" } else { "ctrl-j" },
+            &[],
+            true,
+            ToggleMagic
+        ),
+        entry!(
+            "apply_plan",
+            "Apply Magic plan",
+            "Selection & files",
+            if mac { "cmd-enter" } else { "ctrl-enter" },
+            &[],
+            true,
+            ApplyPlan
+        ),
+        entry!(
             "location",
             "Edit path",
             "Navigation",
@@ -206,7 +224,7 @@ pub fn catalog() -> Vec<Shortcut> {
         ),
         entry!(
             "properties",
-            "Properties",
+            menu_model::PROPERTIES_LABEL,
             "Selection & files",
             // ⌘I already toggles the details panel on macOS, which is what
             // Properties shows there; ⌥⌘I is Finder's inspector.
@@ -257,6 +275,33 @@ pub fn catalog() -> Vec<Shortcut> {
             &[],
             false,
             ToggleView
+        ),
+        entry!(
+            "new_folder",
+            "New folder",
+            "Selection & files",
+            if mac { "cmd-shift-n" } else { "ctrl-shift-n" },
+            &[],
+            false,
+            NewFolderHere
+        ),
+        entry!(
+            "zoom_in",
+            "Larger icons",
+            "View",
+            if mac { "cmd-=" } else { "ctrl-=" },
+            &[],
+            false,
+            ZoomIn
+        ),
+        entry!(
+            "zoom_out",
+            "Smaller icons",
+            "View",
+            if mac { "cmd--" } else { "ctrl--" },
+            &[],
+            false,
+            ZoomOut
         ),
         entry!(
             "preview",
@@ -469,7 +514,7 @@ pub fn bindings(overrides: &BTreeMap<String, String>) -> Vec<KeyBinding> {
                 "Workspace && !Settings && !SearchInput"
             } else if matches!(
                 spec.id,
-                "search" | "location" | "settings" | "quit" | "new_tab" | "close_tab"
+                "search" | "location" | "magic" | "settings" | "quit" | "new_tab" | "close_tab"
             ) {
                 "Workspace && !Settings"
             } else {

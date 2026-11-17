@@ -316,6 +316,7 @@ impl Workspace {
     /// the anchor instead of moving a single selection.
     pub(super) fn move_selection(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
         if self.in_magic_view() {
+            self.move_magic_cursor(delta, cx);
             return;
         }
         if self.renaming.is_some()
@@ -458,8 +459,9 @@ impl Workspace {
         self.navigate_selecting(parent, name, cx);
     }
 
-    pub(super) fn activate_selected(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.in_magic_view() {
+            self.magic_enter(window, cx);
             return;
         }
         if let Some(ix) = self.active_selection().lead() {

@@ -96,6 +96,20 @@ pub fn scroll_panel(
     )
 }
 
+/// A [`panel`] sized to short choices (the search scope), not to the
+/// context menu's width.
+pub fn narrow_panel(
+    theme: &Theme,
+    position: Point<Pixels>,
+    width: f32,
+    items: Vec<AnyElement>,
+) -> impl IntoElement {
+    fade_in(
+        "context-menu-open",
+        anchored_card(theme, position).w(px(width)).children(items),
+    )
+}
+
 fn anchored_card(theme: &Theme, position: Point<Pixels>) -> Div {
     super::card(theme)
         .absolute()
@@ -149,7 +163,9 @@ pub fn model_row(
     shortcut: Option<SharedString>,
     highlighted: bool,
 ) -> Stateful<Div> {
-    let color = if item.danger {
+    let color = if item.disabled {
+        theme.text_dim
+    } else if item.danger {
         theme.danger
     } else {
         theme.text
@@ -175,10 +191,11 @@ pub fn model_row(
         .items_center()
         .gap_2()
         .rounded_md()
-        .cursor_pointer()
+        .when(!item.disabled, |row| row.cursor_pointer())
         .text_sm()
         .text_color(color)
-        .when(highlighted, |row| row.bg(theme.hover))
+        .when(item.disabled, |row| row.opacity(0.5))
+        .when(highlighted && !item.disabled, |row| row.bg(theme.hover))
         .child(
             div()
                 .w(px(16.))
@@ -288,6 +305,7 @@ mod tests {
             Capabilities {
                 share: true,
                 terminal: true,
+                icon_strip: true,
             },
         );
         assert_eq!(row_top(&rows, 0), PANEL_INSET);

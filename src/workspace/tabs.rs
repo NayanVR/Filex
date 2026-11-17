@@ -147,7 +147,22 @@ impl Workspace {
         } else {
             &self.tabs[i].cwd
         };
-        filex::listing::location_label(cwd).into()
+        let label = filex::listing::location_label(cwd);
+        // Two tabs on different folders of the same name: lead each with
+        // its parent so they can be told apart.
+        let other = |j: usize| {
+            if j == self.active_tab {
+                &self.cwd
+            } else {
+                &self.tabs[j].cwd
+            }
+        };
+        let clash = (0..self.tabs.len())
+            .any(|j| other(j) != cwd && filex::listing::location_label(other(j)) == label);
+        match cwd.parent().and_then(Path::file_name) {
+            Some(parent) if clash => format!("{}/{label}", parent.to_string_lossy()).into(),
+            _ => label.into(),
+        }
     }
 }
 

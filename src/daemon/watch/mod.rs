@@ -4,7 +4,10 @@
 //! recursive mode walks the whole tree on its own to add its watches.
 //! macOS (FSEvents) and Windows (ReadDirectoryChangesW) watch a subtree
 //! natively, so they keep the recursive watch and only filter events.
-#[cfg(any(target_os = "linux", test))]
+// Tests build it on Windows too (a second backend for the same contract),
+// but not macOS: notify's FSEvents backend restarts its stream on every
+// `watch()`, seconds per directory, to test code macOS never ships.
+#[cfg(any(target_os = "linux", all(test, not(target_os = "macos"))))]
 mod per_dir;
 #[cfg(not(target_os = "linux"))]
 mod recursive;

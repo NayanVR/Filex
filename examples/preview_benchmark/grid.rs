@@ -160,16 +160,16 @@ impl Render for Grid {
                             let image = view.image(index, edge, cx);
                             strip = strip.child(
                                 ui::grid::card(
-                                    &theme,
                                     ElementId::Integer(index as u64),
                                     edge,
                                     column_width,
-                                    false,
                                 )
-                                .child(ui::grid::card_icon_area(edge).child(image))
+                                .child(ui::grid::card_icon_area(&theme, edge, false).child(image))
                                 // The benchmark draws no tooltips, so the
                                 // "was truncated" flag is unused.
-                                .child(ui::grid::card_name(&theme, column_width, &name, cx).0),
+                                .child(
+                                    ui::grid::card_name(&theme, column_width, &name, None, cx).0,
+                                ),
                             );
                         }
                         strip
@@ -186,7 +186,7 @@ impl Render for Grid {
             .child(div().flex_1().h_full().child(list))
             .child(
                 ui::details::panel(&theme, 300.)
-                    .child(ui::details::preview_box(&theme).child(preview))
+                    .child(ui::details::preview_box(&theme, true).child(preview))
                     .child(ui::details::title(&theme, name))
                     .child(ui::details::meta_row(
                         &theme,

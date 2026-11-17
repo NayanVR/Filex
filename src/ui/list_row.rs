@@ -20,6 +20,20 @@ pub const MODIFIED_COL_WIDTH: f32 = 112.;
 /// Width of the Size column (rows and header must agree).
 pub const SIZE_COL_WIDTH: f32 = 72.;
 
+/// Width of the Kind column (rows and header must agree).
+pub const KIND_COL_WIDTH: f32 = 96.;
+
+/// The Kind cell: a left-aligned word ("Folder", "Image").
+pub fn kind_cell(theme: &Theme, kind: impl Into<SharedString>) -> Div {
+    div()
+        .w(px(KIND_COL_WIDTH))
+        .flex_none()
+        .text_xs()
+        .text_color(theme.text_dim)
+        .truncate()
+        .child(kind.into())
+}
+
 /// A right-aligned fixed-width detail cell (Modified / Size columns).
 pub fn detail_cell(theme: &Theme, width: f32, text: impl Into<SharedString>) -> Div {
     tabular(
@@ -44,6 +58,9 @@ pub fn header_row(theme: &Theme, icon_col_width: f32) -> Div {
         .px_3()
         .h(px(32.))
         .flex_none()
+        // The rows below leave a scrollbar gutter; so does the header,
+        // or its right-aligned labels overhang their values.
+        .mr(px(super::scrollbar::GUTTER))
         .mb_1()
         .border_b_1()
         .border_color(theme.border)
@@ -106,27 +123,118 @@ pub fn header_cell(
     }
 }
 
-/// Search results put the path below the name so both remain readable
-/// in narrow panes and long names cannot push the location offscreen.
+/// A search hit on one line: the name (query words lit) and, in a column
+/// of its own, the folder it is in. One line like the browse list, so a
+/// screen holds as many hits as it holds files; the folder loses its
+/// middle, never the part that names it.
 pub fn search_label(
     theme: &Theme,
     name: impl Into<SharedString>,
     path: impl Into<SharedString>,
+    matches: Vec<std::ops::Range<usize>>,
+    selected: bool,
 ) -> Div {
+    // On the accent-tinted selected row the accent match would sink in:
+    // bright text there, the weight still marks it.
+    let hit = gpui::HighlightStyle {
+        color: Some(gpui::rgb_to_hsla(if selected {
+            theme.text
+        } else {
+            theme.accent
+        })),
+        font_weight: Some(gpui::FontWeight::SEMIBOLD),
+        ..Default::default()
+    };
+    let name = gpui::StyledText::new(name.into())
+        .with_highlights(matches.into_iter().map(|range| (range, hit)));
     div()
         .flex()
-        .flex_col()
         .flex_1()
         .min_w_0()
-        .child(div().w_full().text_sm().truncate().child(name.into()))
+        .items_center()
+        .gap_4()
+        // Name takes a third: hits often share a name, and the folder is
+        // what tells them apart, so the folder gets the room.
         .child(
             div()
-                .w_full()
-                .text_xs()
-                .text_color(theme.text_dim)
+                .w(gpui::relative(NAME_SHARE))
+                .flex_none()
+                .min_w_0()
+                .text_sm()
                 .truncate()
-                .child(path.into()),
+                .child(name),
         )
+        .child(
+            div().flex_1().min_w_0().child(
+                super::middle_truncated(path.into())
+                    .w_full()
+                    .text_xs()
+                    .text_color(theme.text_dim),
+            ),
+        )
+}
+
+/// The Name column's share of a search row's text area.
+const NAME_SHARE: f32 = 0.34;
+
+/// The labels over [`search_label`]'s two columns.
+pub fn search_header(theme: &Theme, icon_col_width: f32) -> Div {
+    header_row(theme, icon_col_width)
+        // The same box as `search_label`, so the share resolves against
+        // the same width and the labels sit over their columns.
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .gap_4()
+                .child(
+                    div()
+                        .w(gpui::relative(NAME_SHARE))
+                        .flex_none()
+                        .min_w_0()
+                        .child("Name"),
+                )
+                .child(div().flex_1().min_w_0().child("Folder")),
+        )
+        .child(
+            div()
+                .w(px(MODIFIED_COL_WIDTH))
+                .flex_none()
+                .text_right()
+                .child("Modified"),
+        )
+        .child(
+            div()
+                .w(px(SIZE_COL_WIDTH))
+                .flex_none()
+                .text_right()
+                .child("Size"),
+        )
+}
+
+/// Where the query's words occur in `name` (first occurrence of each,
+/// ASCII case-insensitive), sorted and merged, for highlighting a hit.
+/// `words` must already be lowercase.
+// ponytail: ASCII folding only, so "É" typed as "é" matches in the index
+// but isn't lit here; and a fuzzy hit lights nothing. Have the daemon
+// return match offsets if that matters.
+pub fn match_ranges(name: &str, words: &[String]) -> Vec<std::ops::Range<usize>> {
+    let folded = name.to_ascii_lowercase();
+    let mut found: Vec<_> = words
+        .iter()
+        .filter(|word| !word.is_empty())
+        .filter_map(|word| folded.find(word.as_str()).map(|at| at..at + word.len()))
+        .collect();
+    found.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in found {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
 }
 
 /// The common list-row container: fixed height, selection background,
@@ -152,4 +260,24 @@ pub fn list_row(theme: &Theme, ix: usize, is_selected: bool) -> Stateful<Div> {
         // Keep unselected rows quiet; selection and hover establish hierarchy.
         .when(is_selected, |s| s.bg(theme.selected))
         .when(!is_selected, move |s| s.hover(move |s| s.bg(hover)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_ranges;
+
+    #[test]
+    fn query_words_are_found_in_a_name_whatever_their_case() {
+        let words = |q: &str| q.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(match_ranges("Cargo.lock", &words("cargo")), vec![0..5]);
+        assert_eq!(
+            match_ranges("my-report-final.pdf", &words("final report")),
+            vec![3..9, 10..15]
+        );
+        // Overlapping words merge into one run; a miss lights nothing.
+        assert_eq!(match_ranges("abcdef", &words("abc bcd")), vec![0..4]);
+        assert!(match_ranges("notes.txt", &words("cargo")).is_empty());
+        // Offsets stay on character boundaries around non-ASCII text.
+        assert_eq!(match_ranges("日本Cargo", &words("cargo")), vec![6..11]);
+    }
 }

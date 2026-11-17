@@ -22,7 +22,7 @@ pub const ACCENT_PRESETS: [AccentColor; 7] = [
 ];
 
 /// Shared list metrics. Comfortable gives names and thumbnails room to breathe.
-const COMFORTABLE_ROW_HEIGHT: f32 = 36.;
+const COMFORTABLE_ROW_HEIGHT: f32 = 30.;
 const COMFORTABLE_ICON_SIZE: f32 = 20.;
 
 /// The rgb for an accent preset, or `None` for `Default` (keep the
@@ -209,7 +209,7 @@ impl Theme {
             shadow: rgba(0x00000052),
             hover: rgba(0xffffff12),
             field: rgba(0xffffff0d),
-            selected: rgb(0x203a4a),
+            selected: rgb(0x24496a),
             stripe: rgb(0x222328),
             border: rgb(0x2a2c31),
             text: rgb(0xececef),
@@ -251,7 +251,7 @@ impl Theme {
             shadow: rgba(0x1018280f),
             hover: rgba(0x1018280f),
             field: rgba(0x1018280b),
-            selected: rgb(0xe0effa),
+            selected: rgb(0xd5e8f8),
             stripe: rgb(0xf7f8fa),
             border: rgb(0xdfe3e9),
             text: rgb(0x1a2230),
@@ -292,7 +292,7 @@ impl Theme {
             shadow: rgba(0x00000000),
             hover: rgba(0xffffff14),
             field: rgba(0xffffff0f),
-            selected: rgb(0x1f3a4d),
+            selected: rgb(0x23496a),
             stripe: rgb(0x070708),
             border: rgb(0x242529),
             text: rgb(0xe6e8ec),
@@ -344,7 +344,7 @@ impl Theme {
         self.accent_selection = with_alpha(accent, 0.25);
         // Opaque selected-row fill: the base blended toward the accent, a
         // touch stronger on dark bases so it reads against low contrast.
-        let mix = if light_base { 0.16 } else { 0.30 };
+        let mix = if light_base { 0.20 } else { 0.40 };
         self.selected = blend(self.bg, accent, mix);
         // Re-tint the shell glow, unless this palette keeps a flat shell.
         if self.glow != self.panel {
@@ -380,7 +380,7 @@ impl Theme {
     pub fn with_density(mut self, density: Density) -> Self {
         let (row, icon) = match density {
             Density::Comfortable => (COMFORTABLE_ROW_HEIGHT, COMFORTABLE_ICON_SIZE),
-            Density::Compact => (22., 16.),
+            Density::Compact => (24., 16.),
         };
         self.row_height = row;
         self.icon_size = icon;
