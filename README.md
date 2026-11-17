@@ -4,7 +4,7 @@ A fast, native file explorer for Windows, macOS and Linux, with instant
 filename search. Filex is written in Rust and renders on the GPU through
 [GPUI](https://github.com/gpui-ce/gpui-ce). There is no web view.
 
-- Browse folders of any size without lag. Only the visible rows are rendered.
+- Browse folders of any size without lag.
 - Search every file name on your drives as you type. A background index
   service (`filex-indexd`) keeps the index current as files change.
 - Previews, thumbnails, tags, favorites, keyboard-first navigation, and themes.
