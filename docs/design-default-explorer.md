@@ -8,7 +8,7 @@ Status: in progress (started 2026-10-27).
 | Windows default-explorer registration + Settings › Integration | Done. Tried live 2026-10-27 on Windows 11: folders and drives open in Filex (forwarded as tabs), unregister restores the registry byte-for-byte. **Win+E still opens Explorer** |
 | Picker mode (`filex --pick`) | Done; Open / Save / Select Folder, type filter (listing and search), overwrite prompt, owned by and centered over the asking window |
 | Windows dialog shim (x64) | Done; verified end to end through the built DLL (`examples/show_dialog.rs`): open, multi-select, folder, save to a new file, overwrite (Replace / No), cancel. Tried in real apps 2026-10-28 (see the table below) |
-| MSI: ship the shim, unregister on uninstall | Done; the CI install smoke test turns both switches on and checks uninstall removes them |
+| MSI: ship the shim, unregister on uninstall | Done; the release workflow's MSI install smoke test turns both switches on and checks uninstall removes them |
 | 32-bit shim, Linux, macOS | Not started |
 
 Picker latency (release, time to visible window, 2026-10-27, 5 runs):
