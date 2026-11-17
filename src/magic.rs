@@ -851,7 +851,9 @@ pub fn typed_path(name: &str, dirs: &UserDirs) -> Option<PathBuf> {
         return dirs.get("home").map(|home| home.join(rest));
     }
     let path = Path::new(name);
-    path.is_absolute().then(|| path.to_path_buf())
+    // `has_root`, not `is_absolute`: on Windows `\Users` and `/x` have a
+    // root but no drive, and are still a typed path, not a name to search.
+    path.has_root().then(|| path.to_path_buf())
 }
 
 /// The folder `name` inside `cwd`, exact case first. A relative `cwd`

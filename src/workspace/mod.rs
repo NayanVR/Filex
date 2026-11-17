@@ -1362,7 +1362,11 @@ mod magic_ui_tests {
         let row = describe_op(&op);
         assert_eq!(
             row.dest.unwrap().to_string(),
-            Path::new("/b/shot 2.png").display().to_string()
+            format!(
+                "{}{}shot 2.png",
+                Path::new("/b").display(),
+                std::path::MAIN_SEPARATOR
+            )
         );
     }
 
