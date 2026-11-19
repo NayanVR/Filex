@@ -1969,9 +1969,9 @@ mod tests {
         });
         let scope = Scope::Roots([(1, dirs(&[r.join("sub").to_str().unwrap()]))].into());
         let delta = delta_matches_full(&view, scope, &old, data.path(), &next);
-        // `x`, `deep`, `a`, `b` and the flushed `n`; `c` and `sub` rewritten.
+        // `x`, `deep`, `a`, `b` and the flushed `n`; `c` rewritten.
         assert_eq!(delta.tombstones.as_ref().map(Vec::len), Some(5));
-        assert_eq!(delta.len(), 2);
+        assert_eq!(file_names(&delta), [b"c.txt".to_vec()].into());
     }
 
     /// One reconcile of several subtrees, in both roots, as one delta.
@@ -2008,9 +2008,15 @@ mod tests {
             .into(),
         );
         let delta = delta_matches_full(&Arc::new(walked), scope, &old, data.path(), &next);
-        // Per root `gone` and its file; `r/b` and its new file, `r/a` and `s/a`.
+        // Per root `gone` and its file; `r/b/new.txt` only.
         assert_eq!(delta.tombstones.as_ref().map(Vec::len), Some(4));
-        assert_eq!(delta.len(), 4);
+        assert_eq!(file_names(&delta), [b"new.txt".to_vec()].into());
+        assert_eq!(
+            (0..delta.len())
+                .filter(|&s| delta.record(s).name == b"new.txt")
+                .count(),
+            1
+        );
     }
 
     /// A subtree delta writes only what changed: nothing for an unchanged
@@ -2046,8 +2052,24 @@ mod tests {
 
         std::fs::write(r.join("sub/inner/new.txt"), b"x").unwrap();
         let added = reconcile_sub();
-        let names: BTreeSet<_> = (0..added.len()).map(|s| added.record(s).name).collect();
-        assert_eq!(names, [b"inner".to_vec(), b"new.txt".to_vec()].into());
+        assert_eq!(file_names(&added), [b"new.txt".to_vec()].into());
+        // `inner` is rewritten only where adding an entry changes a
+        // directory's size or mtime (APFS does; ext4 and NTFS may not).
+        assert!((0..added.len()).all(|s| {
+            let record = added.record(s);
+            !record.is_dir() || record.name == b"inner"
+        }));
+    }
+
+    /// Names of the file records a segment writes. Which directory records
+    /// a delta rewrites depends on the filesystem: whether adding or
+    /// removing an entry changes the directory's size or mtime.
+    fn file_names(segment: &Segment) -> BTreeSet<Vec<u8>> {
+        (0..segment.len())
+            .map(|s| segment.record(s))
+            .filter(|record| !record.is_dir())
+            .map(|record| record.name)
+            .collect()
     }
 
     /// A subtree that vanished widens to its nearest ancestor the view and
