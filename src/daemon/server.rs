@@ -643,13 +643,21 @@ impl Slots {
         })
     }
 
+    /// A plain CAS loop rather than `fetch_update`, which newer stable
+    /// toolchains deprecate (renamed `try_update`) while older ones lack the
+    /// new name; CI denies warnings on whichever stable it gets.
     fn take(self: &Arc<Self>) -> Result<Slot> {
-        self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < self.limit).then_some(n + 1)
-            })
-            .map_err(|_| anyhow!(BUSY))?;
-        Ok(Slot(self.clone()))
+        let mut n = self.used.load(Ordering::Acquire);
+        loop {
+            ensure!(n < self.limit, BUSY);
+            match self
+                .used
+                .compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Ok(Slot(self.clone())),
+                Err(current) => n = current,
+            }
+        }
     }
 
     fn in_use(&self) -> usize {
