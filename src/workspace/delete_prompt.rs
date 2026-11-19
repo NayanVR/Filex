@@ -102,20 +102,30 @@ impl Workspace {
         label: String,
         cx: &mut Context<Self>,
     ) {
-        if !self.validate_search_paths(&paths, cx) {
+        let expiry = self.check_search_expiry(&paths);
+        if !self.report_search_check(expiry, cx) {
             return;
         }
+        let identities = self.search_hits.clone();
         cx.spawn(async move |this, cx| {
-            let failure = cx
+            let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    paths
-                        .iter()
-                        .find_map(|path| ops::delete_permanently(path).err())
-                        .map(|err| format!("{err:#}"))
+                    // The identity lstats can block on a network path.
+                    super::file_ops::verify_search_hits(&identities, &paths)?;
+                    Ok::<_, String>(
+                        paths
+                            .iter()
+                            .find_map(|path| ops::delete_permanently(path).err())
+                            .map(|err| format!("{err:#}")),
+                    )
                 })
                 .await;
             this.update(cx, |this, cx| {
+                let Ok(failure) = outcome else {
+                    this.report_search_check(outcome.map(drop), cx);
+                    return;
+                };
                 this.notice = Some(
                     failure
                         .unwrap_or_else(|| format!("permanently deleted {label}"))

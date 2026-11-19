@@ -91,8 +91,27 @@ pub fn walk(
     let root_stat = stat(&root.path)?;
     let root_id = allocate(&root.path, 0, &root_stat.identity);
     emit(record(&root.path, root_stat, root_id, 0, root.id))?;
+    walk_under(
+        root, &root.path, root_id, excluded, filter, allocate, emit, cancel,
+    )
+}
+
+/// [`walk`] of what lies under `start`, a directory inside `root` whose
+/// record (ID `start_id`) the caller already holds: `start` itself is
+/// neither allocated nor emitted. A reconcile scoped to a subtree uses it.
+#[allow(clippy::too_many_arguments)]
+pub fn walk_under(
+    root: &Root,
+    start: &Path,
+    start_id: u64,
+    excluded: &Path,
+    filter: &IndexFilter,
+    mut allocate: impl FnMut(&Path, u64, &Identity) -> u64,
+    mut emit: impl FnMut(Record) -> Result<()>,
+    cancel: &AtomicBool,
+) -> Result<usize> {
     let queue = Queue {
-        state: Mutex::new((vec![(root.path.clone(), root_id)], false)),
+        state: Mutex::new((vec![(start.to_path_buf(), start_id)], false)),
         ready: Condvar::new(),
     };
     let queue = &queue;
@@ -121,8 +140,8 @@ pub fn walk(
             // Directories queued or being listed whose listing hasn't
             // arrived; every popped directory sends exactly one.
             let mut outstanding = 1usize;
-            // Their records, emitted when that listing arrives. The root
-            // was emitted from its own `stat` and isn't here.
+            // Their records, emitted when that listing arrives. `start`
+            // was emitted by the caller and isn't here.
             let mut held = HashMap::<u64, Record>::new();
             while outstanding > 0 {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "enumeration cancelled");

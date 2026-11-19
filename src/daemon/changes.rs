@@ -14,7 +14,18 @@ use std::{
     },
 };
 
-fn normalize_path(view: &View, path: &Path, next: &AtomicU64, depth: usize) -> Result<Vec<Delta>> {
+/// The changes that bring `path` up to date in `view`. A directory that
+/// takes back a hidden ID (one deleted, or under a deleted directory, by
+/// native identity) is added to `revived` with that ID: older levels may
+/// still hold children under it that are no longer there.
+/// [`normalize_batch`] keeps only IDs that were hidden before the batch.
+fn normalize_path(
+    view: &View,
+    path: &Path,
+    next: &AtomicU64,
+    depth: usize,
+    revived: &mut Vec<(PathBuf, u64)>,
+) -> Result<Vec<Delta>> {
     ensure!(depth < 128, "parent depth exceeded");
     let root = view
         .roots
@@ -31,7 +42,7 @@ fn normalize_path(view: &View, path: &Path, next: &AtomicU64, depth: usize) -> R
         if let Some(id) = view.resolve(parent) {
             id
         } else {
-            let preceding = normalize_path(view, parent, next, depth + 1)?;
+            let preceding = normalize_path(view, parent, next, depth + 1, revived)?;
             let id = preceding
                 .iter()
                 .rev()
@@ -59,9 +70,14 @@ fn normalize_path(view: &View, path: &Path, next: &AtomicU64, depth: usize) -> R
     if record.id == 0
         && record.identity.birth != 0
         && let Some(id) = view.find_native(root.id, record.identity)
-        && view.path(id).is_none_or(|old| old == path || !old.exists())
     {
-        record.id = id;
+        let old = view.path(id);
+        if old.as_ref().is_none_or(|old| old == path || !old.exists()) {
+            record.id = id;
+            if old.is_none() && record.is_dir() {
+                revived.push((path.to_path_buf(), id));
+            }
+        }
     }
     if record.id == 0 {
         record.id = next.fetch_add(1, Ordering::Relaxed);
@@ -71,12 +87,16 @@ fn normalize_path(view: &View, path: &Path, next: &AtomicU64, depth: usize) -> R
     }
     Ok(changes)
 }
+/// The deltas for `paths`, whether any couldn't be inspected, and the
+/// directories that took back a hidden ID (see [`normalize_path`]): both
+/// need a reconcile.
 pub(super) fn normalize_batch(
     view: &View,
     paths: impl IntoIterator<Item = (PathBuf, bool)>,
     next: &AtomicU64,
-) -> (Vec<Delta>, bool) {
+) -> (Vec<Delta>, bool, Vec<PathBuf>) {
     let mut degraded = false;
+    let mut revived: Vec<(PathBuf, u64)> = Vec::new();
     let mut working = view.clone();
     working.layers.push(Arc::new(Overlay::default()));
     let mut deltas = Vec::new();
@@ -89,7 +109,7 @@ pub(super) fn normalize_batch(
             Arc::make_mut(working.layers.last_mut().unwrap()).put(id, None);
             deltas.push(Delta::Delete(id));
         }
-        match normalize_path(&working, &path, next, 0) {
+        match normalize_path(&working, &path, next, 0, &mut revived) {
             Ok(changes) => {
                 for delta in changes {
                     match &delta {
@@ -118,7 +138,14 @@ pub(super) fn normalize_batch(
             }
         }
     }
-    (deltas, degraded)
+    // An ID this batch itself deleted (a rename `a` → `b`, reported
+    // together: `a` sorts first, so `b` reclaims a just-hidden ID) is an
+    // ordinary move, not a revival; only IDs hidden before the batch are.
+    let revived = (revived.into_iter())
+        .filter(|(_, id)| view.path(*id).is_none())
+        .map(|(path, _)| path)
+        .collect();
+    (deltas, degraded, revived)
 }
 
 /// Descendants of the directories in `paths` that the catalog has never seen.

@@ -24,8 +24,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Receives every watch event and watch error, on notify's thread or (for
-/// errors registering watches) the watch registrar's.
+/// errors registering watches, and the rescan after re-arming a dropped
+/// root) the watch registrar's.
 pub(super) type Handler = Arc<dyn Fn(notify::Result<notify::Event>) + Send + Sync>;
+
+/// `info` of the rescan sent after a dropped root is watched again, so the
+/// handler can tell it from an overflow and clear the coverage error.
+pub(super) const REARMED: &str = "rearmed";
+
+/// Whether every watch error re-arms its root(s) and, once watched again,
+/// sends a [`REARMED`] rescan naming the root (macOS/Windows: every `Err`
+/// notify delivers passes through the registrar, an error naming no root
+/// re-arms all of them). The handler then leaves the reconcile to that
+/// rescan. Linux's per-directory watches have no registrar, so an error
+/// reconciles directly.
+pub(super) const REARMS_ON_ERROR: bool = cfg!(not(target_os = "linux"));
 
 /// The directories a per-directory watch on `root` needs from `start`
 /// down, `start` included: pruned with the same [`IndexFilter`] the index

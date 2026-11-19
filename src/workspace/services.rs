@@ -2,6 +2,7 @@
 //! service probe/poll, app-update checks, crash upload, and tag pruning.
 
 use super::*;
+use std::time::Duration;
 
 impl Workspace {
     /// Sample UI RSS; the UI owns zero catalog bytes. Daemon resources are separate.
@@ -222,6 +223,7 @@ impl Workspace {
     /// Connect or start the per-user daemon; reconnect without an in-process index.
     pub(super) fn spawn_service_probe(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            let mut backoff = StartBackoff::default();
             loop {
                 let existing = this.update(cx, |this, _| {
                     (!this.exiting_for_update).then(|| this.service.clone())
@@ -241,6 +243,22 @@ impl Workspace {
                         Ok::<_, anyhow::Error>((client, status))
                     })
                     .await;
+                let delay = match &outcome {
+                    Ok(_) => {
+                        backoff.succeeded(std::time::Instant::now());
+                        POLL_INTERVAL
+                    }
+                    Err(e) => match backoff.failed_with(e) {
+                        Some(delay) => delay,
+                        // Busy: keep the client and status, no repaint, no
+                        // search re-run; just poll again.
+                        None => {
+                            cx.background_executor().timer(POLL_INTERVAL).await;
+                            continue;
+                        }
+                    },
+                };
+                let crash_looping = backoff.crash_looping();
                 if this
                     .update(cx, |this, cx| {
                         // Polled at 10 Hz; repainting on every poll kept the
@@ -278,9 +296,12 @@ impl Workspace {
                             }
                             Err(_) => {
                                 let mut next = this.daemon_status.clone();
-                                next.error = Some(
-                                    "Search unavailable — reconnecting to filex-indexd".into(),
-                                );
+                                next.error = Some(if crash_looping {
+                                    "Index service keeps crashing — search unavailable, retrying"
+                                        .into()
+                                } else {
+                                    "Search unavailable — reconnecting to filex-indexd".into()
+                                });
                                 let repaint = needs_repaint(
                                     this.service.take().is_some(),
                                     &this.daemon_status,
@@ -299,9 +320,7 @@ impl Workspace {
                 {
                     break;
                 }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(100))
-                    .await;
+                cx.background_executor().timer(delay).await;
             }
         })
         .detach();
@@ -370,6 +389,56 @@ impl Workspace {
     }
 }
 
+/// How often a healthy daemon is polled.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Spacing between daemon (re)start attempts. The daemon exits on any
+/// panic, so one that dies at startup would otherwise be respawned every
+/// couple of seconds forever, writing a crash report each time. Failures
+/// back off 1 s, 2 s, 4 s … capped at 60 s. The count resets only once a
+/// connection has stayed up for [`STABLE`](Self::STABLE), so a daemon that
+/// connects and then dies a few seconds later still backs off.
+#[derive(Debug, Default)]
+struct StartBackoff {
+    failures: u32,
+    up_since: Option<std::time::Instant>,
+}
+
+impl StartBackoff {
+    /// After this many failures in a row the status says the service is
+    /// crashing rather than reconnecting.
+    const CRASH_LOOP_AFTER: u32 = 5;
+    const MAX_DELAY: Duration = Duration::from_secs(60);
+    const STABLE: Duration = Duration::from_secs(10);
+
+    fn succeeded(&mut self, now: std::time::Instant) {
+        let since = *self.up_since.get_or_insert(now);
+        if now.duration_since(since) >= Self::STABLE {
+            self.failures = 0;
+        }
+    }
+
+    /// Record a failed start/connect; returns the wait before the next try.
+    fn failed(&mut self) -> Duration {
+        self.up_since = None;
+        self.failures = self.failures.saturating_add(1);
+        let exp = (self.failures - 1).min(6); // 2^6 s already exceeds the cap
+        Duration::from_secs(1 << exp).min(Self::MAX_DELAY)
+    }
+
+    /// [`failed`](Self::failed), except that a daemon refusing as busy is
+    /// up: `None`, meaning keep the client and status untouched and poll
+    /// again at the normal cadence. It counts nothing, so a local process
+    /// flooding connections can't make it read as crashing.
+    fn failed_with(&mut self, error: &anyhow::Error) -> Option<Duration> {
+        (!filex::daemon::ipc::is_busy(error)).then(|| self.failed())
+    }
+
+    fn crash_looping(&self) -> bool {
+        self.failures >= Self::CRASH_LOOP_AFTER
+    }
+}
+
 /// Whether a daemon poll changed anything the window shows: connecting,
 /// disconnecting, or a different status. The probe polls at 10 Hz, so
 /// repainting unconditionally kept an idle window awake (FIL-27 §2).
@@ -384,8 +453,57 @@ fn needs_repaint(
 
 #[cfg(test)]
 mod tests {
-    use super::needs_repaint;
+    use super::{StartBackoff, needs_repaint};
     use filex::daemon::ipc::Status;
+    use std::time::Duration;
+
+    /// Regression: a daemon that dies on startup was respawned every ~2 s
+    /// forever. Failures back off exponentially to 60 s, flag a crash loop
+    /// after five, and one good poll restores the normal cadence.
+    #[test]
+    fn start_failures_back_off_and_reset() {
+        let mut b = StartBackoff::default();
+        let delays: Vec<u64> = (0..9).map(|_| b.failed().as_secs()).collect();
+        assert_eq!(delays, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert!(b.crash_looping());
+        // Connecting then dying within STABLE keeps the count.
+        let t0 = std::time::Instant::now();
+        b.succeeded(t0);
+        b.succeeded(t0 + Duration::from_secs(5));
+        assert!(b.crash_looping());
+        assert_eq!(b.failed(), Duration::from_secs(60));
+        // Up for STABLE resets it.
+        b.succeeded(t0);
+        b.succeeded(t0 + StartBackoff::STABLE);
+        assert!(!b.crash_looping());
+        assert_eq!(b.failed(), Duration::from_secs(1));
+        for _ in 0..3 {
+            b.failed();
+        }
+        assert!(!b.crash_looping()); // four in a row
+        b.failed();
+        assert!(b.crash_looping()); // five
+        for _ in 0..100 {
+            assert!(b.failed() <= Duration::from_secs(60));
+        }
+    }
+
+    /// Regression: a "busy" refusal (the daemon's connection cap) is not a
+    /// failure: the probe keeps its client and status (`None`), with no
+    /// backoff or crash-loop text, and earlier failures keep their count.
+    #[test]
+    fn busy_replies_do_not_back_off() {
+        let busy = anyhow::anyhow!(filex::daemon::ipc::BUSY);
+        let mut b = StartBackoff::default();
+        for _ in 0..20 {
+            assert_eq!(b.failed_with(&busy), None);
+        }
+        assert!(!b.crash_looping());
+        let gone = anyhow::anyhow!("connection refused");
+        assert_eq!(b.failed_with(&gone), Some(Duration::from_secs(1)));
+        assert_eq!(b.failed_with(&busy), None);
+        assert_eq!(b.failed_with(&gone), Some(Duration::from_secs(2)));
+    }
 
     /// Regression (FIL-27 §2): an unchanged poll must not repaint.
     #[test]

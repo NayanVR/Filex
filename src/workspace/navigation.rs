@@ -31,10 +31,24 @@ impl Workspace {
         select: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.load_listing(path, select, false, cx).detach();
+    }
+
+    /// [`load_dir_selecting`](Self::load_dir_selecting), returning the
+    /// load's task. `keep` is the auto-refresh mode: the selection follows
+    /// its paths and Quick Look stays open.
+    pub(super) fn load_listing(
+        &mut self,
+        path: &Path,
+        select: Option<String>,
+        keep: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<()> {
         if filex::drives::is_this_pc(path) {
             self.show_this_pc(cx);
-            return;
+            return gpui::Task::ready(());
         }
+        self.last_load_start = std::time::Instant::now();
         self.path_request = self.path_request.wrapping_add(1);
         let request = self.path_request;
         self.path_loading = false;
@@ -68,7 +82,7 @@ impl Workspace {
                 read => {
                     let read = read.map(|listing| listing.entries);
                     this.update(cx, |this, cx| {
-                        this.finish_load(request, &path, read, select, cx)
+                        this.finish_load(request, &path, read, select, keep, cx)
                     })
                     .ok();
                     return;
@@ -84,7 +98,7 @@ impl Workspace {
                     futures::future::Either::Left((filled, _)) => {
                         if let Some(filled) = filled {
                             this.update(cx, |this, cx| {
-                                this.finish_load(request, &path, Ok(filled), select, cx)
+                                this.finish_load(request, &path, Ok(filled), select, keep, cx)
                             })
                             .ok();
                         }
@@ -93,7 +107,8 @@ impl Workspace {
                     futures::future::Either::Right((_, rest)) => filling = rest,
                 }
                 let shown = this.update(cx, |this, cx| {
-                    let shown = this.finish_load(request, &path, Ok(names), select.take(), cx);
+                    let shown =
+                        this.finish_load(request, &path, Ok(names), select.take(), keep, cx);
                     this.meta_pending = shown;
                     shown
                 });
@@ -106,14 +121,13 @@ impl Workspace {
             };
             this.update(cx, |this, cx| {
                 if refresh {
-                    this.finish_load(request, &path, Ok(filled), select, cx);
+                    this.finish_load(request, &path, Ok(filled), select, keep, cx);
                 } else {
                     this.apply_metadata(request, &path, filled, cx);
                 }
             })
             .ok();
         })
-        .detach();
     }
 
     /// Stop any backfill still running for a folder being left, and hand
@@ -133,6 +147,7 @@ impl Workspace {
         path: &Path,
         read: anyhow::Result<Vec<Entry>>,
         select: Option<String>,
+        keep: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.path_request != request {
@@ -140,7 +155,7 @@ impl Workspace {
         }
         match read {
             Ok(entries) => {
-                self.apply_directory(path, entries, cx);
+                self.install_listing(path, entries, keep, cx);
                 if let Some(name) = select {
                     self.select_named(&name);
                 }
@@ -192,6 +207,7 @@ impl Workspace {
         self.entries.clear();
         self.selection.clear();
         self.load_error = Some(err.into());
+        self.sync_folder_watch();
     }
 
     /// Select and scroll to the browse row named `name`, if present.
@@ -210,11 +226,15 @@ impl Workspace {
     }
 
     /// After a tab switch: re-issue the load that was in flight when the
-    /// tab was left (its result was dropped by the switch).
+    /// tab was left (its result was dropped by the switch), or else quietly
+    /// re-read the folder, which wasn't watched while in the background.
     pub(super) fn resume_tab_load(&mut self, cx: &mut Context<Self>) {
         if self.listed_dir != self.cwd || self.meta_pending {
             let cwd = self.cwd.clone();
             self.load_dir(&cwd, cx);
+        } else if !filex::drives::is_this_pc(&self.cwd) {
+            self.folder_stale = true;
+            self.refresh_if_stale(cx);
         }
     }
 
@@ -222,10 +242,24 @@ impl Workspace {
     pub(super) fn apply_directory(
         &mut self,
         path: &Path,
-        mut entries: Vec<Entry>,
+        entries: Vec<Entry>,
         cx: &mut Context<Self>,
     ) {
-        self.close_quick_look();
+        self.install_listing(path, entries, false, cx);
+    }
+
+    /// [`apply_directory`](Self::apply_directory); `keep` (auto-refresh)
+    /// carries the selection over by path and leaves Quick Look open.
+    fn install_listing(
+        &mut self,
+        path: &Path,
+        mut entries: Vec<Entry>,
+        keep: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !keep {
+            self.close_quick_look();
+        }
         let show_hidden = self.settings.read(cx).settings().show_hidden_files;
         if !show_hidden {
             entries.retain(|entry| !entry.is_hidden);
@@ -236,10 +270,17 @@ impl Workspace {
         let changed = self.listed_dir != path;
         self.cwd = path.to_path_buf();
         self.listed_dir = path.to_path_buf();
-        self.entries = entries;
+        let old = std::mem::replace(&mut self.entries, entries);
         self.meta_pending = false;
         self.load_error = None;
-        self.selection.clear();
+        if keep && !changed {
+            self.selection.remap(
+                |ix| old.get(ix).map(|e| e.path.as_path()),
+                self.entries.iter().map(|e| e.path.as_path()),
+            );
+        } else {
+            self.selection.clear();
+        }
         // Any in-flight rename points at rows that no longer exist, and
         // an open delete prompt belongs to the folder being left.
         self.renaming = None;
@@ -259,6 +300,7 @@ impl Workspace {
             self.update_search(cx);
         }
         self.sync_path(cx);
+        self.sync_folder_watch();
     }
 
     /// Schedule a thumbnail decode for a visible image row (no-op if

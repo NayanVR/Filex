@@ -292,6 +292,10 @@ impl Workspace {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             this.update(cx, |this, cx| this.run_search(cx)).ok();
         }));
+        // Back to the folder: show what changed in it while searching.
+        if self.query.is_empty() {
+            self.refresh_if_stale(cx);
+        }
         cx.notify();
     }
 

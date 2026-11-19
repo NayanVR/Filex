@@ -35,6 +35,7 @@ impl Workspace {
         self.history_forward = snap.history_forward;
         self.renaming = None;
         self.delete_prompt = None;
+        self.sync_folder_watch();
     }
 
     /// Snapshot the current tab and restore tab `i`. Returns whether the
