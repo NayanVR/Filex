@@ -53,6 +53,16 @@ impl OpProgress {
     pub(crate) fn add_done(&self, bytes: u64) {
         self.copied.fetch_add(bytes, Ordering::Relaxed);
     }
+
+    /// `(done, total)` in bytes, exactly — tests check the counters
+    /// themselves, which [`fraction`](Self::fraction) clamps and rounds.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> (u64, u64) {
+        (
+            self.copied.load(Ordering::Relaxed),
+            self.total.load(Ordering::Relaxed),
+        )
+    }
 }
 
 /// Marker error for a user-requested cancellation, so callers can
