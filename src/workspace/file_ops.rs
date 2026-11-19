@@ -23,6 +23,20 @@ fn apply_folder_icon_op(settings: &mut filex::settings::Settings, op: &ops::Appl
     }
 }
 
+/// Re-check the filesystem identity of every search hit among `paths`.
+/// lstats each one, which can block on a network path, so call it off the
+/// UI thread where the flow allows.
+pub(super) fn verify_search_hits(
+    hits: &std::collections::HashMap<PathBuf, filex::daemon::ipc::Hit>,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    for hit in paths.iter().filter_map(|path| hits.get(path)) {
+        filex::daemon::query::verify(hit)
+            .map_err(|e| format!("Search target changed: {e}. Search again."))?;
+    }
+    Ok(())
+}
+
 impl Workspace {
     /// Follow successful Filex moves/copies/renames, including undo. A
     /// choice remains path-based when changes come from outside Filex.
@@ -57,20 +71,42 @@ impl Workspace {
         paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) -> bool {
-        for path in paths {
-            if let Some(hit) = self.search_hits.get(path) {
-                if let Err(e) = filex::daemon::query::verify(hit) {
-                    self.notice = Some(format!("Search target changed: {e}. Search again.").into());
-                    cx.notify();
-                    return false;
-                }
-            } else if !self.query.is_empty() && self.results.iter().any(|r| &r.target == path) {
-                self.notice = Some("Search target expired; search again".into());
+        let checked = self
+            .check_search_expiry(paths)
+            .and_then(|()| verify_search_hits(&self.search_hits, paths));
+        self.report_search_check(checked, cx)
+    }
+
+    /// The I/O-free half of [`validate_search_paths`](Self::validate_search_paths):
+    /// fails when a path is a search row whose identity has expired. Pair
+    /// it with [`verify_search_hits`] on the background executor.
+    pub(super) fn check_search_expiry(&self, paths: &[PathBuf]) -> Result<(), String> {
+        let expired = paths.iter().any(|path| {
+            !self.search_hits.contains_key(path)
+                && !self.query.is_empty()
+                && self.results.iter().any(|r| &r.target == path)
+        });
+        if expired {
+            Err("Search target expired; search again".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Show a failed search check as the notice; true when it passed.
+    pub(super) fn report_search_check(
+        &mut self,
+        checked: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match checked {
+            Ok(()) => true,
+            Err(notice) => {
+                self.notice = Some(notice.into());
                 cx.notify();
-                return false;
+                false
             }
         }
-        true
     }
 
     /// Bring the browse view back in sync after a file op has landed:
@@ -589,18 +625,19 @@ impl Workspace {
     /// Move every path to the OS trash as one undo batch (off-thread;
     /// each trash op is instant but there can be many).
     pub(super) fn delete_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if !self.validate_search_paths(&paths, cx) {
-            return;
-        }
-        if paths.is_empty() {
+        let expiry = self.check_search_expiry(&paths);
+        if !self.report_search_check(expiry, cx) || paths.is_empty() {
             return;
         }
         let identities = self.search_hits.clone();
         let tags = self.tags.clone();
         cx.spawn(async move |this, cx| {
-            let (applied, failure) = cx
+            let outcome = cx
                 .background_executor()
                 .spawn(async move {
+                    // Up front, so a stale target stops the batch before any
+                    // item moves (as the UI-thread check used to).
+                    verify_search_hits(&identities, &paths)?;
                     let mut applied = Vec::new();
                     let mut failure = None;
                     for path in paths {
@@ -615,10 +652,14 @@ impl Workspace {
                             applied.push(done);
                         }
                     }
-                    (applied, failure)
+                    Ok::<_, String>((applied, failure))
                 })
                 .await;
             this.update(cx, |this, cx| {
+                let Ok((applied, failure)) = outcome else {
+                    this.report_search_check(outcome.map(drop), cx);
+                    return;
+                };
                 if !applied.is_empty() {
                     this.notice = Some(
                         if applied.len() == 1 {
@@ -854,6 +895,34 @@ mod tests {
     use super::*;
     use filex::settings::{FolderIcon, Settings};
     use std::collections::BTreeSet;
+
+    /// The off-thread half of the delete flow's search check: a hit whose
+    /// file is gone fails with the notice; non-hit paths are not touched.
+    #[test]
+    fn verify_search_hits_flags_a_changed_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let meta = std::fs::symlink_metadata(&file).unwrap();
+        let hit = filex::daemon::ipc::Hit {
+            id: 1,
+            name: "a.txt".into(),
+            path: file.clone(),
+            is_dir: false,
+            identity: filex::ingest::identity(&file, &meta),
+            tier: filex::search::literal::Tier::Exact,
+        };
+        let hits = std::collections::HashMap::from([(file.clone(), hit)]);
+        let other = dir.path().join("not-a-hit");
+        assert_eq!(
+            verify_search_hits(&hits, &[file.clone(), other.clone()]),
+            Ok(())
+        );
+        std::fs::remove_file(&file).unwrap();
+        let err = verify_search_hits(&hits, std::slice::from_ref(&file)).unwrap_err();
+        assert!(err.starts_with("Search target changed"), "{err}");
+        assert_eq!(verify_search_hits(&hits, &[other]), Ok(()));
+    }
 
     fn with_icons(entries: &[(&str, FolderIcon)]) -> Settings {
         let mut settings = Settings::default();

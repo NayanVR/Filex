@@ -55,6 +55,10 @@ fn main() -> anyhow::Result<()> {
     }
     let _log = filex::diagnostics::logging::init_in("filex-indexd", None);
     filex::diagnostics::telemetry::install_panic_hook("filex-indexd");
+    // Owner only: the `--build-segment` worker returned above. It is
+    // single-threaded work (`compile` on main), so a panic already ends it
+    // with exit 101, which `builder::run_process` reports as a failed build.
+    filex::daemon::exit_on_panic();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // launchd/systemd stop, logout and upgrades all send SIGTERM. Registering
     // a handler also replaces an ignored disposition inherited across exec,

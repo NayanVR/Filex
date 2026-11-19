@@ -758,12 +758,24 @@ struct Workspace {
     /// only stops a scan that hasn't started; this stops one that has. A
     /// new search sets the old flag and installs a fresh one.
     search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Watches the active tab's folder for changes made by other apps;
+    /// `None` when the platform watcher couldn't start.
+    folder_watch: Option<filex::listing::watch::FolderWatch>,
+    /// The folder `folder_watch` was last pointed at.
+    watched_dir: Option<PathBuf>,
+    /// The watched folder changed while a search, settings or an edit was
+    /// in the way; reload once it's gone.
+    folder_stale: bool,
+    /// When the latest folder load began. A load that began after a
+    /// change was seen already shows it, so the watcher skips its own.
+    last_load_start: std::time::Instant,
 }
 
 mod app;
 mod connect;
 mod delete_prompt;
 mod file_ops;
+mod folder_watch;
 mod input;
 mod integration;
 mod location;
@@ -1024,6 +1036,10 @@ impl Workspace {
             drives: Vec::new(),
             search_debounce: None,
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            folder_watch: None,
+            watched_dir: None,
+            folder_stale: false,
+            last_load_start: std::time::Instant::now(),
             update_status: filex::update::UpdateStatus::default(),
             exiting_for_update: false,
         };
@@ -1033,6 +1049,9 @@ impl Workspace {
         // upload), no housekeeping. It skips `load_dir` too: the picker
         // lands on the requested folder itself.
         let picker_process = cx.has_global::<picker::PickerProcess>();
+        // Before the first load, so its folder gets watched. The picker
+        // too: a file another app saves should appear in the dialog.
+        this.spawn_folder_watch(cx);
         if !picker_process {
             this.load_dir(&cwd, cx);
         }

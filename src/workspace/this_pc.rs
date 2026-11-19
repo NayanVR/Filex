@@ -31,6 +31,7 @@ impl Workspace {
         self.renaming = None;
         self.delete_prompt = None;
         self.sync_path(cx);
+        self.sync_folder_watch();
         self.refresh_drives(cx);
         self.refresh_preview(cx);
         cx.notify();

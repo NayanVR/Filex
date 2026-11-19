@@ -4,7 +4,7 @@
 //! through `filex::shell_integration` on the background executor.
 
 use super::*;
-use filex::shell_integration::{self as shell, Status};
+use filex::shell_integration as shell;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Integration {
@@ -60,7 +60,7 @@ impl Workspace {
 
     pub(super) fn render_integration(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let support = shell::support();
-        let status = self.integration_status.unwrap_or(Status::default());
+        let status = self.integration_status.unwrap_or_default();
         let mut group = ui::settings_pane::group(theme);
         if support.default_explorer {
             group = group.child(

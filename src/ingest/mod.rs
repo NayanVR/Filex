@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
-pub use walk::walk;
+pub use walk::{walk, walk_under};
 
 pub fn inspect(path: &Path, id: u64, parent: u64, root: u32) -> Result<Record> {
     Ok(record(path, stat(path)?, id, parent, root))

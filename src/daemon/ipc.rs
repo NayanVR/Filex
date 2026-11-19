@@ -155,6 +155,15 @@ pub struct Client {
     endpoint: Endpoint,
     pub directory: PathBuf,
 }
+/// The daemon's reply when it is at a connection, read or query cap: it is
+/// up and will answer a retry, so a caller must not treat it as a crash.
+pub const BUSY: &str = "search daemon busy; retry";
+
+/// Whether `error` is the daemon's [`BUSY`] refusal.
+pub fn is_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| e.to_string() == BUSY)
+}
+
 pub fn default_directory() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -289,8 +298,11 @@ impl Client {
         Ok(())
     }
     pub fn start() -> Result<Self> {
-        if let Ok(client) = Self::try_connect() {
-            return Ok(client);
+        match Self::try_connect() {
+            Ok(client) => return Ok(client),
+            // Running, just saturated: spawning another can't help.
+            Err(e) if is_busy(&e) => return Err(e),
+            Err(_) => {}
         }
         let executable = super::executable::daemon()?;
         let mut command = std::process::Command::new(executable);

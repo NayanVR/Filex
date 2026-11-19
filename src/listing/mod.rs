@@ -9,6 +9,7 @@ use crate::settings::{SortBy, SortSettings};
 
 mod date_order;
 mod platform;
+pub mod watch;
 
 /// A single directory entry, sorted for display. GUI-free so it can be unit
 /// tested and later swapped to be fed from the volume index.

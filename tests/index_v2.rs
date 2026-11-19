@@ -1008,7 +1008,7 @@ fn magic_indexed_predicates_match_full_scan_with_overlay_changes() {
                             .collect();
                         let mut actual = Vec::new();
                         let mut total = None;
-                        query::stream(&view, &q, &AtomicBool::new(false), |batch| {
+                        query::stream(view, &q, &AtomicBool::new(false), |batch| {
                             actual.extend(batch.hits.into_iter().map(|h| (h.id, h.path, h.tier)));
                             total = batch.total;
                             Ok(())
@@ -1394,4 +1394,115 @@ fn shutdown_command_stops_the_daemon_and_removes_its_endpoint() {
     thread.join().unwrap().unwrap();
     assert!(stop.load(Ordering::Relaxed));
     assert!(Client::connect(&data).is_err());
+}
+/// A daemon over one small root, built and ready to search.
+struct Daemon {
+    _dir: tempfile::TempDir,
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<anyhow::Result<()>>,
+    client: Client,
+    port: u16,
+}
+fn ready_daemon() -> Daemon {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("report.txt"), b"x").unwrap();
+    let data = dir.path().join("db");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (path, roots, shutdown) = (data.clone(), vec![root], stop.clone());
+    let thread = std::thread::spawn(move || server::run(&path, roots, shutdown));
+    wait_until(|| Client::connect(&data).is_ok());
+    let client = Client::connect(&data).unwrap();
+    wait_until(|| client.status().is_ok_and(|s| !s.building));
+    let endpoint: filex::daemon::ipc::Endpoint =
+        serde_json::from_slice(&std::fs::read(data.join("endpoint.json")).unwrap()).unwrap();
+    Daemon {
+        _dir: dir,
+        stop,
+        thread,
+        client,
+        port: endpoint.port,
+    }
+}
+fn raw_connection(port: u16) -> std::net::TcpStream {
+    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap()
+}
+fn stop_daemon(daemon: Daemon) {
+    daemon.stop.store(true, Ordering::Relaxed);
+    daemon.thread.join().unwrap().unwrap();
+}
+/// Regression: the accept thread used to read each request itself, so one
+/// connection that never sent a frame held every other client for 2 s.
+#[test]
+fn silent_client_does_not_block_status() {
+    let daemon = ready_daemon();
+    let _silent = raw_connection(daemon.port);
+    std::thread::sleep(Duration::from_millis(50));
+    let start = Instant::now();
+    daemon.client.status().unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "status took {elapsed:?}"
+    );
+    stop_daemon(daemon);
+}
+#[test]
+fn half_frame_does_not_block_search() {
+    use std::io::Write;
+    let daemon = ready_daemon();
+    let mut half = raw_connection(daemon.port);
+    half.write_all(&100u32.to_le_bytes()).unwrap();
+    half.write_all(b"{\"version\"").unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let query = Query {
+        text: "report".into(),
+        client: 9,
+        ..Default::default()
+    };
+    let start = Instant::now();
+    let page = daemon
+        .client
+        .search(query, &AtomicBool::new(false))
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(page.hits.len(), 1);
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "search took {elapsed:?}"
+    );
+    stop_daemon(daemon);
+}
+#[test]
+fn read_cap_answers_busy_fast() {
+    let daemon = ready_daemon();
+    // As many silent connections as the daemon reads at once (64).
+    let silent: Vec<_> = (0..64).map(|_| raw_connection(daemon.port)).collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let start = Instant::now();
+    let error = daemon.client.status().unwrap_err();
+    let elapsed = start.elapsed();
+    // The UI tells this apart from a crash (no start backoff).
+    assert!(filex::daemon::ipc::is_busy(&error), "{error}");
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "refusal took {elapsed:?}"
+    );
+    drop(silent);
+    wait_until(|| daemon.client.status().is_ok());
+    stop_daemon(daemon);
+}
+#[test]
+fn shutdown_completes_with_silent_client() {
+    let daemon = ready_daemon();
+    let _silent = raw_connection(daemon.port);
+    std::thread::sleep(Duration::from_millis(50));
+    let start = Instant::now();
+    stop_daemon(daemon);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "shutdown took {elapsed:?}"
+    );
 }

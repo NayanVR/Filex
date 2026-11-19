@@ -19,12 +19,14 @@
 //! [`move_lead`]: Selection::move_lead
 //! [`extend_lead`]: Selection::extend_lead
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::hash::Hash;
 
 /// A set of selected list indices with an anchor and a lead cursor.
 /// Indices are only meaningful against the list they were made in — the
 /// workspace [`clear`](Selection::clear)s it whenever the active list
-/// changes (navigation, a new search, a reload).
+/// changes (navigation, a new search, a reload), except an auto-refresh,
+/// which [`remap`](Selection::remap)s it by path.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Selection {
     indices: BTreeSet<usize>,
@@ -137,6 +139,43 @@ impl Selection {
         Some(next)
     }
 
+    /// Carry the selection across a re-read of the same list (an
+    /// auto-refresh): each selected item, the anchor and the lead follow
+    /// their key (the path) to its index in `new`; keys gone from the list
+    /// drop out. `old` maps an index of the previous list to its key.
+    /// Costs one pass over `new`, and nothing when the selection is empty.
+    pub fn remap<K: Eq + Hash>(
+        &mut self,
+        old: impl Fn(usize) -> Option<K>,
+        new: impl IntoIterator<Item = K>,
+    ) {
+        if self.indices.is_empty() && self.anchor.is_none() && self.lead.is_none() {
+            return;
+        }
+        let tracked = self
+            .indices
+            .iter()
+            .copied()
+            .chain(self.anchor)
+            .chain(self.lead);
+        let mut moved: HashMap<K, Option<usize>> =
+            tracked.filter_map(|ix| Some((old(ix)?, None))).collect();
+        let mut left = moved.len();
+        for (ix, key) in new.into_iter().enumerate() {
+            if left == 0 {
+                break;
+            }
+            if let Some(slot @ None) = moved.get_mut(&key) {
+                *slot = Some(ix);
+                left -= 1;
+            }
+        }
+        let map = |ix: usize| moved.get(&old(ix)?).copied().flatten();
+        self.indices = self.indices.iter().filter_map(|&ix| map(ix)).collect();
+        self.anchor = self.anchor.and_then(map);
+        self.lead = self.lead.and_then(map);
+    }
+
     /// The lead moved by `delta`, clamped to `0..len`. With no lead yet,
     /// a downward step starts at the top and an upward one at the bottom
     /// (matching the old single-selection behavior).
@@ -239,6 +278,26 @@ mod tests {
         // Reversing past the anchor flips the range.
         assert_eq!(sel.extend_lead(-9, 5), Some(0));
         assert_eq!(selected(&sel), [0, 1]);
+    }
+
+    #[test]
+    fn remap_keeps_selection_by_path() {
+        let old = ["b", "c", "d", "e"];
+        let mut sel = Selection::default();
+        sel.select_one(1); // c
+        sel.range_to(3); // c..=e, anchor c, lead e
+        // "a" lands before the selection; "e" (the lead) is deleted.
+        let new = ["a", "b", "c", "d"];
+        sel.remap(|ix| old.get(ix).copied(), new);
+        assert_eq!(selected(&sel), [2, 3]);
+        assert_eq!(sel.lead(), None);
+        // The anchor followed "c", so shift-click still ranges from it.
+        sel.range_to(0);
+        assert_eq!(selected(&sel), [0, 1, 2]);
+        // An empty selection stays empty.
+        let mut none = Selection::default();
+        none.remap(|ix| old.get(ix).copied(), new);
+        assert!(none.is_empty());
     }
 
     #[test]
