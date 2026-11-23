@@ -5,6 +5,8 @@
 //! change events; the index daemon reads it directly.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -342,6 +344,62 @@ impl Settings {
     }
 }
 
+/// Serializes settings saves and keeps the newest one.
+///
+/// The app saves on a thread pool, so two quick updates can produce two
+/// concurrent [`Settings::save`] calls. Those calls would race on the one
+/// temp file, and an older snapshot could be the last one written. The
+/// caller takes a sequence number with [`SettingsWriter::next_seq`] when it
+/// snapshots (on the UI thread, in update order). [`SettingsWriter::write`]
+/// then saves under a lock and skips any snapshot older than the last one
+/// written, so the newest update wins and intermediate snapshots may be
+/// skipped. Clones share state.
+#[derive(Clone, Default)]
+pub struct SettingsWriter {
+    inner: Arc<WriterState>,
+}
+
+#[derive(Default)]
+struct WriterState {
+    /// Last sequence number handed out. Sequences start at 1.
+    issued: AtomicU64,
+    /// Sequence number of the snapshot last written to disk (0 = none yet).
+    written: Mutex<u64>,
+}
+
+impl SettingsWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reserve the sequence number for a snapshot taken now. Call this in
+    /// update order, then pass the number to [`Self::write`].
+    pub fn next_seq(&self) -> u64 {
+        self.inner.issued.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Save `settings` to `file` unless a newer snapshot is already on
+    /// disk. Blocks while another save runs, so call it off the UI thread.
+    /// Returns `Ok(false)` when the snapshot was skipped as stale. A failed
+    /// save leaves the last-written mark unchanged, so the next snapshot
+    /// still gets written.
+    pub fn write(&self, seq: u64, settings: &Settings, file: &Path) -> Result<bool> {
+        // A panic mid-save can only leave the counter stale, never wrong,
+        // so a poisoned lock is still safe to use.
+        let mut written = self
+            .inner
+            .written
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if seq <= *written {
+            return Ok(false);
+        }
+        settings.save(file)?;
+        *written = seq;
+        Ok(true)
+    }
+}
+
 /// Choices recorded by the platform installer. Only the Windows MSI asks
 /// anything today; the macOS cask and Linux tarball have no install UI.
 mod installer {
@@ -590,5 +648,92 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["settings.json"]);
+    }
+
+    /// A snapshot whose `preview_width` encodes its sequence number.
+    fn tagged(seq: u64) -> Settings {
+        Settings {
+            preview_width: seq as f32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn writer_skips_a_snapshot_older_than_the_one_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let writer = SettingsWriter::new();
+        let older = writer.next_seq();
+        let newer = writer.next_seq();
+        assert!(older < newer);
+
+        assert!(writer.write(newer, &tagged(newer), &file).unwrap());
+        assert!(!writer.write(older, &tagged(older), &file).unwrap());
+        assert!(
+            !writer.write(newer, &tagged(newer), &file).unwrap(),
+            "an already written sequence is not written again"
+        );
+        assert_eq!(Settings::load(&file).unwrap().preview_width, newer as f32);
+    }
+
+    #[test]
+    fn writer_retries_after_a_failed_save() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be makes the rename fail.
+        let file = dir.path().join("settings.json");
+        std::fs::create_dir(&file).unwrap();
+        let writer = SettingsWriter::new();
+        let first = writer.next_seq();
+        assert!(writer.write(first, &tagged(first), &file).is_err());
+
+        std::fs::remove_dir(&file).unwrap();
+        // The failed save did not count as written, so a retry of the same
+        // snapshot still goes through.
+        assert!(writer.write(first, &tagged(first), &file).unwrap());
+        assert_eq!(Settings::load(&file).unwrap().preview_width, first as f32);
+    }
+
+    /// Regression for FIL-78: concurrent saves raced on one temp file, and
+    /// an older snapshot could land last.
+    #[test]
+    fn concurrent_writes_keep_the_newest_snapshot_and_no_temp_file() {
+        const N: u64 = 32;
+        for round in 0..8u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("settings.json");
+            let writer = SettingsWriter::new();
+            let mut order: Vec<u64> = (0..N).map(|_| writer.next_seq()).collect();
+            // Deterministic shuffle that changes each round, so the newest
+            // snapshot is often submitted before older ones.
+            order.sort_by_key(|s| (s * 2_654_435_761 + round * 40_503) % 1_000_003);
+
+            let barrier = Arc::new(std::sync::Barrier::new(N as usize));
+            let handles: Vec<_> = order
+                .into_iter()
+                .map(|seq| {
+                    let writer = writer.clone();
+                    let file = file.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        writer.write(seq, &tagged(seq), &file).unwrap()
+                    })
+                })
+                .collect();
+            let wrote = handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|&w| w)
+                .count();
+            assert!(wrote >= 1);
+
+            let on_disk = Settings::load(&file).unwrap();
+            assert_eq!(on_disk.preview_width, N as f32, "round {round}");
+            let names: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, vec!["settings.json"], "round {round}");
+        }
     }
 }

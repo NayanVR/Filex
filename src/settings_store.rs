@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use gpui::{Context, EventEmitter};
 
-use filex::settings::{Settings, default_settings_file};
+use filex::settings::{Settings, SettingsWriter, default_settings_file};
 
 pub enum SettingsEvent {
     /// Previous settings snapshot; read the store for the new values.
@@ -22,6 +22,8 @@ pub struct SettingsStore {
     /// Where saves go; `None` if the platform config dir is unknown
     /// (settings then live for the session only).
     file: Option<PathBuf>,
+    /// Orders the background saves so the newest snapshot always wins.
+    writer: SettingsWriter,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsStore {}
@@ -53,7 +55,11 @@ impl SettingsStore {
                 Settings::default()
             }
         };
-        let store = Self { settings, file };
+        let store = Self {
+            settings,
+            file,
+            writer: SettingsWriter::new(),
+        };
         if first_run {
             store.persist(cx);
         }
@@ -74,15 +80,18 @@ impl SettingsStore {
     }
 
     /// Save on the background executor — settings writes never block
-    /// the UI thread.
+    /// the UI thread. The sequence number is taken here, in update order,
+    /// so a save that runs late can't overwrite a newer one.
     fn persist(&self, cx: &Context<Self>) {
         let Some(file) = self.file.clone() else {
             return;
         };
         let settings = self.settings.clone();
+        let writer = self.writer.clone();
+        let seq = writer.next_seq();
         cx.background_executor()
             .spawn(async move {
-                if let Err(err) = settings.save(&file) {
+                if let Err(err) = writer.write(seq, &settings, &file) {
                     tracing::error!("failed to save settings: {err:#}");
                 }
             })
