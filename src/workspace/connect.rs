@@ -200,6 +200,7 @@ impl Workspace {
             self.connect = None;
             window.focus(&self.focus_handle, cx);
             self.refresh_drives(cx);
+            self.nav_via = "connect_server";
             self.navigate(path, cx);
         }
         cx.notify();

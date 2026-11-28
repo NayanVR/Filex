@@ -128,6 +128,7 @@ impl Workspace {
                     ui::top_bar::toolbar_button(&theme, id, icon, color)
                         .tooltip(self.action_tip(label, shortcut, cx))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            analytics::feature_with("toolbar_button", "action", shortcut);
                             action.run(this, cx)
                         }))
                 }),

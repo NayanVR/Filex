@@ -97,6 +97,43 @@ pub enum AppCommand {
     Quit,
 }
 
+impl AppCommand {
+    /// A stable id for the command alone, without any value it carries
+    /// (a folder name, an address). Used as an analytics label, so it must
+    /// never include user text.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::NewTab => "new_tab",
+            Self::CloseTab => "close_tab",
+            Self::NextTab => "next_tab",
+            Self::PrevTab => "prev_tab",
+            Self::Back => "back",
+            Self::Forward => "forward",
+            Self::Up => "up",
+            Self::Refresh => "refresh",
+            Self::Undo => "undo",
+            Self::Settings => "settings",
+            Self::Shortcuts => "shortcuts",
+            Self::Theme(_) => "theme",
+            Self::Density(_) => "density",
+            Self::HiddenFiles(_) => "hidden_files",
+            Self::Sort(_) => "sort",
+            Self::SortAscending(_) => "sort_ascending",
+            Self::View(_) => "view",
+            Self::TogglePreview => "toggle_preview",
+            Self::NewFolder(_) => "new_folder",
+            Self::Connect(_) => "connect",
+            Self::Eject(_) => "eject",
+            Self::Terminal => "terminal",
+            Self::CopyPath => "copy_path",
+            Self::Properties => "properties",
+            Self::Favorite(_) => "favorite",
+            Self::Feedback => "feedback",
+            Self::Quit => "quit",
+        }
+    }
+}
+
 /// The fixed commands: the name shown in suggestions, then everything
 /// else a person might type for it.
 const COMMANDS: &[(&str, &[&str], AppCommand)] = &[
@@ -531,6 +568,24 @@ fn matching(typed: &[String]) -> Vec<Suggestion> {
             action: SuggestionAction::Run(command.clone()),
         });
     templates.chain(commands).collect()
+}
+
+#[cfg(test)]
+mod app_command_id_tests {
+    use super::*;
+
+    #[test]
+    fn ids_never_carry_the_command_value() {
+        assert_eq!(
+            AppCommand::NewFolder(Some("Secret".into())).id(),
+            "new_folder"
+        );
+        assert_eq!(
+            AppCommand::Connect(Some("smb://nas".into())).id(),
+            "connect"
+        );
+        assert_eq!(AppCommand::Eject("Work".into()).id(), "eject");
+    }
 }
 
 #[cfg(test)]

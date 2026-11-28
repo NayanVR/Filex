@@ -44,8 +44,8 @@ pub fn init_in(component: &str, base: Option<PathBuf>) -> Option<WorkerGuard> {
     use tracing_subscriber::prelude::*;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // A single fmt layer over whichever writer we resolved, so the Sentry
-    // breadcrumb layer (below) can compose onto the same subscriber. The
+    // A single fmt layer over whichever writer we resolved, so the
+    // analytics error layer (below) can compose onto the same subscriber. The
     // guard is `Some` only for the file writer (the stderr fallback needs
     // none).
     let (writer, guard): (BoxMakeWriter, Option<WorkerGuard>) =
@@ -60,13 +60,14 @@ pub fn init_in(component: &str, base: Option<PathBuf>) -> Option<WorkerGuard> {
         .with_writer(writer)
         .with_ansi(false);
     let subscriber = tracing_subscriber::registry().with(filter).with(fmt_layer);
-    // Under `observability`, tracing events also become Sentry signals:
-    // its default mapping sends `error` as events and `warn`/`info` as
-    // breadcrumbs. Every one is path-scrubbed by the before_send /
-    // before_breadcrumb hooks in `crate::diagnostics::observability` before it leaves
-    // the machine — the tracing strings here are full of `path.display()`.
-    #[cfg(feature = "observability")]
-    let subscriber = subscriber.with(sentry_tracing::layer());
+    // Under `analytics`, `error!` events also become PostHog exceptions
+    // (message only, scrubbed by `analytics::exception::scrub_text`, rate
+    // limited per callsite). The layer is inert until the UI starts
+    // analytics with consent, so a daemon built with the feature by
+    // accident still sends nothing.
+    #[cfg(feature = "analytics")]
+    let subscriber =
+        subscriber.with(crate::diagnostics::analytics::layer::AnalyticsLayer::default());
     subscriber.try_init().ok();
     guard
 }

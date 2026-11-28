@@ -123,6 +123,7 @@ impl Workspace {
         if filex::drives::is_this_pc(&target) {
             window.focus(&self.focus_handle, cx);
             self.clear_search(cx);
+            self.nav_via = "path_bar";
             self.navigate(target, cx);
             return;
         }
@@ -133,6 +134,7 @@ impl Workspace {
         self.path_loading = true;
         window.focus(&self.focus_handle, cx);
         cx.notify();
+        let started = std::time::Instant::now();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -145,6 +147,12 @@ impl Workspace {
                 this.path_loading = false;
                 match result {
                     Ok((path, entries)) => {
+                        analytics::folder_opened(
+                            &path,
+                            "path_bar",
+                            Ok(entries.len()),
+                            started.elapsed(),
+                        );
                         this.clear_search(cx);
                         if this.cwd != path {
                             this.history_back.push(this.cwd.clone());
@@ -238,6 +246,7 @@ impl Workspace {
                                 if path.as_os_str().is_empty() {
                                     this.focus_path(window, cx)
                                 } else {
+                                    this.nav_via = "breadcrumb";
                                     this.navigate(path.clone(), cx)
                                 }
                             }))

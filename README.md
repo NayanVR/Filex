@@ -47,8 +47,9 @@ delete the `filex` folder in both locations:
 
 ## Privacy
 
-Filex sends optional crash reports and diagnostics to Sentry, with file names
-and paths removed, and checks GitHub for updates. Nothing else leaves your
+Filex sends optional, anonymous usage data and crash reports to PostHog: which
+features are used and how fast they are. It never sends file names, paths,
+searches or tags. It also checks GitHub for updates. Nothing else leaves your
 computer. Read the full [privacy policy](PRIVACY.md).
 
 ## Building from source

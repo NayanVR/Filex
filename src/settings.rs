@@ -106,10 +106,11 @@ pub struct Settings {
     pub favorites: Vec<PathBuf>,
     /// Ids of sidebar sections the user has collapsed (e.g. "recents").
     pub collapsed_sections: Vec<String>,
-    /// Consent for Sentry diagnostics: scrubbed crash reports, anonymous
-    /// measurements, release-health sessions. On by default (opt-out). Data
-    /// carries only crash/metric details — never file names, paths, tags or
-    /// queries — and nothing sends without an embedded DSN.
+    /// Consent for anonymous usage data and diagnostics (PostHog): product
+    /// events, scrubbed error reports and performance measurements. On by
+    /// default (opt-out). Events carry only typed numbers, booleans and fixed
+    /// labels, never file names, paths, tags or queries, and nothing sends
+    /// without an embedded project key. See `docs/design-telemetry.md`.
     pub share_diagnostics: bool,
     /// Whether the welcome flow still has to run. True only for a brand-new
     /// install ([`Settings::first_run`]); a file written before onboarding

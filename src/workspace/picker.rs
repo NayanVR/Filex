@@ -257,6 +257,7 @@ impl Workspace {
             Confirm::Done(paths) => self.picker_finish(paths, cx),
             Confirm::Navigate(dir) => {
                 self.clear_search(cx);
+                self.nav_via = "picker";
                 self.navigate(dir, cx);
             }
             Confirm::Check(path) => self.check_save_target(path, cx),

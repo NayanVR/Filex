@@ -5,18 +5,30 @@ use super::*;
 use std::time::Duration;
 
 impl Workspace {
-    /// Sample UI RSS; the UI owns zero catalog bytes. Daemon resources are separate.
-    #[cfg(feature = "observability")]
+    /// Sample UI resident memory on a slow timer (`resource_sample`). The UI
+    /// owns zero catalog bytes, and daemon resources are separate. Only
+    /// spawned when analytics is on. The RSS query is a cheap OS call.
     pub(super) fn spawn_resource_sampling(&self, cx: &mut Context<Self>) {
+        if !filex::diagnostics::analytics::is_enabled() {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_secs(60))
+                    .timer(std::time::Duration::from_secs(15 * 60))
                     .await;
-                let Ok(roots) = this.update(cx, |this, _| this.roots.len()) else {
+                let Ok((roots, tabs)) =
+                    this.update(cx, |this, _| (this.roots.len(), this.tabs.len()))
+                else {
                     break;
                 };
-                filex::diagnostics::observability::record_resource_sample(roots);
+                use filex::diagnostics::analytics::{Event, names, process_rss_bytes, track};
+                track(
+                    Event::new(names::RESOURCE_SAMPLE)
+                        .with("index_roots", roots)
+                        .with("tabs", tabs)
+                        .with_opt("rss_mb", process_rss_bytes().map(|b| b / (1024 * 1024))),
+                );
             }
         })
         .detach();
@@ -89,6 +101,7 @@ impl Workspace {
                         }
                         this.update(cx, |this, cx| {
                             if applying_requested {
+                                analytics::update_stage("failed");
                                 this.update_status = filex::update::UpdateStatus::Failed;
                                 this.notice = Some("Couldn't reach the Filex updater".into());
                                 cx.notify();
@@ -178,6 +191,7 @@ impl Workspace {
                 })
                 .await;
             if let Ok(Some(version)) = found {
+                analytics::update_stage("available");
                 this.update(cx, |this, cx| {
                     this.update_status = filex::update::UpdateStatus::Available {
                         version,
@@ -198,6 +212,11 @@ impl Workspace {
         let filex::update::UpdateStatus::Available { affordance, .. } = &self.update_status else {
             return;
         };
+        analytics::update_stage(match affordance {
+            filex::update::UpdateAffordance::RunCommand(_) => "copy_command",
+            filex::update::UpdateAffordance::OpenUrl(_) => "open_url",
+            filex::update::UpdateAffordance::Restart => "restart",
+        });
         match affordance.clone() {
             filex::update::UpdateAffordance::RunCommand(cmd) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd));
@@ -216,6 +235,7 @@ impl Workspace {
 
     /// Hide the update banner (the ✕). The check runs again next launch.
     pub(super) fn dismiss_update(&mut self, cx: &mut Context<Self>) {
+        analytics::update_stage("dismissed");
         self.update_status = filex::update::UpdateStatus::Idle;
         cx.notify();
     }
@@ -288,6 +308,12 @@ impl Workspace {
                                     onboarding.observe_index(status.building, now);
                                     onboarding.observe_loading(&status, now);
                                 }
+                                analytics::index_transition(
+                                    this.service_seen,
+                                    &this.daemon_status,
+                                    &status,
+                                );
+                                this.service_seen = true;
                                 this.daemon_status = status;
                                 if changed && refresh && !this.query.is_empty() {
                                     this.update_search(cx);
@@ -295,6 +321,14 @@ impl Workspace {
                                 repaint
                             }
                             Err(_) => {
+                                // Once per lost connection, not per retry.
+                                if this.service.is_some() {
+                                    analytics::feature_with(
+                                        "index_unavailable",
+                                        "crash_looping",
+                                        crash_looping,
+                                    );
+                                }
                                 let mut next = this.daemon_status.clone();
                                 next.error = Some(if crash_looping {
                                     "Index service keeps crashing — search unavailable, retrying"
@@ -344,32 +378,28 @@ impl Workspace {
         let _ = cx;
     }
 
-    /// Drain any queued crash reports to Sentry at launch — only with the
-    /// user's consent (`share_diagnostics`, on-by-default/opt-out). Runs
-    /// off-thread; each scrubbed report is captured and deleted on success,
-    /// failures stay queued for next launch (Phase 2c). Sentry is the only
-    /// transport, so without the `observability` feature this is a no-op and
-    /// the durable queue simply caps at [`filex::diagnostics::telemetry::QUEUE_CAP`].
+    /// Deliver queued crash reports (the UI's and the daemon's) to PostHog at
+    /// launch, only with the user's consent (`share_diagnostics`, which is
+    /// what started analytics). Runs off-thread. A report is deleted once
+    /// PostHog accepts it and stays queued for next launch on a network
+    /// failure (Phase 2c). Without the `analytics` feature this is a no-op
+    /// and the durable queue simply caps at
+    /// [`filex::diagnostics::telemetry::QUEUE_CAP`].
     pub(super) fn spawn_crash_upload(&self, cx: &mut Context<Self>) {
-        if !self.settings.read(cx).settings().share_diagnostics {
+        if !filex::diagnostics::analytics::is_enabled() {
             return;
         }
-        #[cfg(feature = "observability")]
-        {
-            let Some(dir) = filex::diagnostics::telemetry::default_queue_dir() else {
-                return; // no data dir
-            };
-            cx.background_executor()
-                .spawn(async move {
-                    let sent = filex::diagnostics::observability::drain_crashes_to_sentry(&dir);
-                    if sent > 0 {
-                        tracing::info!("sent {sent} crash report(s) to Sentry");
-                    }
-                })
-                .detach();
-        }
-        #[cfg(not(feature = "observability"))]
-        let _ = cx;
+        let Some(dir) = filex::diagnostics::telemetry::default_queue_dir() else {
+            return; // no data dir
+        };
+        cx.background_executor()
+            .spawn(async move {
+                let sent = filex::diagnostics::analytics::drain_crashes(&dir);
+                if sent > 0 {
+                    tracing::info!("sent {sent} crash report(s)");
+                }
+            })
+            .detach();
     }
 
     /// Drop sidecar tag keys whose file no longer exists — lazy cleanup

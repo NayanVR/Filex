@@ -38,6 +38,7 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
+        analytics::feature_with("quick_look", "items", paths.len());
         self.close_menu(cx);
         let result = (|| -> anyhow::Result<()> {
             if self.quick_look.is_none() {

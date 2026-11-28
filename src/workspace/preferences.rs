@@ -154,18 +154,23 @@ const SETTING_TOGGLES: &[SettingToggle] = &[
     ),
     (
         "share-diagnostics",
-        "Share anonymous diagnostics",
-        "Scrubbed crashes + performance only — never file names, paths, or queries",
+        "Share anonymous usage data",
+        "Which features are used, how fast they are, and scrubbed crash reports. Never \
+         file names, paths, searches or tags.",
         |s| s.share_diagnostics,
         |s| s.share_diagnostics = !s.share_diagnostics,
-        // Turning it on drains anything already queued.
-        Workspace::spawn_crash_upload,
+        // Consent is applied by the settings subscription
+        // (`analytics_settings_changed`), whichever control changed it.
+        no_follow_up,
     ),
 ];
 
 impl Workspace {
     pub(super) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
+        if self.settings_open {
+            analytics::feature("settings_opened");
+        }
         self.settings_scroll.reset();
         self.recording_shortcut = None;
         self.shortcut_error = None;

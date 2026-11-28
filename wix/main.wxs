@@ -228,11 +228,11 @@
         <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
         <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Privacy" />
-        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="What Filex sends, and your choice about crash reports." />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="What Filex sends, and your choice about usage data." />
         <Control Id="PrivacyText" Type="ScrollableText" X="20" Y="54" Width="330" Height="140" Sunken="yes" TabSkip="no">
           <Text SourceFile="$(sys.SOURCEFILEDIR)privacy.rtf" />
         </Control>
-        <Control Id="CrashReportsCheckBox" Type="CheckBox" X="20" Y="204" Width="330" Height="18" CheckBoxValue="1" Property="FILEX_CRASH_REPORTS" Text="Send crash reports and anonymous diagnostics to help improve Filex" />
+        <Control Id="CrashReportsCheckBox" Type="CheckBox" X="20" Y="204" Width="330" Height="18" CheckBoxValue="1" Property="FILEX_CRASH_REPORTS" Text="Share anonymous usage data and crash reports to help improve Filex" />
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />

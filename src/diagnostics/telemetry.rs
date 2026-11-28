@@ -2,14 +2,14 @@
 //!
 //! A panic becomes a [`CrashReport`], **scrubbed** of path-shaped data,
 //! written to a local queue directory. A later launch drains the queue to
-//! Sentry *only with consent* (see [`crate::diagnostics::observability`]).
+//! PostHog *only with consent* (see [`crate::diagnostics::analytics`]).
 //!
 //! The pure, SDK-free core: report model, [`scrub`] redactor, panic-hook
 //! capture, queue read/write/prune/drain. No SDK, no UI, no network of its
 //! own — so it unit-tests in isolation and can link into the elevated
 //! `filex-indexd` service, which must not link a telemetry SDK. The
-//! caller supplies the transport; the durable queue is Sentry's offline
-//! buffer, not an independent uploader.
+//! caller supplies the transport; the durable queue is the analytics
+//! pipeline's offline buffer for crashes, not an independent uploader.
 
 use std::path::{Path, PathBuf};
 

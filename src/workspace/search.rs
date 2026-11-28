@@ -17,6 +17,7 @@ impl Workspace {
     /// Run a `tag:NAME` search (clicking a sidebar tag), focusing the
     /// search field so it can be refined.
     pub(super) fn search_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        analytics::feature("sidebar_tag_search");
         window.focus(&self.search_input.focus_handle(cx), cx);
         self.search_input.update(cx, |input, cx| {
             input.set_text(format!("tag:{name}"), cx);
@@ -66,6 +67,21 @@ impl Workspace {
         // Applied from onboarding's live Magic step: drop into the app first
         // so the job, any conflict dialog and undo are visible.
         self.hand_off_onboarding(cx);
+        if let Some(state) = self.magic.as_ref()
+            && matches!(state.outcome, Some(Ok(_)))
+        {
+            filex::diagnostics::analytics::track(
+                filex::diagnostics::analytics::Event::new(
+                    filex::diagnostics::analytics::names::MAGIC_PLAN_APPLIED,
+                )
+                .with("verb", verb_id(state.command.verb))
+                .with("selected", state.selection_count())
+                .with("unchecked", state.checked.iter().filter(|c| !**c).count())
+                .with("local", state.local)
+                .with("conflicts", conflict_id(self.magic_conflicts)),
+            );
+            self.end_search_session("magic_applied", None);
+        }
         let Some(state) = self.magic.as_ref() else {
             return;
         };
@@ -129,6 +145,7 @@ impl Workspace {
         cx.notify();
 
         let tags = self.tags.clone();
+        let job_started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let (applied, done, failure) = cx
                 .background_executor()
@@ -152,6 +169,7 @@ impl Workspace {
                     this.notice =
                         Some(format!("{} {done} {}", verb.past_tense(), plural_items(done)).into());
                     this.sync_folder_icons(&applied, false, cx);
+                    analytics::ops_applied(&applied, "magic", applied.len(), job_started.elapsed());
                     this.journal.record(applied);
                 }
                 if let Some(error) = failure {
@@ -198,6 +216,7 @@ impl Workspace {
                 .update(cx, |input, cx| input.set_text(text, cx));
         }
         self.sync_magic_placeholder(cx);
+        analytics::feature_with("magic_toggle", "on", self.magic_mode == MagicMode::On);
         window.focus(&self.search_input.focus_handle(cx), cx);
         self.update_search(cx);
         cx.notify();
@@ -232,6 +251,14 @@ impl Workspace {
     pub(super) fn set_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
         self.scope_menu = None;
         if self.search_scope != scope {
+            analytics::feature_with(
+                "search_scope",
+                "scope",
+                match scope {
+                    SearchScope::Anywhere => "anywhere",
+                    SearchScope::CurrentDir => "current_dir",
+                },
+            );
             self.search_scope = scope;
             self.update_search(cx);
         }
@@ -423,6 +450,7 @@ impl Workspace {
             self.spawn_local_plan(command.clone(), generation, cx);
             return;
         }
+        let mut phrases_used = false;
         let (text, all_filters, limit, literal) = match &command {
             Some(command) => (
                 command.selection.text.clone(),
@@ -451,6 +479,7 @@ impl Workspace {
                 // parse left over. Rule-based, and shown as removable chips
                 // rather than applied invisibly.
                 let expansion = filex::search::phrases::expand(&parsed.text, now);
+                phrases_used = !expansion.is_empty();
                 let text = expansion.text.clone();
                 if text.is_empty() && parsed.filters.is_empty() && expansion.is_empty() {
                     self.results.clear();
@@ -486,7 +515,9 @@ impl Workspace {
         // Resolve tag membership before daemon ranking and truncation.
         let mut tags_required = Vec::new();
         let mut index_filters = Vec::new();
+        let mut filter_labels = Vec::new();
         for filter in all_filters {
+            filter_labels.push(analytics::filter_label(&filter));
             match filter {
                 Filter::Tag(name) => tags_required.push(name),
                 other if !index_filters.contains(&other) => index_filters.push(other),
@@ -517,6 +548,14 @@ impl Workspace {
             SearchScope::CurrentDir if self.at_this_pc() => None,
             SearchScope::CurrentDir => Some(self.cwd.clone()),
         };
+        if let Some(session) = &mut self.search_session {
+            let scope_label = if scope.is_some() {
+                "current_dir"
+            } else {
+                "anywhere"
+            };
+            session.issued(filter_labels, phrases_used, command_query, scope_label);
+        }
         // Same query, scope and phrase choice as the rows on screen means
         // this is a background refresh (index epoch moved, a file op
         // landed), not a new search: refetch every loaded row and leave
@@ -653,6 +692,9 @@ impl Workspace {
                             "search answered"
                         );
                         record_latency(&mut this.search_latency, &this.query, took);
+                        if let Some(session) = &mut this.search_session {
+                            session.answered(took, hits.len(), partial, literal_won);
+                        }
                         this.search_page_query = query.map(|mut q| {
                             q.epoch_hint = Some(epoch);
                             q
@@ -677,6 +719,9 @@ impl Workspace {
                         this.search_meta.clear();
                         this.stat_results(paths, generation, cx);
                         if let (Some(state), Some(plan)) = (&mut this.magic, plan) {
+                            if this.search_session.as_mut().is_some_and(|s| s.first_plan()) {
+                                track_plan_shown(state.command.verb, &plan, this.results.len());
+                            }
                             state.meta = meta;
                             state.install_plan(plan);
                         } else if let Some((selected, lead)) = kept {
@@ -687,6 +732,9 @@ impl Workspace {
                         }
                     }
                     Err(e) => {
+                        if let Some(session) = &mut this.search_session {
+                            session.failed();
+                        }
                         this.results.clear();
                         this.search_hits.clear();
                         this.notice = Some(e.to_string().into());
@@ -713,6 +761,9 @@ impl Workspace {
             return;
         };
         query.offset = self.results.len();
+        if let Some(session) = &mut self.search_session {
+            session.paged();
+        }
         // A refresh may have refetched every loaded row in one request;
         // pages after it go back to the normal size.
         query.limit = SEARCH_RESULT_LIMIT;
@@ -1219,6 +1270,50 @@ mod tests {
 /// Keep the first timing taken for `query`. Live index refreshes re-run the
 /// same query in the background; recording those would make the number
 /// change while the user isn't typing.
+/// `magic_plan_shown`: the verb, how many files matched, and the refusal
+/// kind if the plan was refused. Never the command text.
+fn track_plan_shown(
+    verb: filex::magic::Verb,
+    plan: &Result<filex::magic::Plan, filex::magic::PlanError>,
+    matches: usize,
+) {
+    use filex::diagnostics::analytics::{Event, names, track};
+    track(
+        Event::new(names::MAGIC_PLAN_SHOWN)
+            .with("verb", verb_id(verb))
+            .with("matches", matches)
+            .with("ok", plan.is_ok())
+            .with_opt(
+                "refusal",
+                plan.as_ref().err().map(filex::magic::PlanError::id),
+            ),
+    );
+}
+
+/// Lowercase verb label for analytics.
+fn verb_id(verb: filex::magic::Verb) -> &'static str {
+    use filex::magic::Verb as V;
+    match verb {
+        V::Delete => "delete",
+        V::Move => "move",
+        V::Copy => "copy",
+        V::Rename => "rename",
+        V::Compress => "compress",
+        V::Tag => "tag",
+        V::Untag => "untag",
+        V::Organize => "organize",
+    }
+}
+
+fn conflict_id(policy: filex::magic::ConflictPolicy) -> &'static str {
+    use filex::magic::ConflictPolicy as P;
+    match policy {
+        P::KeepBoth => "keep_both",
+        P::Skip => "skip",
+        P::Replace => "replace",
+    }
+}
+
 fn record_latency(
     slot: &mut Option<(String, std::time::Duration)>,
     query: &str,

@@ -134,6 +134,7 @@ impl Workspace {
     /// app (a stat on click decides which).
     pub(super) fn open_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if path.is_dir() {
+            self.nav_via = "recent";
             self.navigate(path, cx);
         } else {
             self.open_target(path, false, false, cx);
@@ -147,12 +148,8 @@ impl Workspace {
             return;
         }
         let message = cx.new(SearchInput::new);
-        let email = cx.new(SearchInput::new);
         message.update(cx, |input, cx| {
             input.set_placeholder("What's working, what's broken, what's missing?", cx)
-        });
-        email.update(cx, |input, cx| {
-            input.set_placeholder("Email, if you'd like a reply (optional)", cx)
         });
         let dismiss = |this: &mut Self,
                        _: &gpui::Entity<SearchInput>,
@@ -163,15 +160,11 @@ impl Workspace {
                 this.cancel_feedback(window, cx);
             }
         };
-        let subscriptions = [
-            cx.subscribe_in(&message, window, dismiss),
-            cx.subscribe_in(&email, window, dismiss),
-        ];
+        let subscription = cx.subscribe_in(&message, window, dismiss);
         window.focus(&message.focus_handle(cx), cx);
         self.feedback = Some(FeedbackDraft {
             message,
-            email,
-            _subscriptions: subscriptions,
+            _subscription: subscription,
         });
         cx.notify();
     }
@@ -183,7 +176,7 @@ impl Workspace {
         }
     }
 
-    /// Send the draft to Sentry off-thread; the status-bar notice reports
+    /// Send the draft to PostHog off-thread; the status-bar notice reports
     /// the outcome. An empty message keeps the dialog open.
     pub(super) fn submit_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(draft) = self.feedback.as_ref() else {
@@ -193,13 +186,17 @@ impl Workspace {
         if message.is_empty() {
             return;
         }
-        let email = draft.email.read(cx).text().trim().to_string();
         self.cancel_feedback(window, cx);
         self.notice = Some("Sending feedback…".into());
         cx.spawn(async move |this, cx| {
             let sent = cx
                 .background_executor()
-                .spawn(async move { send_feedback(&message, &email) })
+                .spawn(async move {
+                    filex::diagnostics::analytics::send_feedback(
+                        &message,
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.notice = Some(if sent {
@@ -212,21 +209,6 @@ impl Workspace {
             .ok();
         })
         .detach();
-    }
-}
-
-/// Deliver feedback via Sentry; blocking. Builds without the
-/// `observability` feature have no transport, so they report failure.
-fn send_feedback(message: &str, email: &str) -> bool {
-    #[cfg(feature = "observability")]
-    {
-        let email = (!email.is_empty()).then_some(email);
-        filex::diagnostics::observability::send_feedback(message, email, env!("CARGO_PKG_VERSION"))
-    }
-    #[cfg(not(feature = "observability"))]
-    {
-        let _ = (message, email);
-        false
     }
 }
 
@@ -276,10 +258,10 @@ impl Workspace {
                         .child(ui::modal::message(
                             &theme,
                             "Report a bug or suggest an idea. Your message, the app \
-                             version and your OS are sent; file paths are removed.",
+                             version and your OS are sent. File names, paths and \
+                             email addresses are removed, so we can't reply.",
                         ))
                         .child(field(&draft.message))
-                        .child(field(&draft.email))
                         .child(
                             ui::modal::buttons(&theme)
                                 .child(
@@ -342,6 +324,7 @@ impl Workspace {
                     let active = self.query.is_empty() && self.cwd == path;
                     ui::sidebar::sidebar_item(&theme, ("place", ix), icon, label, active).on_click(
                         cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.nav_via = "sidebar_place";
                             this.navigate(path.clone(), cx);
                         }),
                     )
@@ -368,6 +351,7 @@ impl Workspace {
                     )
                     .tooltip(ui::tooltip::text_tooltip(tip, theme))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        this.nav_via = "sidebar_favorite";
                         this.navigate(nav.clone(), cx);
                     }))
                     .on_mouse_down(
@@ -475,6 +459,7 @@ impl Workspace {
                         })
                         .child(div().text_xs().text_color(theme.text_dim).child(free_line))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            this.nav_via = "sidebar_drive";
                             this.navigate(path.clone(), cx);
                         }))
                         .when_some(network, |row, drive| {

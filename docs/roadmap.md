@@ -313,15 +313,15 @@ private:
 2. Panic-hook crash logs + reporting. **Done** — see
    `docs/design-telemetry.md`. A chained panic hook captures each crash
    into a scrubbed `CrashReport` (never paths/filenames/tags/queries) in a
-   local queue; on launch the UI uploads them via a custom POST to
-   `FILEX_CRASH_ENDPOINT` (empty by default ⇒ local-only). Consent ended
-   up **on-by-default with a Settings toggle** (opt-out), not the initial
-   opt-in prompt — an owner decision made defensible by the scrubbing +
-   endpoint gating (see the design doc's decision log).
-3. Remote metrics **last, opt-in only, aggregates only** (search
-   latency percentiles, index sizes, watcher tier used) — never paths,
-   filenames, or query strings. Defer endpoint choice until there are
-   external users. **Still deferred.**
+   local queue, drained on the next launch. Consent ended up
+   **on-by-default with a Settings toggle** (opt-out), an owner decision.
+3. Remote metrics and product analytics. **Done 2026-11-28** (owner
+   decision, superseding "opt-in only, aggregates only"): PostHog replaced
+   Sentry for error tracking *and* usage analytics. Anonymous events whose
+   properties are typed numbers, bools and fixed labels, so paths, file
+   names, queries and tags can't be sent. Same `share_diagnostics`
+   consent, now applied live. Catalog and invariants in
+   `docs/design-telemetry.md`.
 
 ## Phase 2e — Search ranking ("Tier 0", 2026-07-26)
 

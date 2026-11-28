@@ -34,6 +34,20 @@ pub(super) struct Optional {
 }
 
 impl Step {
+    /// A fixed label for analytics (`onboarding_step`).
+    fn id(self) -> &'static str {
+        match self {
+            Step::Loading => "loading",
+            Step::Welcome => "welcome",
+            Step::Theme => "theme",
+            Step::Favorites => "favorites",
+            Step::Search => "search",
+            Step::Magic => "magic",
+            Step::DefaultApp => "default_app",
+            Step::Ready => "ready",
+        }
+    }
+
     const ALL: [Step; 7] = [
         Step::Welcome,
         Step::Theme,
@@ -282,6 +296,19 @@ const DEMO_PLACEHOLDER: &str = "resume pdf";
 /// The live Magic step's placeholder: a command most disks can act on.
 const MAGIC_PLACEHOLDER: &str = "move all pdfs to Documents";
 
+/// `onboarding_step`: a move between screens and the time spent on the
+/// one being left, which is what shows where people drop off.
+fn track_step(from: Step, to: Step, on_step: std::time::Duration) {
+    filex::diagnostics::analytics::track(
+        filex::diagnostics::analytics::Event::new(
+            filex::diagnostics::analytics::names::ONBOARDING_STEP,
+        )
+        .with("from", from.id())
+        .with("to", to.id())
+        .with("on_step_ms", on_step),
+    );
+}
+
 impl Workspace {
     /// Open the flow (first launch, or "Replay welcome" in Settings) and
     /// look for the OS file manager's pinned folders in the background.
@@ -320,6 +347,11 @@ impl Workspace {
         if onboarding.step == Step::Loading {
             // Only forward, and only once carrying on is offered.
             if offset > 0 && onboarding.step_started.elapsed() >= OFFER_CONTINUE_AFTER {
+                track_step(
+                    Step::Loading,
+                    Step::Welcome,
+                    onboarding.step_started.elapsed(),
+                );
                 onboarding.step = Step::Welcome;
                 onboarding.step_started = Instant::now();
                 cx.notify();
@@ -332,6 +364,7 @@ impl Workspace {
             }
             return;
         };
+        track_step(onboarding.step, step, onboarding.step_started.elapsed());
         onboarding.step = step;
         onboarding.step_started = Instant::now();
         let magic_live = onboarding.magic_live;
@@ -374,6 +407,17 @@ impl Workspace {
         } else {
             Vec::new()
         };
+        filex::diagnostics::analytics::track(
+            filex::diagnostics::analytics::Event::new(
+                filex::diagnostics::analytics::names::ONBOARDING_FINISHED,
+            )
+            .with("completed", import)
+            .with("last_step", onboarding.step.id())
+            .with("imported_favorites", imports.len())
+            .with("offered_favorites", onboarding.imports.len())
+            .with("default_app", onboarding.applies_default(import))
+            .with("magic_live", onboarding.magic_live),
+        );
         self.settings.update(cx, |store, cx| {
             store.update(cx, |settings| finish_settings(settings, imports));
         });

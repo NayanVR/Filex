@@ -769,8 +769,20 @@ struct Workspace {
     /// When the latest folder load began. A load that began after a
     /// change was seen already shows it, so the watcher skips its own.
     last_load_start: std::time::Instant,
+    /// How the next folder load was reached, for `folder_opened` (a fixed
+    /// label set by the navigating call site; consumed by the load).
+    nav_via: &'static str,
+    /// The in-flight load to report once it lands: (request, via).
+    nav_pending: Option<(u64, &'static str)>,
+    /// The search being typed, summarized as `search_session` on open or
+    /// clear (analytics only; `None` while analytics is off).
+    search_session: Option<analytics::SearchSession>,
+    /// The daemon has answered once this run (so `index_status` can tell
+    /// the first answer from a later transition).
+    service_seen: bool,
 }
 
+mod analytics;
 mod app;
 mod connect;
 mod delete_prompt;
@@ -835,6 +847,7 @@ impl Workspace {
                         this.sync_magic_placeholder(cx);
                     }
                     this.query = text.clone();
+                    this.search_session_edit(text.chars().count());
                     this.update_search(cx);
                 }
             }
@@ -891,6 +904,7 @@ impl Workspace {
         let settings_subscription =
             cx.subscribe(&settings, |this, _store, event, cx| match event {
                 SettingsEvent::Changed(previous) => {
+                    this.analytics_settings_changed(previous, cx);
                     let current = this.settings.read(cx).settings();
                     let filter_changed = previous.index_system_files != current.index_system_files
                         || previous.exclude_dev_folders != current.exclude_dev_folders
@@ -1040,6 +1054,10 @@ impl Workspace {
             watched_dir: None,
             folder_stale: false,
             last_load_start: std::time::Instant::now(),
+            nav_via: "launch",
+            nav_pending: None,
+            search_session: None,
+            service_seen: false,
             update_status: filex::update::UpdateStatus::default(),
             exiting_for_update: false,
         };
@@ -1067,8 +1085,8 @@ impl Workspace {
         }
         this.spawn_tag_prune(cx);
         this.spawn_crash_upload(cx);
-        #[cfg(feature = "observability")]
         this.spawn_resource_sampling(cx);
+        analytics::observe_shortcuts(cx);
         // Update discovery belongs to the UI on every platform.
         #[cfg(feature = "updater")]
         this.spawn_update_check(cx);

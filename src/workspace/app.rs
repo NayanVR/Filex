@@ -9,19 +9,17 @@ use filex::launch::Browse;
 pub fn run(browse: Browse) {
     let _logging_guard = filex::diagnostics::logging::init("filex");
     filex::diagnostics::telemetry::install_panic_hook("filex");
-    // Sentry (UI process only; on-by-default, opt-out). The
-    // `share_diagnostics` setting is consent and gates the whole integration,
-    // so read it from disk before the app exists. The returned guard
-    // flushes pending events on exit and must live for the whole run.
-    // Builds without `observability` never link the SDK — which is how the
-    // elevated `filex-indexd` service is built.
-    #[cfg(feature = "observability")]
-    let _sentry_guard = {
-        let consent = filex::settings::default_settings_file()
-            .and_then(|file| filex::settings::Settings::load(&file).ok())
-            .is_some_and(|settings| settings.share_diagnostics);
-        filex::diagnostics::observability::init("filex", env!("CARGO_PKG_VERSION"), consent)
-    };
+    // PostHog analytics + error tracking (UI process only; on-by-default,
+    // opt-out). The `share_diagnostics` setting is consent and gates the
+    // whole integration, so read it from disk before the app exists.
+    // Builds without the `analytics` feature have no transport, which is
+    // how the `filex-indexd` daemon is built.
+    let settings = filex::settings::default_settings_file()
+        .and_then(|file| filex::settings::Settings::load(&file).ok());
+    let consent = settings.as_ref().is_some_and(|s| s.share_diagnostics);
+    let analytics =
+        filex::diagnostics::analytics::init("filex", env!("CARGO_PKG_VERSION"), consent);
+    let launch = analytics::launch_kind(&browse);
     let browse = browse.normalize();
     let Some(primary) = startup::claim_instance(&browse) else {
         return;
@@ -29,6 +27,7 @@ pub fn run(browse: Browse) {
     // A startup line at the default level, so a blank log file means "not
     // writing", not "nothing happened". Names the log directory, and
     // slow-op warnings land here without any RUST_LOG.
+    let process_started = std::time::Instant::now();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         "filex starting — slow operations (>{SLOW_OP_MS}ms) log at warn; \
@@ -36,7 +35,7 @@ pub fn run(browse: Browse) {
     );
     gpui_platform::application()
         .with_assets(ui::assets::Assets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             init_app(cx);
             // Launches forwarded by later `filex <path>` runs arrive on the
             // single-instance thread; hop them onto the UI thread here.
@@ -50,6 +49,14 @@ pub fn run(browse: Browse) {
                 open_workspace_window(size(px(1120.), px(760.)), None, cx, |workspace, cx| {
                     workspace.apply_launch(browse, false, cx)
                 });
+            if let Some(started) = analytics {
+                analytics::track_launch(
+                    launch,
+                    started,
+                    settings.as_ref(),
+                    process_started.elapsed(),
+                );
+            }
             cx.spawn(async move |cx| {
                 use futures::StreamExt as _;
                 while let Some(browse) = launch_rx.next().await {
@@ -90,8 +97,15 @@ pub(super) fn init_app(cx: &mut App) {
         }
     })
     .detach();
-    cx.on_app_quit(|_| async {
-        tracing::info!("filex exiting");
+    cx.on_app_quit(|_| {
+        // The last events and the session summary. Bounded: exit never
+        // waits on a slow network for more than a second, and only when
+        // analytics is on. (GPUI gives the returned future 200 ms, too
+        // little for a POST, so this runs before it.)
+        filex::diagnostics::analytics::shutdown(std::time::Duration::from_secs(1));
+        async {
+            tracing::info!("filex exiting");
+        }
     })
     .detach();
 }

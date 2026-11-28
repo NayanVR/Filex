@@ -139,6 +139,7 @@ impl Workspace {
             color: editor.color,
         };
         let tags = filex::tags::upsert_tag(&self.preview_tags, editor.existing.as_deref(), new_tag);
+        analytics::feature_with("tag_saved", "edited_existing", editor.existing.is_some());
         self.spawn_set_tags(editor.path, tags, cx);
         cx.notify();
     }
@@ -150,6 +151,7 @@ impl Workspace {
         };
         window.focus(&self.search_input.focus_handle(cx), cx);
         if let Some(original) = editor.existing {
+            analytics::feature("tag_removed");
             let mut tags = self.preview_tags.clone();
             tags.retain(|t| t.name != original);
             self.spawn_set_tags(editor.path, tags, cx);

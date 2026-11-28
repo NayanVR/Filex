@@ -1,5 +1,5 @@
-//! Logging, local crash-report queueing, and the opt-in Sentry transport.
+//! Logging, local crash-report queueing, and PostHog analytics/error
+//! tracking (the `analytics` module's transport is the `analytics` feature).
+pub mod analytics;
 pub mod logging;
-#[cfg(feature = "observability")]
-pub mod observability;
 pub mod telemetry;

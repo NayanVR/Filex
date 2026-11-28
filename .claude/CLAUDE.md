@@ -20,7 +20,7 @@ A native, cross-platform (Windows/macOS/Linux) file explorer replacement built i
 One crate (+ `crates/filex-dialog-shim`, the Windows Open/Save dialog cdylib). `lib.rs` exposes GUI-free logic for tests/benches; UI-only modules hang off `main.rs`.
 
 - **Binaries:** `filex` (GPUI UI), `filex-indexd` (per-user index daemon), `filex-updater` (Windows demand-start service that installs updates silently, `docs/design-updater.md`), `filex-sign`, `filex-index-lab` (benchmarks only).
-- **Features:** `app` = GPUI and everything UI. `--no-default-features` builds the index library + daemon headless. `observability` = Sentry, UI only; the daemon must never link a telemetry SDK. `index-v2-lab` = measurements, never shipped.
+- **Features:** `app` = GPUI and everything UI. `--no-default-features` builds the index library + daemon headless. `analytics` = PostHog transport (error tracking + product analytics, `docs/design-telemetry.md`), UI only; the daemon must never link a telemetry transport. Event properties are typed (numbers, bools, `&'static str` labels): never add a way to send a runtime `String`. `index-v2-lab` = measurements, never shipped.
 - **UI process:**
   - `workspace/` is the `Workspace` root view; its `impl` is split by concern (`navigation`, `search`, `file_ops`, `tabs`, `menus`, `shortcuts`, `render*`, `services`, `magic`, `picker`, …).
   - `ui/` holds reusable widgets and the theme (`docs/design-system.md`).

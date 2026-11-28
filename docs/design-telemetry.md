@@ -1,176 +1,207 @@
-# Design: Telemetry — crash reporting (Phase 2c)
+# Design: Telemetry — product analytics and error tracking (Phase 2c)
 
-Status: **design, settled 2026-07-25; transport superseded 2026-08-08.**
-Implements the "Panic-hook crash logs + user-initiated report sharing" layer
-of `docs/roadmap.md` Phase 2c.
+Status: **PostHog, shipped 2026-11-28.** Replaces Sentry entirely (crash
+reporting, error events, measurements, release health and feedback).
+History is at the end.
 
-> **Revision 2026-08-08 — Sentry is now the sole transport.** The
-> custom `FILEX_CRASH_ENDPOINT` POST uploader described in "Transport" below
-> was **removed**. Everything else in this doc still holds — the capture,
-> the `scrub` backstop, the durable on-disk queue, the `CrashReport` shape,
-> on-by-default/opt-out consent (`share_diagnostics`). What changed:
->
-> - **Transport = the `observability` feature (Sentry).** The durable queue
->   is now Sentry's *offline buffer*: panics are captured to disk by our own
->   hook and **drained to Sentry on the next launch**
->   (`observability::drain_crashes_to_sentry`). Sentry's own `panic`
->   integration is deliberately disabled so crashes aren't double-reported;
->   the disk queue is authoritative because it survives aborts/SIGKILL where
->   a live in-process flush is lost.
-> - **Gating is now DSN + consent** (not endpoint + consent). Nothing sends
->   unless the build embeds a Sentry DSN (`FILEX_SENTRY_DSN`, baked by CI —
->   a public client key) *and* `share_diagnostics` is on. No DSN ⇒ local-only.
-> - **Scope widened beyond crashes.** With Sentry in place the same consent
->   also covers anonymous **performance measurements** (search latency,
->   index bootstrap, resource use) and **release-health sessions**
->   (crash-free rate, adoption) — all still path-scrubbed, none carrying
->   queries/paths/tags. The Settings toggle is relabelled "Share anonymous
->   diagnostics" to match; the setting is now `share_diagnostics`.
-> - **Windows asks at install (2026-10-10).** The MSI's Privacy page
->   seeds `share_diagnostics` on first run; still opt-out (ticked by default).
->   See `docs/design-windows-installer.md` decision 6 and `PRIVACY.md`.
-> - **Still not linked into `filex-indexd`.** Sentry is UI-process only; the
->   elevated service is built without the `observability` feature and links
->   no telemetry SDK. See `docs/design-distribution.md` for how the two
->   Windows binaries are built with different feature sets.
->
-> The "Not Sentry" decision in "Confirmed decisions" below is the *original*
-> 2026-07-25 stance and is what this revision reverses.
+## Goal
 
-The remote-metrics layer (search-latency/index-size aggregates) is, as of
-this revision, no longer deferred — it rides on Sentry performance events
-above rather than a separate metrics pipeline.
+Learn what to improve without collecting anything personal:
 
-## Goal & scope
-
-Get crash reports to the developer with **zero user friction**, without
-betraying the project's privacy stance (`logging.rs`: "filenames are
-private"). The tension is resolved by:
-
-- **On by default, opt-out via a Settings toggle** (revised 2026-07-25 —
-  see history below). No startup prompt; crash reporting is enabled out of
-  the box and a "Send crash reports" toggle in Settings turns it off.
-- **Scrubbing** every report of path-shaped data before it can be queued
-  for upload — the privacy backstop that lets crash data leave the machine
-  at all. This is what makes default-on defensible: even enabled, a report
-  can carry no file names, paths, tags, or queries.
-- **Endpoint-gated**: nothing is transmitted at all unless a crash endpoint
-  is configured (empty by default), so out of the box it's local-only.
-
-Non-goals: remote metrics/aggregates, session/usage analytics, any
-always-on data collection. Only crashes, only with consent, only scrubbed.
+- **Error tracking:** every panic (UI and daemon) and every `error!` log,
+  grouped into issues, with stack frames.
+- **Product analytics:** which features are used and how (navigation,
+  search, Magic, file ops, menus, shortcuts, settings, onboarding, updates),
+  plus funnels and retention per anonymous install.
+- **Performance from real machines:** folder load time, search latency,
+  startup time, memory, index size.
 
 ## Privacy invariants (non-negotiable)
 
-- **Nothing is uploaded when `share_diagnostics` is off, or when no endpoint is
-  configured.** Crashes are still captured *locally* regardless (the queue
-  file); only upload is gated.
-- **Never captured:** the search query string, index contents, tag names,
-  recents, or any browsed path. Crash reports carry only: timestamp, app
-  version, OS + arch, thread name, panic message, backtrace.
-- **Always scrubbed before queueing:** the user's home directory → `~`, and
-  absolute path-shaped substrings (Unix `/a/b…`, Windows `X:\a\b…`) →
-  `<path>`. Over-scrubbing is acceptable — losing a file:line beats leaking
-  a path. Symbol names (`filex::index::…`, `::`-separated) are kept.
-- **No endpoint shipped by default.** The upload URL is an empty-by-default
-  config constant; an empty URL disables upload entirely, so a build with
-  no endpoint set transmits nothing even with consent.
+1. **No PII, enforced by types.** A product event is an `Event` whose
+   properties are `Prop`s, which can only be a number, a bool, or a
+   `&'static str` label (or a list or tally of labels). There is no
+   `From<String>`, so a file name, path, query, tag, folder name, URL or
+   anything the user typed *cannot* become a property. Every label is a
+   literal visible at its call site. Lists (roots, favorites, excluded
+   names, icon choices, shortcuts) are reported as **counts**.
+2. **Free text is scrubbed twice.** Only three things carry text: panic
+   messages, `error!` log messages and feedback the user chose to send.
+   They go through `telemetry::scrub` (absolute paths, home dir) at capture,
+   then `analytics::exception::scrub_text`, which also removes quoted strings,
+   bare file names (`taxes.pdf`), relative paths, emails and URLs.
+   Other `tracing` fields (`path = %p.display()`) are never read.
+3. **Anonymous.** Events are sent with `process_person_profile: false`, so
+   PostHog keeps no person profile. The `distinct_id` is a random UUIDv4
+   install ID (`<data_local_dir>/filex/analytics-id`). It is never derived
+   from the machine, user or hardware, and it is **deleted when the user
+   turns sharing off**, so opting back in is a new, unlinked identity. A
+   per-process random `session_id` groups one run.
+4. **No location.** `$geoip_disable: true` on every event. The PostHog
+   project **must** also have *Settings → Project → "Discard client IP
+   data"* enabled, so the request IP is not stored at all (owner setup, below).
+5. **No email.** The feedback dialog no longer asks for one, and feedback
+   text is scrubbed of emails.
+6. **Gated three ways.** Nothing is sent unless the build has the
+   `analytics` feature **and** a project key (`FILEX_POSTHOG_KEY`, baked by
+   release CI) **and** `share_diagnostics` is on. Without the feature, there
+   is no HTTP transport in the binary.
+7. **The daemon and updater link no telemetry transport.** They are built
+   without `analytics`. The daemon still *queues* its own panics to disk
+   (pure code in `telemetry.rs`), and the UI uploads them.
 
-## The pipeline
+## Consent
+
+`Settings.share_diagnostics` (unchanged field name, so existing settings
+files keep their choice). It is **on by default (opt-out)**, as it was for
+Sentry. The Windows MSI seeds it from its Privacy page
+(`FILEX_CRASH_REPORTS=0` opts out unattended). Settings → Privacy → "Share
+anonymous usage data" turns it off, and the change applies immediately:
+collection stops, the buffer is dropped and the install ID is deleted.
+Turning it on starts analytics live (off the UI thread) and drains queued
+crashes. Pressing *Send* in the feedback dialog is explicit consent for
+that one message, even with sharing off. It then goes under a throwaway ID.
+
+> **Open item for the owner:** the opt-out default now covers usage
+> analytics, not just crash reports. It's defensible because nothing
+> personal is collected (above), but it is a wider scope than what users
+> agreed to before. Consider a one-time notice for existing installs, or
+> switching usage events to opt-in while keeping crashes opt-out.
+
+## Architecture
 
 ```
- panic ──▶ capture ──▶ scrub ──▶ <data_local_dir>/filex/crash-reports/<ts>.json (queue)
-                                          │
- next launch (UI), if consent ──▶ drain ─┘──▶ POST endpoint ──▶ delete on 2xx
+ UI code ── analytics::track(Event) ──▶ mpsc ──▶ worker thread "filex-analytics"
+   (channel send, never blocks)                  │ batches of 20 / every 30 s
+                                                 │ retry w/ backoff (5 s → 5 min)
+ tracing error! ── AnalyticsLayer ─▶ track_raw ──┤ buffer ≤ 1000, oldest dropped
+                                                 ▼
+ panic (UI or daemon) ─▶ telemetry queue (disk) ─▶ drain_crashes (next launch)
+                                                 ▼
+                              POST {host}/i/v1/analytics/events  (ureq + rustls)
+                              Authorization: Bearer <project key>
 ```
 
-1. **Capture** (`telemetry::install_panic_hook`): a chained
-   `std::panic::set_hook` builds a `CrashReport`, scrubs it, and writes it
-   **synchronously** to the queue dir (a `crash-<unixmillis>.json` file), so
-   it survives an abort even if the async log worker never flushes. Also
-   mirrors to `tracing::error!` best-effort. Installed in **both** `filex`
-   and `filex-indexd` (the service runs unattended — its panics matter
-   most).
-2. **Scrub** (`telemetry::scrub`): pure, unit-tested; applied to the panic
-   message and backtrace at capture time, so the queued file is already
-   clean (defence in depth — even a leaked queue file has no paths).
-3. **Consent**: `Settings.share_diagnostics: bool`, **default `true`**. A
-   "Send crash reports" toggle in the Settings pane turns it off. No
-   startup prompt (backward-compatible: existing `settings.json` without
-   the field defaults to on via the struct's `#[serde(default)]`).
-4. **Upload** (UI process only): on launch, if `Some(true)`, a background
-   task lists the queue dir and POSTs each report to the endpoint; a `2xx`
-   deletes the file (at-least-once; an offline/failed upload just stays
-   queued for next launch). Never on the UI thread. The service never
-   uploads (no consent context) — it only enqueues; the UI drains the
-   shared queue dir.
+| File | Role | Compiled |
+|---|---|---|
+| `diagnostics/analytics/event.rs` | `Event`/`Prop` (the PII guard), catalog `names`, `bucket` | always |
+| `diagnostics/analytics/wire.rs` | capture-v1 envelope, UUIDv7, super-properties | always |
+| `diagnostics/analytics/exception.rs` | `$exception` from crashes and logs, `scrub_text`, backtrace parsing | always |
+| `diagnostics/analytics/identity.rs` | install ID create/forget | always |
+| `diagnostics/analytics/snapshot.rs` | settings snapshot and `setting_changed` diff | always |
+| `diagnostics/analytics/pipeline.rs` | worker, batching, retry, session summary; `Transport` trait | always |
+| `diagnostics/analytics/client.rs` | `ureq` transport, key/host config | `analytics` |
+| `diagnostics/analytics/layer.rs` | `tracing` layer: `error!` → `$exception` | `analytics` |
+| `diagnostics/analytics/mod.rs` | public API: `init`, `track`, `count`, `shutdown`, `disable`, `drain_crashes`, `send_feedback` | always (no-ops without a transport) |
+| `workspace/analytics.rs` | UI helpers: launch, shortcuts, search session, op/file/index helpers | app |
 
-## Transport (confirmed 2026-07-25: custom POST, configurable endpoint)
+**Why not the `posthog` crate:** it pulls in reqwest and tokio. filex already
+ships ureq + rustls for updates, so the client is in-tree (≈600 lines with
+tests). The wire format matches the official SDKs: `posthog` 1.7
+(`capture_event.rs`, `error_tracking.rs`, `endpoints.rs`) and Python 8.4
+(`capture_send.py`).
 
-- A minimal HTTP `POST <endpoint>` of the report JSON (`Content-Type:
-  application/json`), via a light blocking client (`ureq`) on a background
-  thread. No third-party crash SaaS — data goes only to infrastructure the
-  owner controls, matching the app's lean, self-hosted ethos.
-- Endpoint is a single constant sourced from the `FILEX_CRASH_ENDPOINT`
-  build/runtime env (empty ⇒ disabled). Standing up a receiver is a trivial
-  "accept JSON, append to storage" service; deferred until wanted, and the
-  client is a no-op until the URL is set.
-- A bounded queue (cap the number of retained crash files, drop oldest) so
-  a crash-looping install can't fill the disk.
+**Wire format:** `POST /i/v1/analytics/events`, Bearer auth,
+`{created_at, batch: [{event, uuid (v7), distinct_id, timestamp, session_id,
+options: {process_person_profile: false}, properties}]}`. 2xx = delivered;
+408/429/5xx/transport errors = retry; other 4xx = drop.
 
-## What gets captured (the `CrashReport`)
+**Exceptions:** `$exception_list: [{type, value, mechanism: {type, handled,
+synthetic}, stacktrace: {type: "raw", frames}}]`. Frames are `{function,
+filename, lineno, lang: "rust", platform: "native", in_app, synthetic,
+client_resolved: true}`, outermost first. `$exception_fingerprint` is an
+FNV-1a hash of compile-time facts (panic location + innermost in-app
+function, or the log callsite), never the message, so issues stay stable
+across occurrences and toolchain bumps. Each log callsite reports at most 5
+times per process.
 
-```rust
-struct CrashReport {
-    schema: u32,          // format version
-    app: &str,            // "filex" | "filex-indexd"
-    version: &str,        // CARGO_PKG_VERSION
-    os: &str, arch: &str, // std::env::consts
-    unix_millis: u128,
-    thread: String,       // thread name, or "unnamed"
-    message: String,      // scrubbed panic message
-    location: Option<String>, // file:line of the panic site (scrubbed)
-    backtrace: String,    // scrubbed
-}
-```
+**Threading / latency:** `track` and `count` are a channel send behind an
+atomic `is_enabled()` check. The per-keystroke cost on the search path is
+`chars().count()` plus an `Option` update. Folder navigation adds one
+`mem::replace` and a send. HTTP only happens on the worker. At quit,
+`shutdown` waits **up to 1 s** for the final POST (only when analytics is
+on). The app is already exiting, and GPUI's own 200 ms quit budget is too
+short for a request.
 
-Serialized with serde_json. `schema` lets a receiver tolerate future
-additions.
+## Event catalog
 
-## Testing plan
+Super-properties on every event: `$lib` = `filex`, `$lib_version`,
+`$app_name`, `$app_version`, `$os` (PostHog's names), `arch`,
+`environment` (`debug`/`release`), `$geoip_disable`.
 
-- Pure/portable: `scrub` (home dir, Unix/Windows path shapes, that symbol
-  names survive), `CrashReport` (de)serialization, queue read/write/prune —
-  plain `#[test]`, no panic, no network.
-- Panic hook: a `#[test]` that installs the hook, triggers a panic in a
-  `catch_unwind`, and asserts a scrubbed report file lands in a temp queue
-  dir.
-- Upload: the drain/delete-on-success logic tested against a fake transport
-  (a trait/closure), so no real network in tests. The endpoint being empty
-  ⇒ upload is a no-op is asserted.
-- No perf concern: capture is off the hot path (only on panic); upload is
-  once per launch on a background thread.
+| Event | When | Properties |
+|---|---|---|
+| `app_launched` | first window open | `launch` (default, open_folder, select_item, this_pc, foreign), `new_install`, `startup_ms`, `onboarding_pending`, settings snapshot (`setting_*` enums/bools, `*_count`) |
+| `app_session_ended` | quit | `duration_s`, `events` (tally by name), `counters` (shortcut tally) |
+| `usage_summary` | every 30 min | `duration_s`, `since_last_summary_s`, `counters` |
+| `resource_sample` | every 15 min | `rss_mb`, `index_roots`, `tabs` |
+| `index_status` | first daemon answer; each finished build | `trigger`, `building`, `roots`, `files`, `files_bucket`, `skipped`, `error` (bool) |
+| `folder_opened` | a folder's rows land | `via` (launch, up, back, forward, open, search_result, reveal, path_bar, breadcrumb, sidebar_place, sidebar_favorite, sidebar_drive, recent, this_pc, connect_server, magic, picker, new_tab, refresh, other), `location` (local, home, root, network), `load_ms`, `entries`, `entries_bucket` |
+| `folder_load_failed` | a load errored | `via`, `location`, `load_ms`, `error` (io kind) |
+| `search_session` | search opened/cleared/applied | `outcome` (opened, revealed, cleared, magic_applied, magic_command, magic_go), `rank`, `duration_ms`, `edits`, `max_query_len`, `final_query_len`, `responses`, `first_response_ms`, `mean_response_ms`, `max_response_ms`, `results`, `results_bucket`, `zero_result_responses`, `errors`, `pages_loaded`, `filters` (tag/kind/ext/size/modified), `phrases`, `magic`, `scope`, `hit_limit`, `literal_won` |
+| `magic_plan_shown` | first plan per search | `verb`, `matches`, `ok`, `refusal` (PlanError id) |
+| `magic_plan_applied` | confirm | `verb`, `selected`, `unchecked`, `local`, `conflicts` |
+| `magic_instant` | app command / go | `kind` (app, go), `command` (AppCommand id), `new_tab`, `target` |
+| `file_op` | batch reaches the undo journal; single-op failure | `op` (move, copy, rename, trash, create, mixed), `source` (paste, drop, delete, magic, single, new_folder, compress), `ok`, `items`, `requested`, `kinds` (tally), `duration_ms`, `error` (io kind) |
+| `undo` | undo finished | `items`, `kinds`, `ok`, `error` |
+| `file_opened` | open with default / chosen app | `kind` (image, video, audio, archive, code, document, other), `source` (browse, search, open_with), `app` (default, chosen), `ok` |
+| `feature_used` | UI affordances | `feature`: context_menu (`command`, `target`, `selected`), toolbar_button (`action`), quick_look (`items`), tab_opened/tab_closed (`tabs`), settings_opened, magic_toggle (`on`), search_scope (`scope`), drag_out (`items`), tag_saved (`edited_existing`), tag_removed, sidebar_tag_search, index_unavailable (`crash_looping`), analytics_enabled |
+| `setting_changed` | any settings change (store diff) | `setting`, `value` (label, bool or list length) |
+| `onboarding_step` | step change | `from`, `to`, `on_step_ms` |
+| `onboarding_finished` | flow closed | `completed`, `last_step`, `imported_favorites`, `offered_favorites`, `default_app`, `magic_live` |
+| `update` | update flow | `stage` (available, copy_command, open_url, restart, dismissed, failed) |
+| `feedback_submitted` | Send pressed | `message` (scrubbed, ≤ 5000 chars), `length` |
+| `$exception` | panic (drained) / `error!` | PostHog exception props; crashes add `process`, `thread`, `panic_location` and the crashing `$app_version`; logs add `log_target` |
 
-## Phasing
+Keyboard shortcuts are counted, not sent one by one. Each keystroke that
+resolves to an app action bumps a counter named after the action
+(`filex::GoUp`), reported in `usage_summary` / `app_session_ended`.
+Search-box text editing keys are excluded.
 
-1. `telemetry` module: `scrub` + `CrashReport` + the local queue
-   (write/list/prune), pure and tested. No UI, no network.
-2. `install_panic_hook`, wired into both binaries.
-3. `Settings.share_diagnostics` + the one-time first-run consent prompt (UI).
-4. Background uploader (`ureq` POST, `FILEX_CRASH_ENDPOINT`), drained on
-   launch when consented; fake-transport tests.
+Not instrumented yet: the Open/Save dialog process (`filex --pick`), which
+doesn't start analytics, and the connect-server dialog's outcome.
 
-## Confirmed decisions (2026-07-25)
+## Owner setup (one time)
 
-- **Consent: on by default, opt-out via a Settings toggle.** *Revised from
-  the initial "one-time opt-in prompt" — the owner preferred no startup
-  interruption.* This is a softer posture than the roadmap's "opt-in only",
-  accepted as an owner decision because reports are always scrubbed (no
-  paths/filenames/queries) and upload is endpoint-gated (local-only until
-  an endpoint is set). The scrubbing, not the prompt, is the real
-  protection.
-- **Transport: custom POST to an owner-controlled endpoint**, configurable
-  via `FILEX_CRASH_ENDPOINT`, empty-by-default (disabled). Not Sentry (no
-  third-party crash cloud / heavy dep).
-- **Remote metrics/aggregates stay deferred** (roadmap) — this pass is
-  crash reporting only.
+1. Create a PostHog project. In *Settings → Project*, enable **"Discard
+   client IP data"**, and leave person profiles off (events are anonymous anyway).
+2. Add the repository secret **`FILEX_POSTHOG_KEY`** (the project API key,
+   `phc_…`). Remove the old `FILEX_SENTRY_DSN` secret.
+3. For an EU project (or a reverse proxy), add the repository *variable*
+   **`FILEX_POSTHOG_HOST`**, e.g. `https://eu.i.posthog.com`. It defaults to
+   `https://us.i.posthog.com`.
+4. Optional: in Error tracking, mark `filex::*` frames as in-app (the SDK
+   already flags them) and set alerts on new issues.
+
+Local testing: `FILEX_POSTHOG_KEY=phc_… cargo run --features analytics`.
+Runtime env vars override the baked-in values. Debug builds tag events
+`environment: debug`.
+
+## Testing
+
+- Pure, no network: `Prop` serialization, buckets, UUIDv7/v4, envelope
+  shape and anonymity, super-property override, `scrub_text`, backtrace
+  parsing, crash/log exception shape and fingerprint stability, install-ID
+  lifecycle (including rejecting a non-UUID file), settings snapshot and
+  diff (lists as counts, custom accent hidden), search-session summary, AppCommand,
+  PlanError and menu-command ids.
+- Pipeline with a recording transport: batching, retry vs reject, bounded
+  buffer, session summary, global start/track/shutdown, crash drain
+  (timestamp and version kept, files deleted).
+- Transport against a loopback HTTP server: path, Bearer header, content
+  type, body; refused connection is a retry.
+- The `tracing` layer reads only `message` and rate-limits per callsite.
+
+## History
+
+- **2026-07-25:** custom POST uploader (`FILEX_CRASH_ENDPOINT`), crashes only,
+  on by default with a Settings toggle. "Not Sentry."
+- **2026-08-08:** Sentry became the sole transport: crashes drained from the
+  disk queue, `sentry-tracing` errors and breadcrumbs, measurement events,
+  release-health sessions, feedback with an optional email.
+- **2026-10-10:** the Windows MSI asks on its Privacy page.
+- **2026-11-28:** Sentry removed. PostHog handles error tracking *and*
+  product analytics through an in-tree ureq client. The disk crash queue,
+  `scrub`, the panic hook and the `share_diagnostics` consent carry over.
+  New: typed, PII-proof event properties, anonymous install ID, live
+  consent toggle, and the email field removed from feedback.

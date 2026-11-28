@@ -102,6 +102,8 @@ impl Workspace {
         self.tabs.push(TabSnapshot::placeholder());
         self.active_tab = self.tabs.len() - 1;
         self.restore_tab(TabSnapshot::placeholder());
+        analytics::feature_with("tab_opened", "tabs", self.tabs.len());
+        self.nav_via = "new_tab";
         self.load_dir(&path, cx);
         self.refresh_preview(cx);
         // The new index is fresh; committing puts it at the MRU front.
@@ -116,6 +118,7 @@ impl Workspace {
         if self.tabs.len() <= 1 || i >= self.tabs.len() {
             return;
         }
+        analytics::feature_with("tab_closed", "tabs", self.tabs.len() - 1);
         if i == self.active_tab {
             self.tabs.remove(i);
             let new_active = i.min(self.tabs.len() - 1);

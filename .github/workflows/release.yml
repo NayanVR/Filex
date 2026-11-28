@@ -14,10 +14,15 @@
 #   TAP_DEPLOY_KEY     — private half of a write-enabled SSH deploy key on the
 #                        Homebrew tap repo (never expires, scoped to that repo).
 # Optional secrets:
-#   FILEX_SENTRY_DSN   — Sentry DSN (a public client key) compiled into the
-#                        UI app for opt-in observability. When unset, Sentry
-#                        is simply disabled in the shipped build. The service
-#                        binary is always built without it.
+#   FILEX_POSTHOG_KEY  — PostHog project API key (public by design: it can
+#                        only write events) compiled into the UI app for
+#                        analytics and error tracking. When unset, analytics
+#                        is simply disabled in the shipped build. The daemon
+#                        and updater binaries are always built without it.
+# Optional variables (repository Variables, not secrets):
+#   FILEX_POSTHOG_HOST — ingestion host for the project's region or a
+#                        reverse proxy, e.g. https://eu.i.posthog.com.
+#                        Defaults to https://us.i.posthog.com.
 name: Release
 
 on:
@@ -55,21 +60,22 @@ jobs:
         run: cargo install cargo-wix --locked
         env:
           RUSTFLAGS: ""
-      # The search daemon and the update service must never link the
-      # telemetry SDK, so build them (and filex-sign) without default
+      # The search daemon and the update service must never link a
+      # telemetry transport, so build them (and filex-sign) without default
       # features; the updater gets only `updater`, the UI app gets
-      # `observability`. All land in target/release for cargo-wix to
-      # package. FILEX_SENTRY_DSN is compiled into the app when the secret
-      # is set, and is simply absent (Sentry stays disabled) when it isn't.
-      - name: Build release (daemon + updater without telemetry; app with observability)
+      # `analytics`. All land in target/release for cargo-wix to package.
+      # FILEX_POSTHOG_KEY is compiled into the app when the secret is set,
+      # and is simply absent (analytics stays disabled) when it isn't.
+      - name: Build release (daemon + updater without telemetry; app with analytics)
         shell: bash
         env:
-          FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
+          FILEX_POSTHOG_KEY: ${{ secrets.FILEX_POSTHOG_KEY }}
+          FILEX_POSTHOG_HOST: ${{ vars.FILEX_POSTHOG_HOST }}
         run: |
           set -euo pipefail
           cargo build --release --locked --no-default-features --bin filex-indexd
           cargo build --release --locked --no-default-features --features updater --bin filex-updater
-          cargo build --release --locked --features observability --bin filex
+          cargo build --release --locked --features analytics --bin filex
           cargo build --release --locked -p filex-dialog-shim
       - name: Build the MSI
         # The repo is a Cargo workspace (the dialog shim crate), so cargo-wix
@@ -190,10 +196,11 @@ jobs:
             libx11-xcb-dev libwayland-dev libvulkan-dev libfontconfig-dev
       - name: Build release
         env:
-          FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
+          FILEX_POSTHOG_KEY: ${{ secrets.FILEX_POSTHOG_KEY }}
+          FILEX_POSTHOG_HOST: ${{ vars.FILEX_POSTHOG_HOST }}
         run: |
           cargo build --release --locked --no-default-features --bin filex-indexd
-          cargo build --release --locked --features observability --bin filex
+          cargo build --release --locked --features analytics --bin filex
       - name: Build filex-sign
         run: cargo build --release --locked --no-default-features --bin filex-sign
       - name: Package + sign
@@ -236,10 +243,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release
         env:
-          FILEX_SENTRY_DSN: ${{ secrets.FILEX_SENTRY_DSN }}
+          FILEX_POSTHOG_KEY: ${{ secrets.FILEX_POSTHOG_KEY }}
+          FILEX_POSTHOG_HOST: ${{ vars.FILEX_POSTHOG_HOST }}
         run: |
           cargo build --release --locked --no-default-features --bin filex-indexd
-          cargo build --release --locked --features observability --bin filex
+          cargo build --release --locked --features analytics --bin filex
       - name: Build filex-sign
         run: cargo build --release --locked --no-default-features --bin filex-sign
       - name: Bundle .app, ad-hoc sign, package + sign

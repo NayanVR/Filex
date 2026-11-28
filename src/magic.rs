@@ -222,6 +222,23 @@ pub enum PlanError {
     Collision(PathBuf),
 }
 
+impl PlanError {
+    /// A stable id for the refusal, without the value it carries (a folder
+    /// name, a path). Used as an analytics label.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::NoMatches => "no_matches",
+            Self::NothingSelected => "nothing_selected",
+            Self::TooMany(_) => "too_many",
+            Self::NothingToDo => "nothing_to_do",
+            Self::UnknownDestination(_) => "unknown_destination",
+            Self::PatternNotUnique => "pattern_not_unique",
+            Self::InvalidName(_) => "invalid_name",
+            Self::Collision(_) => "collision",
+        }
+    }
+}
+
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

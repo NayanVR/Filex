@@ -4,28 +4,43 @@ Filex is a file explorer. It reads and indexes files on your own computer, and
 the search index never leaves it. Filex makes only the two kinds of network
 request below.
 
-## Crash reports and diagnostics (optional)
+## Anonymous usage data and crash reports (optional)
 
-When **Share anonymous diagnostics** is on, the Filex app sends the following
-to [Sentry](https://sentry.io) ([privacy policy](https://sentry.io/privacy/)):
+When **Share anonymous usage data** is on, the Filex app sends the following
+to [PostHog](https://posthog.com) ([privacy policy](https://posthog.com/privacy)):
 
-- crash reports and error events, including stack traces;
-- anonymous performance measurements (for example search latency, index
-  start-up time and resource use);
-- app-session health (whether a session ended in a crash, and the app version).
+- **How features are used:** for example that a folder was opened from the
+  sidebar, a search found 40 results and the third one was opened, a file
+  was copied, a setting was changed, or a keyboard shortcut was used. Only
+  counts, timings, on/off values and fixed labels written into Filex are
+  sent.
+- **Performance:** for example how long a folder took to load, how fast
+  search answered, start-up time, memory use and how many files are indexed.
+- **Crash reports and errors**, including stack traces, with file names,
+  paths, quoted text, email addresses and web addresses removed.
+- **The app version and your operating system.**
 
-Before anything is sent, file names, folder paths, search queries and tags are
-removed. Filex does not attach your user name, computer name or IP address.
-Sentry receives the network connection like any web request. The background
-index service (`filex-indexd`) contains no reporting code at all.
+Filex never sends file or folder names, paths, search text, tags, the
+contents of files, your user name, your computer name or your email address.
+Data is anonymous: it is tied to a random ID created for this install, not to
+you or your computer. That ID is deleted when you turn sharing off, so
+turning it back on starts a new, unconnected one. Filex tells PostHog not to
+look up your location, and our PostHog project is set to discard IP
+addresses. PostHog still sees the network connection, like any web request. The background index service
+(`filex-indexd`) contains no reporting code at all.
+
+**Feedback** you type into *Send feedback* goes to PostHog when you press
+Send, even if sharing is off, with file names, paths and email addresses
+removed. Because of that, we can't reply to it.
 
 **Your choice:**
 
 - **Windows:** the installer asks on its Privacy page. For an unattended install,
   pass `FILEX_CRASH_REPORTS=0` to `msiexec` to opt out.
 - **macOS and Linux:** on by default; there is no installer step.
-- **Everywhere:** turn it off at any time in Settings → Share anonymous
-  diagnostics. Nothing is sent while it is off.
+- **Everywhere:** turn it off at any time in Settings → Privacy → Share
+  anonymous usage data. It takes effect immediately, and nothing is sent
+  while it is off.
 
 ## Update checks
 
@@ -37,5 +52,5 @@ GitHub sees the request like any web request
 
 ## Data on your computer
 
-Settings, tags, recent folders, the search index and logs are stored locally in
-your user profile (see [Uninstall](README.md#uninstall)) and are never uploaded.
+Settings, tags, recent folders, the search index, logs and the random
+analytics ID are stored locally in your user profile (see [Uninstall](README.md#uninstall)) and are never uploaded.

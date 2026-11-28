@@ -573,13 +573,12 @@ pub(super) struct TagEditor {
     pub(super) _subscription: gpui::Subscription,
 }
 
-/// The open feedback dialog: the message and (optional) reply-email
-/// inputs.
+/// The open feedback dialog's message input. There is deliberately no
+/// reply-email field: analytics carries no PII (docs/design-telemetry.md).
 pub(super) struct FeedbackDraft {
     pub(super) message: gpui::Entity<SearchInput>,
-    pub(super) email: gpui::Entity<SearchInput>,
-    /// Watch both inputs for Dismissed (escape) to cancel.
-    pub(super) _subscriptions: [gpui::Subscription; 2],
+    /// Watches the input for Dismissed (escape) to cancel.
+    pub(super) _subscription: gpui::Subscription,
 }
 
 /// One browse tab's saved state. The *active* tab lives directly on the

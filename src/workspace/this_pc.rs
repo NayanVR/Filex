@@ -87,6 +87,7 @@ impl Workspace {
                 drive_tile(&theme, ix, drive, selected)
                     .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                         if event.click_count() >= 2 {
+                            this.nav_via = "this_pc";
                             this.navigate(path.clone(), cx);
                         } else {
                             this.this_pc_selected = Some(ix);

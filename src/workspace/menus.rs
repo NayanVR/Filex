@@ -536,6 +536,27 @@ impl Workspace {
             (Command::OpenInApp(n), AppsLookup::Ready(Some(apps))) => apps.get(n).cloned(),
             _ => None,
         };
+        let target = match &menu.target {
+            MenuTarget::Entry {
+                from_search: true, ..
+            } => "search_result",
+            MenuTarget::Entry { .. } => "entry",
+            MenuTarget::Favorite { .. } => "favorite",
+            MenuTarget::FolderIcon { .. } => "folder_icon",
+            MenuTarget::NetworkDrive { .. } => "network_drive",
+            MenuTarget::Background => "background",
+        };
+        if command != Command::OpenSubmenu {
+            filex::diagnostics::analytics::track(
+                filex::diagnostics::analytics::Event::new(
+                    filex::diagnostics::analytics::names::FEATURE_USED,
+                )
+                .with("feature", "context_menu")
+                .with("command", command.id())
+                .with("target", target)
+                .with("selected", self.active_selection().len()),
+            );
+        }
         if let (Command::FolderIcon, Some(path)) = (command, &path) {
             self.open_folder_icon_menu(path.clone(), position, window, cx);
             return;
@@ -775,6 +796,12 @@ impl Workspace {
                         let cwd = this.cwd.clone();
                         this.load_dir_selecting(&cwd, Some(name), cx);
                     }
+                    analytics::ops_applied(
+                        std::slice::from_ref(&applied),
+                        "new_folder",
+                        1,
+                        std::time::Duration::ZERO,
+                    );
                     this.journal.record(vec![applied]);
                 }
                 Err(err) => {
@@ -845,6 +872,12 @@ impl Workspace {
                     Ok(dest) => {
                         let applied = ops::AppliedOp::Created { path: dest };
                         this.notice = Some(applied.describe().into());
+                        analytics::ops_applied(
+                            std::slice::from_ref(&applied),
+                            "compress",
+                            1,
+                            std::time::Duration::ZERO,
+                        );
                         this.journal.record(vec![applied]);
                     }
                     Err(err) if err.is::<ops::OpCanceled>() => {

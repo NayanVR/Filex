@@ -295,7 +295,7 @@ impl Workspace {
             self.clipboard = None;
         }
         let dest = self.cwd.clone();
-        self.spawn_transfer_batch(sources, mode, dest, cx);
+        self.spawn_transfer_batch(sources, mode, dest, "paste", cx);
     }
 
     /// Paths carried by a drag that starts on row/card `ix`: the whole
@@ -393,6 +393,7 @@ impl Workspace {
             return;
         }
         tracing::info!(items = paths.len(), "drag left filex; handing it to the OS");
+        analytics::feature_with("drag_out", "items", paths.len());
         self.drag_in_flight = None;
         cx.stop_active_drag(window);
         let finished = platform::start_os_drag(paths);
@@ -444,7 +445,7 @@ impl Workspace {
         if sources.is_empty() {
             return;
         }
-        self.spawn_transfer_batch(sources, mode, dest_dir, cx);
+        self.spawn_transfer_batch(sources, mode, dest_dir, "drop", cx);
     }
 
     /// Decorate a folder row/card so it accepts drops: an in-app drag of
@@ -493,6 +494,7 @@ impl Workspace {
             return;
         }
         let cwd = self.cwd.clone();
+        self.nav_via = "refresh";
         self.load_dir(&cwd, cx);
         self.notice = Some("refreshed".into());
         cx.notify();
@@ -509,11 +511,14 @@ impl Workspace {
         sources: Vec<PathBuf>,
         mode: ClipMode,
         dest_dir: PathBuf,
+        source: &'static str,
         cx: &mut Context<Self>,
     ) {
         if !self.validate_search_paths(&sources, cx) {
             return;
         }
+        let requested = sources.len();
+        let started = std::time::Instant::now();
         let progress = std::sync::Arc::new(ops::OpProgress::default());
         let job_id = self.next_job_id;
         self.next_job_id += 1;
@@ -591,6 +596,9 @@ impl Workspace {
                         format!("{verb} {} {}", applied.len(), plural_items(applied.len())).into(),
                     );
                     this.sync_folder_icons(&applied, false, cx);
+                }
+                analytics::ops_applied(&applied, source, requested, started.elapsed());
+                if !applied.is_empty() {
                     this.journal.record(applied);
                 }
                 if let Some(error) = failure {
@@ -631,6 +639,8 @@ impl Workspace {
         }
         let identities = self.search_hits.clone();
         let tags = self.tags.clone();
+        let requested = paths.len();
+        let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
@@ -660,6 +670,7 @@ impl Workspace {
                     this.report_search_check(outcome.map(drop), cx);
                     return;
                 };
+                analytics::ops_applied(&applied, "delete", requested, started.elapsed());
                 if !applied.is_empty() {
                     this.notice = Some(
                         if applied.len() == 1 {
@@ -772,6 +783,8 @@ impl Workspace {
             cx.notify();
         }
         let tags = self.tags.clone();
+        let kind = analytics::op_kind(&op);
+        let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -793,12 +806,22 @@ impl Workspace {
                     Ok(applied) => {
                         this.notice = Some(applied.describe().into());
                         this.sync_folder_icons(std::slice::from_ref(&applied), false, cx);
+                        analytics::ops_applied(
+                            std::slice::from_ref(&applied),
+                            "single",
+                            1,
+                            started.elapsed(),
+                        );
                         this.journal.record(vec![applied]);
                     }
                     Err(err) if err.is::<ops::OpCanceled>() => {
+                        analytics::op_failed(kind, "single", "canceled");
                         this.notice = Some("canceled".into());
                     }
-                    Err(err) => this.notice = Some(format!("{err:#}").into()),
+                    Err(err) => {
+                        analytics::op_failed(kind, "single", analytics::io_error_kind(&err));
+                        this.notice = Some(format!("{err:#}").into());
+                    }
                 }
                 this.refresh_after_op(cx);
             })
@@ -867,6 +890,7 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                analytics::undo(&batch, result.as_ref().err());
                 match result {
                     Ok(()) => {
                         this.sync_folder_icons(&batch, true, cx);

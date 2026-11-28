@@ -53,6 +53,10 @@ impl Workspace {
         let request = self.path_request;
         self.path_loading = false;
         let refresh = self.listed_dir == path;
+        // Report user navigation, not the reloads file ops and the watcher
+        // trigger on the folder already shown (unless one was asked for).
+        let via = std::mem::replace(&mut self.nav_via, "other");
+        self.nav_pending = (!keep && (!refresh || via != "other")).then_some((request, via));
         self.cwd = path.to_path_buf();
         self.sync_path(cx);
         let sort = self.settings.read(cx).settings().sort;
@@ -152,6 +156,10 @@ impl Workspace {
     ) -> bool {
         if self.path_request != request {
             return false;
+        }
+        let report = self.nav_pending.take_if(|(pending, _)| *pending == request);
+        if let Some((_, via)) = report {
+            self.track_folder_opened(path, via, &read);
         }
         match read {
             Ok(entries) => {
@@ -422,6 +430,9 @@ impl Workspace {
             };
             (row.target.clone(), row.is_dir, true)
         };
+        if from_search {
+            self.end_search_session("opened", Some(ix));
+        }
         self.open_target(path, is_dir, from_search, cx);
     }
 
@@ -436,6 +447,7 @@ impl Workspace {
             return;
         }
         if is_dir {
+            self.nav_via = if from_search { "search_result" } else { "open" };
             self.navigate(path, cx);
             if from_search {
                 self.clear_search(cx);
@@ -444,7 +456,21 @@ impl Workspace {
             if self.picker_activate_file(&path, None, cx) {
                 return;
             }
-            if let Err(err) = open_with_default_app(&path) {
+            let opened = open_with_default_app(&path);
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default();
+            filex::diagnostics::analytics::track(
+                filex::diagnostics::analytics::Event::new(
+                    filex::diagnostics::analytics::names::FILE_OPENED,
+                )
+                .with("kind", analytics::file_kind(&name, false))
+                .with("source", if from_search { "search" } else { "browse" })
+                .with("app", "default")
+                .with("ok", opened.is_ok()),
+            );
+            if let Err(err) = opened {
                 self.notice = Some(format!("couldn't open {}: {err}", path.display()).into());
             }
             self.record_recent(path, cx);
@@ -458,6 +484,18 @@ impl Workspace {
     /// Launch `path` in a chosen app from the "Open With…" list. Off the
     /// UI thread: on Windows the Shell's hand-off can take a moment.
     pub(super) fn open_in_app(&mut self, path: PathBuf, app: PathBuf, cx: &mut Context<Self>) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        filex::diagnostics::analytics::track(
+            filex::diagnostics::analytics::Event::new(
+                filex::diagnostics::analytics::names::FILE_OPENED,
+            )
+            .with("kind", analytics::file_kind(&name, false))
+            .with("source", "open_with")
+            .with("app", "chosen"),
+        );
         cx.spawn(async move |this, cx| {
             let launched = cx
                 .background_executor()
@@ -496,8 +534,10 @@ impl Workspace {
         let Some(parent) = path.parent().map(Path::to_path_buf) else {
             return;
         };
+        self.end_search_session("revealed", None);
         self.clear_search(cx);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        self.nav_via = "reveal";
         self.navigate_selecting(parent, name, cx);
     }
 
@@ -585,6 +625,7 @@ impl Workspace {
 
     pub(super) fn go_up(&mut self, cx: &mut Context<Self>) {
         if let Some(parent) = filex::drives::parent_location(&self.cwd) {
+            self.nav_via = "up";
             self.navigate(parent, cx);
         }
     }
@@ -592,6 +633,7 @@ impl Workspace {
     /// Back/forward through the active tab's history.
     pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.history_back.pop() {
+            self.nav_via = "back";
             self.history_forward.push(self.cwd.clone());
             self.load_dir(&prev, cx);
             cx.notify();
@@ -600,6 +642,7 @@ impl Workspace {
 
     pub(super) fn go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(next) = self.history_forward.pop() {
+            self.nav_via = "forward";
             self.history_back.push(self.cwd.clone());
             self.load_dir(&next, cx);
             cx.notify();

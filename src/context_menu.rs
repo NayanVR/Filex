@@ -64,6 +64,45 @@ pub enum Command {
     OpenSubmenu,
 }
 
+impl Command {
+    /// A stable id for the command, without the value it carries (an app
+    /// index, an icon). Used as an analytics label.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Cut => "cut",
+            Self::Copy => "copy",
+            Self::Rename => "rename",
+            Self::Share => "share",
+            Self::Delete => "delete",
+            Self::Open => "open",
+            Self::OpenInNewTab => "open_in_new_tab",
+            Self::QuickLook => "quick_look",
+            Self::EditTags => "edit_tags",
+            Self::Reveal => "reveal",
+            Self::AddToFavorites => "add_favorite",
+            Self::RemoveFromFavorites => "remove_favorite",
+            Self::CompressToZip => "compress",
+            Self::CopyAsPath => "copy_as_path",
+            Self::IndexFolder => "index_folder",
+            Self::FolderIcon => "folder_icon_menu",
+            Self::Properties => "properties",
+            Self::Paste => "paste",
+            Self::OpenInTerminal => "open_in_terminal",
+            Self::NewFolder => "new_folder",
+            Self::SetView(_) => "set_view",
+            Self::Zoom(_) => "zoom",
+            Self::SetSort(_) => "set_sort",
+            Self::SetAscending(_) => "set_ascending",
+            Self::OpenInApp(_) => "open_in_app",
+            Self::ChooseOtherApp => "choose_other_app",
+            Self::MoveFavorite(_) => "move_favorite",
+            Self::SetFolderIcon(_) => "set_folder_icon",
+            Self::Disconnect => "disconnect",
+            Self::OpenSubmenu => "open_submenu",
+        }
+    }
+}
+
 /// The submenus a row can open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Submenu {

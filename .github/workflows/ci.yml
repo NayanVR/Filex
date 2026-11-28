@@ -66,14 +66,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libwayland-dev libvulkan-dev libfontconfig-dev
+      # Built as it ships: with `analytics` (the PostHog transport), so the
+      # release configuration and its loopback transport tests run on every
+      # OS. The plain-default config is only `cfg`-ed out code; checked below.
       - name: Build the GPUI application
-        run: cargo build --locked
+        run: cargo build --locked --features analytics
       # One invocation compiles both test targets in parallel. The whole lib
       # suite (not just platform_preview) runs here: its compile was already
       # paid for, and this is the only place macOS lib code (FSEvents, Finder
       # tags, NetFS, trash) and `app`-gated lib code get tested.
       - name: Run application and library tests
-        run: cargo test --locked --bin filex --lib
+        run: cargo test --locked --features analytics --bin filex --lib
+      - name: Check the application without analytics
+        run: cargo check --locked --bin filex
       - name: Run production Windows preview lifecycle and fault checks
         if: matrix.os == 'windows-latest'
         timeout-minutes: 5
