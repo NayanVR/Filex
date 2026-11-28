@@ -9,7 +9,7 @@ impl Workspace {
     /// owns zero catalog bytes, and daemon resources are separate. Only
     /// spawned when analytics is on. The RSS query is a cheap OS call.
     pub(super) fn spawn_resource_sampling(&self, cx: &mut Context<Self>) {
-        if !filex::diagnostics::analytics::is_enabled() {
+        if !fa::is_enabled() {
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -22,13 +22,11 @@ impl Workspace {
                 else {
                     break;
                 };
-                use filex::diagnostics::analytics::{Event, names, process_rss_bytes, track};
-                track(
-                    Event::new(names::RESOURCE_SAMPLE)
-                        .with("index_roots", roots)
-                        .with("tabs", tabs)
-                        .with_opt("rss_mb", process_rss_bytes().map(|b| b / (1024 * 1024))),
-                );
+                fa::track(ev::ResourceSample {
+                    rss_mb: fa::process_rss_bytes().map(|b| b / (1024 * 1024)),
+                    index_roots: roots,
+                    tabs,
+                });
             }
         })
         .detach();
@@ -101,7 +99,9 @@ impl Workspace {
                         }
                         this.update(cx, |this, cx| {
                             if applying_requested {
-                                analytics::update_stage("failed");
+                                fa::track(ev::UpdateStep {
+                                    stage: ev::UpdateStage::Failed,
+                                });
                                 this.update_status = filex::update::UpdateStatus::Failed;
                                 this.notice = Some("Couldn't reach the Filex updater".into());
                                 cx.notify();
@@ -191,7 +191,9 @@ impl Workspace {
                 })
                 .await;
             if let Ok(Some(version)) = found {
-                analytics::update_stage("available");
+                fa::track(ev::UpdateStep {
+                    stage: ev::UpdateStage::Available,
+                });
                 this.update(cx, |this, cx| {
                     this.update_status = filex::update::UpdateStatus::Available {
                         version,
@@ -212,10 +214,12 @@ impl Workspace {
         let filex::update::UpdateStatus::Available { affordance, .. } = &self.update_status else {
             return;
         };
-        analytics::update_stage(match affordance {
-            filex::update::UpdateAffordance::RunCommand(_) => "copy_command",
-            filex::update::UpdateAffordance::OpenUrl(_) => "open_url",
-            filex::update::UpdateAffordance::Restart => "restart",
+        fa::track(ev::UpdateStep {
+            stage: match affordance {
+                filex::update::UpdateAffordance::RunCommand(_) => ev::UpdateStage::CopyCommand,
+                filex::update::UpdateAffordance::OpenUrl(_) => ev::UpdateStage::OpenUrl,
+                filex::update::UpdateAffordance::Restart => ev::UpdateStage::Restart,
+            },
         });
         match affordance.clone() {
             filex::update::UpdateAffordance::RunCommand(cmd) => {
@@ -235,7 +239,9 @@ impl Workspace {
 
     /// Hide the update banner (the ✕). The check runs again next launch.
     pub(super) fn dismiss_update(&mut self, cx: &mut Context<Self>) {
-        analytics::update_stage("dismissed");
+        fa::track(ev::UpdateStep {
+            stage: ev::UpdateStage::Dismissed,
+        });
         self.update_status = filex::update::UpdateStatus::Idle;
         cx.notify();
     }
@@ -323,11 +329,7 @@ impl Workspace {
                             Err(_) => {
                                 // Once per lost connection, not per retry.
                                 if this.service.is_some() {
-                                    analytics::feature_with(
-                                        "index_unavailable",
-                                        "crash_looping",
-                                        crash_looping,
-                                    );
+                                    fa::track(ev::IndexUnavailable { crash_looping });
                                 }
                                 let mut next = this.daemon_status.clone();
                                 next.error = Some(if crash_looping {
@@ -386,7 +388,7 @@ impl Workspace {
     /// and the durable queue simply caps at
     /// [`filex::diagnostics::telemetry::QUEUE_CAP`].
     pub(super) fn spawn_crash_upload(&self, cx: &mut Context<Self>) {
-        if !filex::diagnostics::analytics::is_enabled() {
+        if !fa::is_enabled() {
             return;
         }
         let Some(dir) = filex::diagnostics::telemetry::default_queue_dir() else {
@@ -394,7 +396,7 @@ impl Workspace {
         };
         cx.background_executor()
             .spawn(async move {
-                let sent = filex::diagnostics::analytics::drain_crashes(&dir);
+                let sent = fa::drain_crashes(&dir);
                 if sent > 0 {
                     tracing::info!("sent {sent} crash report(s)");
                 }

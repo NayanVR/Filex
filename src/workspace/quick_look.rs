@@ -38,7 +38,10 @@ impl Workspace {
         if paths.is_empty() {
             return;
         }
-        analytics::feature_with("quick_look", "items", paths.len());
+        fa::track(ev::FeatureUsed {
+            feature: ev::Feature::QuickLook,
+            items: Some(paths.len()),
+        });
         self.close_menu(cx);
         let result = (|| -> anyhow::Result<()> {
             if self.quick_look.is_none() {

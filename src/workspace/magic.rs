@@ -425,21 +425,17 @@ impl Workspace {
                 target: Some(Ok((path, is_dir))),
             }) => {
                 self.leave_magic(cx);
-                self.end_search_session("magic_go", None);
-                filex::diagnostics::analytics::track(
-                    filex::diagnostics::analytics::Event::new(
-                        filex::diagnostics::analytics::names::MAGIC_INSTANT,
-                    )
-                    .with("kind", "go")
-                    .with("new_tab", go.new_tab)
-                    .with("target", analytics::file_kind("", is_dir)),
-                );
+                self.end_search_session(ev::SearchOutcome::MagicGo, None);
+                fa::track(ev::MagicInstant {
+                    kind: ev::MagicInstantKind::Go,
+                    command: None,
+                    new_tab: Some(go.new_tab),
+                });
                 if is_dir {
                     if go.new_tab {
                         self.open_tab(path, cx);
                     } else {
-                        self.nav_via = "magic";
-                        self.navigate(path, cx);
+                        self.navigate(path, NavVia::Magic, cx);
                     }
                 } else {
                     self.open_target(path, false, false, cx);
@@ -558,14 +554,12 @@ impl Workspace {
     ) {
         self.leave_magic(cx);
         window.focus(&self.focus_handle, cx);
-        self.end_search_session("magic_command", None);
-        filex::diagnostics::analytics::track(
-            filex::diagnostics::analytics::Event::new(
-                filex::diagnostics::analytics::names::MAGIC_INSTANT,
-            )
-            .with("kind", "app")
-            .with("command", command.id()),
-        );
+        self.end_search_session(ev::SearchOutcome::MagicCommand, None);
+        fa::track(ev::MagicInstant {
+            kind: ev::MagicInstantKind::App,
+            command: Some(command.id()),
+            new_tab: None,
+        });
         match command {
             AppCommand::NewTab => {
                 let cwd = self.cwd.clone();

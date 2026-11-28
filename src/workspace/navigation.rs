@@ -10,8 +10,17 @@ use super::*;
 const BACKFILL_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 
 impl Workspace {
+    /// Reload or load without a navigation cause (after a file op, a
+    /// settings change). Reported as `NavVia::Other` only if it lands on a
+    /// different folder.
     pub(super) fn load_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.load_dir_selecting(path, None, cx);
+        self.load_dir_selecting(path, None, None, cx);
+    }
+
+    /// Load `path` because of user navigation `via` (reported as
+    /// `folder_opened`).
+    pub(super) fn load_dir_via(&mut self, path: &Path, via: NavVia, cx: &mut Context<Self>) {
+        self.load_dir_selecting(path, None, Some(via), cx);
     }
 
     /// Read `path` on the background executor, then install it and
@@ -29,19 +38,22 @@ impl Workspace {
         &mut self,
         path: &Path,
         select: Option<String>,
+        via: Option<NavVia>,
         cx: &mut Context<Self>,
     ) {
-        self.load_listing(path, select, false, cx).detach();
+        self.load_listing(path, select, false, via, cx).detach();
     }
 
     /// [`load_dir_selecting`](Self::load_dir_selecting), returning the
     /// load's task. `keep` is the auto-refresh mode: the selection follows
-    /// its paths and Quick Look stays open.
+    /// its paths and Quick Look stays open. `via` is the navigation cause
+    /// for analytics; `None` is a reload.
     pub(super) fn load_listing(
         &mut self,
         path: &Path,
         select: Option<String>,
         keep: bool,
+        via: Option<NavVia>,
         cx: &mut Context<Self>,
     ) -> gpui::Task<()> {
         if filex::drives::is_this_pc(path) {
@@ -54,9 +66,14 @@ impl Workspace {
         self.path_loading = false;
         let refresh = self.listed_dir == path;
         // Report user navigation, not the reloads file ops and the watcher
-        // trigger on the folder already shown (unless one was asked for).
-        let via = std::mem::replace(&mut self.nav_via, "other");
-        self.nav_pending = (!keep && (!refresh || via != "other")).then_some((request, via));
+        // trigger on the folder already shown. A superseded load never
+        // reports: `nav_pending` belongs to the latest request.
+        self.nav_pending = match via {
+            _ if keep => None,
+            Some(via) => Some((request, via)),
+            None if !refresh => Some((request, NavVia::Other)),
+            None => None,
+        };
         self.cwd = path.to_path_buf();
         self.sync_path(cx);
         let sort = self.settings.read(cx).settings().sort;
@@ -431,7 +448,7 @@ impl Workspace {
             (row.target.clone(), row.is_dir, true)
         };
         if from_search {
-            self.end_search_session("opened", Some(ix));
+            self.end_search_session(ev::SearchOutcome::Opened, Some(ix));
         }
         self.open_target(path, is_dir, from_search, cx);
     }
@@ -447,8 +464,12 @@ impl Workspace {
             return;
         }
         if is_dir {
-            self.nav_via = if from_search { "search_result" } else { "open" };
-            self.navigate(path, cx);
+            let via = if from_search {
+                NavVia::SearchResult
+            } else {
+                NavVia::Open
+            };
+            self.navigate(path, via, cx);
             if from_search {
                 self.clear_search(cx);
             }
@@ -461,15 +482,16 @@ impl Workspace {
                 .file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default();
-            filex::diagnostics::analytics::track(
-                filex::diagnostics::analytics::Event::new(
-                    filex::diagnostics::analytics::names::FILE_OPENED,
-                )
-                .with("kind", analytics::file_kind(&name, false))
-                .with("source", if from_search { "search" } else { "browse" })
-                .with("app", "default")
-                .with("ok", opened.is_ok()),
-            );
+            fa::track(ev::FileOpened {
+                kind: ev::FileKind::of(&name, false),
+                source: if from_search {
+                    ev::OpenSource::Search
+                } else {
+                    ev::OpenSource::Browse
+                },
+                app: ev::OpenApp::Default,
+                ok: Some(opened.is_ok()),
+            });
             if let Err(err) = opened {
                 self.notice = Some(format!("couldn't open {}: {err}", path.display()).into());
             }
@@ -488,14 +510,12 @@ impl Workspace {
             .file_name()
             .map(|n| n.to_string_lossy())
             .unwrap_or_default();
-        filex::diagnostics::analytics::track(
-            filex::diagnostics::analytics::Event::new(
-                filex::diagnostics::analytics::names::FILE_OPENED,
-            )
-            .with("kind", analytics::file_kind(&name, false))
-            .with("source", "open_with")
-            .with("app", "chosen"),
-        );
+        fa::track(ev::FileOpened {
+            kind: ev::FileKind::of(&name, false),
+            source: ev::OpenSource::OpenWith,
+            app: ev::OpenApp::Chosen,
+            ok: None,
+        });
         cx.spawn(async move |this, cx| {
             let launched = cx
                 .background_executor()
@@ -534,11 +554,10 @@ impl Workspace {
         let Some(parent) = path.parent().map(Path::to_path_buf) else {
             return;
         };
-        self.end_search_session("revealed", None);
+        self.end_search_session(ev::SearchOutcome::Revealed, None);
         self.clear_search(cx);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        self.nav_via = "reveal";
-        self.navigate_selecting(parent, name, cx);
+        self.navigate_selecting(parent, name, NavVia::Reveal, cx);
     }
 
     pub(super) fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -592,8 +611,9 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.navigate_selecting(path, None, cx);
+    /// Go to `path` as user navigation `via` (pushes history).
+    pub(super) fn navigate(&mut self, path: PathBuf, via: NavVia, cx: &mut Context<Self>) {
+        self.navigate_selecting(path, None, via, cx);
     }
 
     /// Navigate to `path`, selecting the entry named `select` once the
@@ -602,13 +622,14 @@ impl Workspace {
         &mut self,
         path: PathBuf,
         select: Option<String>,
+        via: NavVia,
         cx: &mut Context<Self>,
     ) {
         if path == self.cwd {
             // Already here (or loading here): re-list so the selection
             // lands on fresh rows rather than racing the load.
             if select.is_some() {
-                self.load_dir_selecting(&path, select, cx);
+                self.load_dir_selecting(&path, select, Some(via), cx);
             }
             self.sync_path(cx);
             cx.notify();
@@ -618,33 +639,30 @@ impl Workspace {
         // both stacks).
         self.history_back.push(self.cwd.clone());
         self.history_forward.clear();
-        self.load_dir_selecting(&path, select, cx);
+        self.load_dir_selecting(&path, select, Some(via), cx);
         self.record_recent(path, cx);
         cx.notify();
     }
 
     pub(super) fn go_up(&mut self, cx: &mut Context<Self>) {
         if let Some(parent) = filex::drives::parent_location(&self.cwd) {
-            self.nav_via = "up";
-            self.navigate(parent, cx);
+            self.navigate(parent, NavVia::Up, cx);
         }
     }
 
     /// Back/forward through the active tab's history.
     pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(prev) = self.history_back.pop() {
-            self.nav_via = "back";
             self.history_forward.push(self.cwd.clone());
-            self.load_dir(&prev, cx);
+            self.load_dir_via(&prev, NavVia::Back, cx);
             cx.notify();
         }
     }
 
     pub(super) fn go_forward(&mut self, cx: &mut Context<Self>) {
         if let Some(next) = self.history_forward.pop() {
-            self.nav_via = "forward";
             self.history_back.push(self.cwd.clone());
-            self.load_dir(&next, cx);
+            self.load_dir_via(&next, NavVia::Forward, cx);
             cx.notify();
         }
     }

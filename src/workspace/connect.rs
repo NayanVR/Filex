@@ -200,8 +200,7 @@ impl Workspace {
             self.connect = None;
             window.focus(&self.focus_handle, cx);
             self.refresh_drives(cx);
-            self.nav_via = "connect_server";
-            self.navigate(path, cx);
+            self.navigate(path, NavVia::ConnectServer, cx);
         }
         cx.notify();
     }
@@ -259,7 +258,7 @@ impl Workspace {
             self.user_dirs.get("home").map(Path::to_path_buf)
         };
         if let Some(away) = away {
-            self.navigate(away, cx);
+            self.navigate(away, NavVia::Other, cx);
         }
     }
 

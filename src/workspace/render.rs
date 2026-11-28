@@ -18,6 +18,15 @@ enum NavAction {
 }
 
 impl NavAction {
+    fn analytics(self) -> ev::ToolbarAction {
+        match self {
+            Self::Reload => ev::ToolbarAction::Refresh,
+            Self::Back => ev::ToolbarAction::Back,
+            Self::Forward => ev::ToolbarAction::Forward,
+            Self::Up => ev::ToolbarAction::Parent,
+        }
+    }
+
     fn run(self, workspace: &mut Workspace, cx: &mut Context<Workspace>) {
         match self {
             Self::Reload => workspace.reload_dir(cx),
@@ -128,7 +137,9 @@ impl Workspace {
                     ui::top_bar::toolbar_button(&theme, id, icon, color)
                         .tooltip(self.action_tip(label, shortcut, cx))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            analytics::feature_with("toolbar_button", "action", shortcut);
+                            fa::track(ev::ToolbarButtonClicked {
+                                action: action.analytics(),
+                            });
                             action.run(this, cx)
                         }))
                 }),

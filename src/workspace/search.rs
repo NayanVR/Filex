@@ -17,7 +17,10 @@ impl Workspace {
     /// Run a `tag:NAME` search (clicking a sidebar tag), focusing the
     /// search field so it can be refined.
     pub(super) fn search_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        analytics::feature("sidebar_tag_search");
+        fa::track(ev::FeatureUsed {
+            feature: ev::Feature::SidebarTagSearch,
+            items: None,
+        });
         window.focus(&self.search_input.focus_handle(cx), cx);
         self.search_input.update(cx, |input, cx| {
             input.set_text(format!("tag:{name}"), cx);
@@ -70,17 +73,14 @@ impl Workspace {
         if let Some(state) = self.magic.as_ref()
             && matches!(state.outcome, Some(Ok(_)))
         {
-            filex::diagnostics::analytics::track(
-                filex::diagnostics::analytics::Event::new(
-                    filex::diagnostics::analytics::names::MAGIC_PLAN_APPLIED,
-                )
-                .with("verb", verb_id(state.command.verb))
-                .with("selected", state.selection_count())
-                .with("unchecked", state.checked.iter().filter(|c| !**c).count())
-                .with("local", state.local)
-                .with("conflicts", conflict_id(self.magic_conflicts)),
-            );
-            self.end_search_session("magic_applied", None);
+            fa::track(ev::MagicPlanApplied {
+                verb: ev::MagicVerb::of(state.command.verb),
+                selected: state.selection_count(),
+                unchecked: state.checked.iter().filter(|c| !**c).count(),
+                local: state.local,
+                conflicts: ev::Conflicts::of(self.magic_conflicts),
+            });
+            self.end_search_session(ev::SearchOutcome::MagicApplied, None);
         }
         let Some(state) = self.magic.as_ref() else {
             return;
@@ -169,7 +169,12 @@ impl Workspace {
                     this.notice =
                         Some(format!("{} {done} {}", verb.past_tense(), plural_items(done)).into());
                     this.sync_folder_icons(&applied, false, cx);
-                    analytics::ops_applied(&applied, "magic", applied.len(), job_started.elapsed());
+                    analytics::ops_applied(
+                        &applied,
+                        ev::OpSource::Magic,
+                        applied.len(),
+                        Some(job_started.elapsed()),
+                    );
                     this.journal.record(applied);
                 }
                 if let Some(error) = failure {
@@ -216,7 +221,9 @@ impl Workspace {
                 .update(cx, |input, cx| input.set_text(text, cx));
         }
         self.sync_magic_placeholder(cx);
-        analytics::feature_with("magic_toggle", "on", self.magic_mode == MagicMode::On);
+        fa::track(ev::MagicModeToggled {
+            on: self.magic_mode == MagicMode::On,
+        });
         window.focus(&self.search_input.focus_handle(cx), cx);
         self.update_search(cx);
         cx.notify();
@@ -251,14 +258,12 @@ impl Workspace {
     pub(super) fn set_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
         self.scope_menu = None;
         if self.search_scope != scope {
-            analytics::feature_with(
-                "search_scope",
-                "scope",
-                match scope {
-                    SearchScope::Anywhere => "anywhere",
-                    SearchScope::CurrentDir => "current_dir",
+            fa::track(ev::SearchScopeChanged {
+                scope: match scope {
+                    SearchScope::Anywhere => ev::Scope::Anywhere,
+                    SearchScope::CurrentDir => ev::Scope::CurrentDir,
                 },
-            );
+            });
             self.search_scope = scope;
             self.update_search(cx);
         }
@@ -517,7 +522,7 @@ impl Workspace {
         let mut index_filters = Vec::new();
         let mut filter_labels = Vec::new();
         for filter in all_filters {
-            filter_labels.push(analytics::filter_label(&filter));
+            filter_labels.push(ev::SearchFilter::of(&filter));
             match filter {
                 Filter::Tag(name) => tags_required.push(name),
                 other if !index_filters.contains(&other) => index_filters.push(other),
@@ -550,9 +555,9 @@ impl Workspace {
         };
         if let Some(session) = &mut self.search_session {
             let scope_label = if scope.is_some() {
-                "current_dir"
+                ev::Scope::CurrentDir
             } else {
-                "anywhere"
+                ev::Scope::Anywhere
             };
             session.issued(filter_labels, phrases_used, command_query, scope_label);
         }
@@ -1277,41 +1282,12 @@ fn track_plan_shown(
     plan: &Result<filex::magic::Plan, filex::magic::PlanError>,
     matches: usize,
 ) {
-    use filex::diagnostics::analytics::{Event, names, track};
-    track(
-        Event::new(names::MAGIC_PLAN_SHOWN)
-            .with("verb", verb_id(verb))
-            .with("matches", matches)
-            .with("ok", plan.is_ok())
-            .with_opt(
-                "refusal",
-                plan.as_ref().err().map(filex::magic::PlanError::id),
-            ),
-    );
-}
-
-/// Lowercase verb label for analytics.
-fn verb_id(verb: filex::magic::Verb) -> &'static str {
-    use filex::magic::Verb as V;
-    match verb {
-        V::Delete => "delete",
-        V::Move => "move",
-        V::Copy => "copy",
-        V::Rename => "rename",
-        V::Compress => "compress",
-        V::Tag => "tag",
-        V::Untag => "untag",
-        V::Organize => "organize",
-    }
-}
-
-fn conflict_id(policy: filex::magic::ConflictPolicy) -> &'static str {
-    use filex::magic::ConflictPolicy as P;
-    match policy {
-        P::KeepBoth => "keep_both",
-        P::Skip => "skip",
-        P::Replace => "replace",
-    }
+    fa::track(ev::MagicPlanShown {
+        verb: ev::MagicVerb::of(verb),
+        matches,
+        ok: plan.is_ok(),
+        refusal: plan.as_ref().err().map(filex::magic::PlanError::id),
+    });
 }
 
 fn record_latency(

@@ -257,8 +257,7 @@ impl Workspace {
             Confirm::Done(paths) => self.picker_finish(paths, cx),
             Confirm::Navigate(dir) => {
                 self.clear_search(cx);
-                self.nav_via = "picker";
-                self.navigate(dir, cx);
+                self.navigate(dir, NavVia::Picker, cx);
             }
             Confirm::Check(path) => self.check_save_target(path, cx),
             Confirm::Error(message) => {
@@ -342,7 +341,7 @@ impl Workspace {
             this.update(cx, |this, cx| match kind {
                 Some(true) => {
                     this.clear_search(cx);
-                    this.navigate(path, cx);
+                    this.navigate(path, NavVia::Picker, cx);
                 }
                 Some(false) if confirm_overwrite => {
                     if let Some(picker) = &mut this.picker {

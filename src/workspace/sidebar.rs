@@ -134,8 +134,7 @@ impl Workspace {
     /// app (a stat on click decides which).
     pub(super) fn open_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if path.is_dir() {
-            self.nav_via = "recent";
-            self.navigate(path, cx);
+            self.navigate(path, NavVia::Recent, cx);
         } else {
             self.open_target(path, false, false, cx);
         }
@@ -324,8 +323,7 @@ impl Workspace {
                     let active = self.query.is_empty() && self.cwd == path;
                     ui::sidebar::sidebar_item(&theme, ("place", ix), icon, label, active).on_click(
                         cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.nav_via = "sidebar_place";
-                            this.navigate(path.clone(), cx);
+                            this.navigate(path.clone(), NavVia::SidebarPlace, cx);
                         }),
                     )
                 },
@@ -351,8 +349,7 @@ impl Workspace {
                     )
                     .tooltip(ui::tooltip::text_tooltip(tip, theme))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.nav_via = "sidebar_favorite";
-                        this.navigate(nav.clone(), cx);
+                        this.navigate(nav.clone(), NavVia::SidebarFavorite, cx);
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -459,8 +456,7 @@ impl Workspace {
                         })
                         .child(div().text_xs().text_color(theme.text_dim).child(free_line))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                            this.nav_via = "sidebar_drive";
-                            this.navigate(path.clone(), cx);
+                            this.navigate(path.clone(), NavVia::SidebarDrive, cx);
                         }))
                         .when_some(network, |row, drive| {
                             row.on_mouse_down(

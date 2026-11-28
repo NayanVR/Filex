@@ -169,7 +169,10 @@ impl Workspace {
     pub(super) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = !self.settings_open;
         if self.settings_open {
-            analytics::feature("settings_opened");
+            fa::track(ev::FeatureUsed {
+                feature: ev::Feature::SettingsOpened,
+                items: None,
+            });
         }
         self.settings_scroll.reset();
         self.recording_shortcut = None;

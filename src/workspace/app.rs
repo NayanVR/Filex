@@ -7,6 +7,7 @@ use filex::launch::Browse;
 /// (file vs folder) here, before any window exists, so neither the
 /// hand-off nor the first frame waits on the file system.
 pub fn run(browse: Browse) {
+    let process_started = std::time::Instant::now();
     let _logging_guard = filex::diagnostics::logging::init("filex");
     filex::diagnostics::telemetry::install_panic_hook("filex");
     // PostHog analytics + error tracking (UI process only; on-by-default,
@@ -17,8 +18,7 @@ pub fn run(browse: Browse) {
     let settings = filex::settings::default_settings_file()
         .and_then(|file| filex::settings::Settings::load(&file).ok());
     let consent = settings.as_ref().is_some_and(|s| s.share_diagnostics);
-    let analytics =
-        filex::diagnostics::analytics::init("filex", env!("CARGO_PKG_VERSION"), consent);
+    let analytics = fa::init("filex", env!("CARGO_PKG_VERSION"), consent);
     let launch = analytics::launch_kind(&browse);
     let browse = browse.normalize();
     let Some(primary) = startup::claim_instance(&browse) else {
@@ -27,7 +27,6 @@ pub fn run(browse: Browse) {
     // A startup line at the default level, so a blank log file means "not
     // writing", not "nothing happened". Names the log directory, and
     // slow-op warnings land here without any RUST_LOG.
-    let process_started = std::time::Instant::now();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         "filex starting — slow operations (>{SLOW_OP_MS}ms) log at warn; \
@@ -98,11 +97,10 @@ pub(super) fn init_app(cx: &mut App) {
     })
     .detach();
     cx.on_app_quit(|_| {
-        // The last events and the session summary. Bounded: exit never
-        // waits on a slow network for more than a second, and only when
-        // analytics is on. (GPUI gives the returned future 200 ms, too
-        // little for a POST, so this runs before it.)
-        filex::diagnostics::analytics::shutdown(std::time::Duration::from_secs(1));
+        // The session summary and anything unsent go to the spool on disk
+        // (sent next launch). Local I/O only, never the network; the bound
+        // is a safety net for a stuck disk.
+        fa::shutdown(std::time::Duration::from_millis(250));
         async {
             tracing::info!("filex exiting");
         }

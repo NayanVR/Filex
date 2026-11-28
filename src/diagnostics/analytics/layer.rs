@@ -41,7 +41,7 @@ impl AnalyticsLayer {
 impl<S: Subscriber> Layer<S> for AnalyticsLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
-        if *meta.level() != Level::ERROR || !super::is_enabled() {
+        if *meta.level() != Level::ERROR || !super::is_running() {
             return;
         }
         // Never report on ourselves (a failure to send would loop).

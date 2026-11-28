@@ -536,26 +536,21 @@ impl Workspace {
             (Command::OpenInApp(n), AppsLookup::Ready(Some(apps))) => apps.get(n).cloned(),
             _ => None,
         };
-        let target = match &menu.target {
-            MenuTarget::Entry {
-                from_search: true, ..
-            } => "search_result",
-            MenuTarget::Entry { .. } => "entry",
-            MenuTarget::Favorite { .. } => "favorite",
-            MenuTarget::FolderIcon { .. } => "folder_icon",
-            MenuTarget::NetworkDrive { .. } => "network_drive",
-            MenuTarget::Background => "background",
-        };
         if command != Command::OpenSubmenu {
-            filex::diagnostics::analytics::track(
-                filex::diagnostics::analytics::Event::new(
-                    filex::diagnostics::analytics::names::FEATURE_USED,
-                )
-                .with("feature", "context_menu")
-                .with("command", command.id())
-                .with("target", target)
-                .with("selected", self.active_selection().len()),
-            );
+            fa::track(ev::ContextMenuUsed {
+                command: command.id(),
+                target: match &menu.target {
+                    MenuTarget::Entry {
+                        from_search: true, ..
+                    } => ev::MenuTarget::SearchResult,
+                    MenuTarget::Entry { .. } => ev::MenuTarget::Entry,
+                    MenuTarget::Favorite { .. } => ev::MenuTarget::Favorite,
+                    MenuTarget::FolderIcon { .. } => ev::MenuTarget::FolderIcon,
+                    MenuTarget::NetworkDrive { .. } => ev::MenuTarget::NetworkDrive,
+                    MenuTarget::Background => ev::MenuTarget::Background,
+                },
+                selected: self.active_selection().len(),
+            });
         }
         if let (Command::FolderIcon, Some(path)) = (command, &path) {
             self.open_folder_icon_menu(path.clone(), position, window, cx);
@@ -794,13 +789,13 @@ impl Workspace {
                             .unwrap_or_default();
                         this.pending_rename = rename.then(|| name.clone());
                         let cwd = this.cwd.clone();
-                        this.load_dir_selecting(&cwd, Some(name), cx);
+                        this.load_dir_selecting(&cwd, Some(name), None, cx);
                     }
                     analytics::ops_applied(
                         std::slice::from_ref(&applied),
-                        "new_folder",
+                        ev::OpSource::NewFolder,
                         1,
-                        std::time::Duration::ZERO,
+                        None,
                     );
                     this.journal.record(vec![applied]);
                 }
@@ -874,9 +869,9 @@ impl Workspace {
                         this.notice = Some(applied.describe().into());
                         analytics::ops_applied(
                             std::slice::from_ref(&applied),
-                            "compress",
+                            ev::OpSource::Compress,
                             1,
-                            std::time::Duration::ZERO,
+                            None,
                         );
                         this.journal.record(vec![applied]);
                     }

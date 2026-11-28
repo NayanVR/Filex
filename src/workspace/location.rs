@@ -123,8 +123,7 @@ impl Workspace {
         if filex::drives::is_this_pc(&target) {
             window.focus(&self.focus_handle, cx);
             self.clear_search(cx);
-            self.nav_via = "path_bar";
-            self.navigate(target, cx);
+            self.navigate(target, NavVia::PathBar, cx);
             return;
         }
         self.path_request = self.path_request.wrapping_add(1);
@@ -149,7 +148,7 @@ impl Workspace {
                     Ok((path, entries)) => {
                         analytics::folder_opened(
                             &path,
-                            "path_bar",
+                            NavVia::PathBar,
                             Ok(entries.len()),
                             started.elapsed(),
                         );
@@ -246,8 +245,7 @@ impl Workspace {
                                 if path.as_os_str().is_empty() {
                                     this.focus_path(window, cx)
                                 } else {
-                                    this.nav_via = "breadcrumb";
-                                    this.navigate(path.clone(), cx)
+                                    this.navigate(path.clone(), NavVia::Breadcrumb, cx)
                                 }
                             }))
                     });

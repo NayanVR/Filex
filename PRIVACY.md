@@ -52,5 +52,6 @@ GitHub sees the request like any web request
 
 ## Data on your computer
 
-Settings, tags, recent folders, the search index, logs and the random
-analytics ID are stored locally in your user profile (see [Uninstall](README.md#uninstall)) and are never uploaded.
+Settings, tags, recent folders, the search index, logs, the random
+analytics ID and usage data waiting to be sent (when Filex closes before
+sending it) are stored locally in your user profile (see [Uninstall](README.md#uninstall)) and are never uploaded.

@@ -1,44 +1,42 @@
-//! UI-side product analytics helpers: the launch event, keyboard-shortcut
-//! tallies, and small label mappings shared by the instrumented call
-//! sites. Events themselves are built with `filex::diagnostics::analytics`
-//! (typed props only, no PII; see that module and
-//! `docs/design-telemetry.md` for the catalog).
+//! UI-side analytics: the bits that need workspace state. Events are the
+//! typed structs in `filex::diagnostics::analytics::catalog` (imported as
+//! `ev`), tracked with `fa::track`. Simple ones are tracked inline at their
+//! call site. This module holds the launch event, shortcut tallies, the
+//! search-session accumulator, and helpers shared by several sites.
 //!
 //! Everything here is a channel send or a no-op when analytics is off.
 //! Nothing touches I/O on the UI thread.
 
 use super::*;
-use filex::diagnostics::analytics::{self as fa, Event, names};
 use filex::launch::Browse;
 
-/// How the process was asked to start, as a fixed label.
-pub(super) fn launch_kind(browse: &Browse) -> &'static str {
+/// How the process was asked to start.
+pub(super) fn launch_kind(browse: &Browse) -> ev::LaunchKind {
     match browse {
-        Browse::Default => "default",
-        Browse::Open(_) => "open_folder",
-        Browse::Select(_) => "select_item",
-        Browse::ThisPc => "this_pc",
-        Browse::Foreign(_) => "foreign",
+        Browse::Default => ev::LaunchKind::Default,
+        Browse::Open(_) => ev::LaunchKind::OpenFolder,
+        Browse::Select(_) => ev::LaunchKind::SelectItem,
+        Browse::ThisPc => ev::LaunchKind::ThisPc,
+        Browse::Foreign(_) => ev::LaunchKind::Foreign,
     }
 }
 
-/// `app_launched`: launch kind, whether this is a new install, time to the
-/// first window, and the settings snapshot.
+/// `app_launched`, plus `settings_snapshot` when settings loaded.
 pub(super) fn track_launch(
-    launch: &'static str,
+    launch: ev::LaunchKind,
     started: fa::Started,
     settings: Option<&filex::settings::Settings>,
     startup: std::time::Duration,
 ) {
-    let mut event = Event::new(names::APP_LAUNCHED)
-        .with("launch", launch)
-        .with("new_install", started.new_install)
-        .with("startup_ms", startup);
+    fa::track(ev::AppLaunched {
+        launch,
+        new_install: started.new_install,
+        startup_ms: startup,
+        onboarding_pending: settings.is_some_and(|s| s.onboarding_pending),
+    });
     if let Some(settings) = settings {
-        event = fa::snapshot::with_settings(event, settings)
-            .with("onboarding_pending", settings.onboarding_pending);
+        fa::track(fa::snapshot::snapshot(settings));
     }
-    fa::track(event);
 }
 
 /// Shortcut usage, aggregated: each keystroke that resolved to an app
@@ -86,91 +84,89 @@ fn is_shortcut(name: &str) -> bool {
     }
 }
 
-/// `folder_opened` (or `folder_load_failed`): how the folder was reached,
-/// its coarse location kind, time to first paint and entry count. Never
-/// the path or any name in it.
+/// `folder_opened` / `folder_load_failed` for a folder that landed.
 pub(super) fn folder_opened(
-    path: &std::path::Path,
-    via: &'static str,
+    path: &Path,
+    via: NavVia,
     outcome: Result<usize, &anyhow::Error>,
     elapsed: std::time::Duration,
 ) {
-    if !fa::is_enabled() {
+    let location = ev::Location::of(path);
+    match outcome {
+        Ok(entries) => fa::track(ev::FolderOpened {
+            via,
+            location,
+            load_ms: elapsed,
+            entries,
+            entries_bucket: ev::CountBucket::of(entries as u64),
+        }),
+        Err(err) => fa::track(ev::FolderLoadFailed {
+            via,
+            location,
+            load_ms: elapsed,
+            error: ev::IoError::of(err),
+        }),
+    }
+}
+
+/// `file_op` for a batch that reached the undo journal.
+pub(super) fn ops_applied(
+    applied: &[filex::ops::AppliedOp],
+    source: ev::OpSource,
+    requested: usize,
+    elapsed: Option<std::time::Duration>,
+) {
+    fa::track(ev::FileOp {
+        op: ev::OpKind::of_batch(applied),
+        source,
+        ok: !applied.is_empty(),
+        items: applied.len(),
+        requested,
+        kinds: applied.iter().map(ev::OpKind::of_applied).collect(),
+        duration_ms: elapsed,
+        error: None,
+    });
+}
+
+/// `file_op` for a single op that failed or was canceled.
+pub(super) fn op_failed(op: ev::OpKind, source: ev::OpSource, error: ev::IoError) {
+    fa::track(ev::FileOp {
+        op,
+        source,
+        ok: false,
+        items: 0,
+        requested: 1,
+        kinds: Default::default(),
+        duration_ms: None,
+        error: Some(error),
+    });
+}
+
+/// `index_status` on the first daemon answer of a run and whenever a build
+/// finishes. Root paths are never sent.
+pub(super) fn index_transition(
+    seen_before: bool,
+    previous: &filex::daemon::ipc::Status,
+    current: &filex::daemon::ipc::Status,
+) {
+    let finished_build = previous.building && !current.building;
+    if !fa::is_enabled() || (seen_before && !finished_build) {
         return;
     }
-    let event = match outcome {
-        Ok(entries) => Event::new(names::FOLDER_OPENED)
-            .with("entries", entries)
-            .with("entries_bucket", fa::event::bucket(entries as u64)),
-        Err(err) => Event::new(names::FOLDER_LOAD_FAILED).with("error", io_error_kind(err)),
-    };
-    fa::track(
-        event
-            .with("via", via)
-            .with("location", location_kind(path))
-            .with("load_ms", elapsed),
-    );
-}
-
-/// The `io::ErrorKind` behind an error, as a fixed label. The message is
-/// never sent (it usually names the path).
-pub(super) fn io_error_kind(err: &anyhow::Error) -> &'static str {
-    use std::io::ErrorKind as K;
-    let Some(io) = err.chain().find_map(|e| e.downcast_ref::<std::io::Error>()) else {
-        return "other";
-    };
-    match io.kind() {
-        K::NotFound => "not_found",
-        K::PermissionDenied => "permission_denied",
-        K::AlreadyExists => "already_exists",
-        K::TimedOut => "timed_out",
-        K::Interrupted => "interrupted",
-        K::InvalidInput | K::InvalidData | K::InvalidFilename => "invalid",
-        K::StorageFull | K::QuotaExceeded => "storage_full",
-        K::ReadOnlyFilesystem => "read_only",
-        K::DirectoryNotEmpty => "directory_not_empty",
-        K::NotADirectory => "not_a_directory",
-        K::IsADirectory => "is_a_directory",
-        K::CrossesDevices => "crosses_devices",
-        K::ResourceBusy => "busy",
-        K::Unsupported => "unsupported",
-        K::NetworkUnreachable
-        | K::HostUnreachable
-        | K::ConnectionRefused
-        | K::ConnectionReset
-        | K::ConnectionAborted
-        | K::NotConnected
-        | K::NetworkDown => "network",
-        _ => "io_other",
-    }
-}
-
-/// The coarse kind of a file, as a fixed label (from the extension's
-/// family, never the name or the extension itself).
-pub(super) fn file_kind(name: &str, is_dir: bool) -> &'static str {
-    use filex::listing::FileKind as K;
-    match K::of(name, is_dir) {
-        K::Directory => "directory",
-        K::Image => "image",
-        K::Video => "video",
-        K::Audio => "audio",
-        K::Archive => "archive",
-        K::Code => "code",
-        K::Document => "document",
-        K::Other => "other",
-    }
-}
-
-/// The label for a search filter's *kind* (never its value).
-pub(super) fn filter_label(filter: &filex::search::filter::Filter) -> &'static str {
-    use filex::search::filter::Filter as F;
-    match filter {
-        F::Tag(_) => "tag",
-        F::Kind(_) => "kind",
-        F::Ext(_) => "ext",
-        F::Size(_) => "size",
-        F::Modified(_) => "modified",
-    }
+    let files: u64 = current.roots.iter().map(|r| r.files).sum();
+    fa::track(ev::IndexStatus {
+        trigger: if seen_before {
+            ev::IndexTrigger::BuildFinished
+        } else {
+            ev::IndexTrigger::Connected
+        },
+        building: current.building,
+        roots: current.roots.len(),
+        files,
+        files_bucket: ev::CountBucket::of(files),
+        skipped: current.skipped,
+        error: current.error.is_some(),
+    });
 }
 
 /// One search, from the first keystroke to opening a result or clearing
@@ -190,10 +186,10 @@ pub(super) struct SearchSession {
     zero_result_responses: u32,
     errors: u32,
     pages: u32,
-    filters: Vec<&'static str>,
+    filters: Vec<ev::SearchFilter>,
     phrases: bool,
     magic: bool,
-    scope: &'static str,
+    scope: ev::Scope,
     partial: bool,
     literal_won: bool,
     plan_shown: bool,
@@ -217,7 +213,7 @@ impl SearchSession {
             filters: Vec::new(),
             phrases: false,
             magic: false,
-            scope: "anywhere",
+            scope: ev::Scope::Anywhere,
             partial: false,
             literal_won: false,
             plan_shown: false,
@@ -240,10 +236,10 @@ impl SearchSession {
     /// A search was issued with these properties.
     pub(super) fn issued(
         &mut self,
-        filters: impl IntoIterator<Item = &'static str>,
+        filters: impl IntoIterator<Item = ev::SearchFilter>,
         phrases: bool,
         magic: bool,
-        scope: &'static str,
+        scope: ev::Scope,
     ) {
         for filter in filters {
             if !self.filters.contains(&filter) {
@@ -284,164 +280,36 @@ impl SearchSession {
         self.pages += 1;
     }
 
-    /// The summary event. `outcome` is how the search ended (`opened`,
-    /// `revealed`, `cleared`, `applied`…), `rank` the opened row.
-    pub(super) fn finish(self, outcome: &'static str, rank: Option<usize>) -> Event {
-        let mean_ms = self.total_ms.checked_div(u64::from(self.responses));
-        Event::new(names::SEARCH_SESSION)
-            .with("outcome", outcome)
-            .with_opt("rank", rank)
-            .with("duration_ms", self.started.elapsed())
-            .with("edits", self.edits)
-            .with("max_query_len", self.max_len)
-            .with("final_query_len", self.final_len)
-            .with("responses", self.responses)
-            .with_opt("first_response_ms", self.first_ms)
-            .with_opt("mean_response_ms", mean_ms)
-            .with("max_response_ms", self.max_ms)
-            .with("results", self.results)
-            .with("results_bucket", fa::event::bucket(self.results as u64))
-            .with("zero_result_responses", self.zero_result_responses)
-            .with("errors", self.errors)
-            .with("pages_loaded", self.pages)
-            .with("filters", self.filters)
-            .with("phrases", self.phrases)
-            .with("magic", self.magic)
-            .with("scope", self.scope)
-            .with("hit_limit", self.partial)
-            .with("literal_won", self.literal_won)
-    }
-}
-
-/// The kind of a requested op, as a fixed label.
-pub(super) fn op_kind(op: &filex::ops::FileOp) -> &'static str {
-    use filex::ops::FileOp as F;
-    match op {
-        F::Move { .. } => "move",
-        F::Copy { .. } => "copy",
-        F::Rename { .. } => "rename",
-        F::Delete { .. } => "trash",
-        F::CreateFolder { .. } => "create",
-    }
-}
-
-/// The kind of a completed op, matching [`op_kind`]'s labels.
-fn applied_kind(op: &filex::ops::AppliedOp) -> &'static str {
-    use filex::ops::AppliedOp as A;
-    match op {
-        A::Moved { .. } => "move",
-        A::Copied { .. } => "copy",
-        A::Renamed { .. } => "rename",
-        A::Deleted { .. } => "trash",
-        A::Created { .. } => "create",
-    }
-}
-
-/// Per-kind counts of a batch, e.g. `{move: 3, create: 1}`.
-fn kind_tally(applied: &[filex::ops::AppliedOp]) -> fa::Prop {
-    let mut tally: Vec<(&'static str, u64)> = Vec::new();
-    for op in applied {
-        let kind = applied_kind(op);
-        match tally.iter_mut().find(|(k, _)| *k == kind) {
-            Some((_, n)) => *n += 1,
-            None => tally.push((kind, 1)),
+    /// The summary event.
+    pub(super) fn finish(
+        self,
+        outcome: ev::SearchOutcome,
+        rank: Option<usize>,
+    ) -> ev::SearchSession {
+        ev::SearchSession {
+            outcome,
+            rank,
+            duration_ms: self.started.elapsed(),
+            edits: self.edits,
+            max_query_len: self.max_len,
+            final_query_len: self.final_len,
+            responses: self.responses,
+            first_response_ms: self.first_ms,
+            mean_response_ms: self.total_ms.checked_div(u64::from(self.responses)),
+            max_response_ms: self.max_ms,
+            results: self.results,
+            results_bucket: ev::CountBucket::of(self.results as u64),
+            zero_result_responses: self.zero_result_responses,
+            errors: self.errors,
+            pages_loaded: self.pages,
+            filters: self.filters,
+            phrases: self.phrases,
+            magic: self.magic,
+            scope: self.scope,
+            hit_limit: self.partial,
+            literal_won: self.literal_won,
         }
     }
-    fa::Prop::Tally(tally)
-}
-
-/// `file_op`: a batch that reached the undo journal. `source` is where it
-/// came from (paste, drop, delete, magic, single, new_folder, compress);
-/// `requested` vs `items` shows how many were skipped or failed.
-pub(super) fn ops_applied(
-    applied: &[filex::ops::AppliedOp],
-    source: &'static str,
-    requested: usize,
-    elapsed: std::time::Duration,
-) {
-    if !fa::is_enabled() {
-        return;
-    }
-    let op = match applied {
-        [] => "none",
-        [first, rest @ ..] if rest.iter().all(|o| applied_kind(o) == applied_kind(first)) => {
-            applied_kind(first)
-        }
-        _ => "mixed",
-    };
-    fa::track(
-        Event::new(names::FILE_OP)
-            .with("op", op)
-            .with("source", source)
-            .with("ok", !applied.is_empty())
-            .with("items", applied.len())
-            .with("requested", requested)
-            .with("kinds", kind_tally(applied))
-            .with("duration_ms", elapsed),
-    );
-}
-
-/// `file_op` for a single op that failed or was canceled.
-pub(super) fn op_failed(op: &'static str, source: &'static str, error: &'static str) {
-    fa::track(
-        Event::new(names::FILE_OP)
-            .with("op", op)
-            .with("source", source)
-            .with("ok", false)
-            .with("items", 0u32)
-            .with("requested", 1u32)
-            .with("error", error),
-    );
-}
-
-/// `undo`: what kinds of op were undone, and whether it worked.
-pub(super) fn undo(batch: &[filex::ops::AppliedOp], error: Option<&anyhow::Error>) {
-    fa::track(
-        Event::new(names::UNDO)
-            .with("items", batch.len())
-            .with("kinds", kind_tally(batch))
-            .with("ok", error.is_none())
-            .with_opt("error", error.map(io_error_kind)),
-    );
-}
-
-/// `update`: a step of the update flow (available, the banner action
-/// taken, dismissed, failed). The version is in `$app_version`; the
-/// offered version isn't sent.
-pub(super) fn update_stage(stage: &'static str) {
-    fa::track(Event::new(names::UPDATE).with("stage", stage));
-}
-
-/// `index_status` on the first daemon answer of a run and whenever a build
-/// finishes: how many roots, how many files, how many unreadable entries,
-/// and whether the daemon reports an error. Root paths are never sent.
-pub(super) fn index_transition(
-    seen_before: bool,
-    previous: &filex::daemon::ipc::Status,
-    current: &filex::daemon::ipc::Status,
-) {
-    let finished_build = previous.building && !current.building;
-    if !fa::is_enabled() || (seen_before && !finished_build) {
-        return;
-    }
-    let files: u64 = current.roots.iter().map(|r| r.files).sum();
-    fa::track(
-        Event::new(names::INDEX_STATUS)
-            .with(
-                "trigger",
-                if seen_before {
-                    "build_finished"
-                } else {
-                    "connected"
-                },
-            )
-            .with("building", current.building)
-            .with("roots", current.roots.len())
-            .with("files", files)
-            .with("files_bucket", fa::event::bucket(files))
-            .with("skipped", current.skipped)
-            .with("error", current.error.is_some()),
-    );
 }
 
 impl Workspace {
@@ -449,7 +317,7 @@ impl Workspace {
     /// ending it (as `cleared`) when the box empties.
     pub(super) fn search_session_edit(&mut self, len: usize) {
         if len == 0 {
-            self.end_search_session("cleared", None);
+            self.end_search_session(ev::SearchOutcome::Cleared, None);
         } else if fa::is_enabled() {
             self.search_session
                 .get_or_insert_with(SearchSession::new)
@@ -458,7 +326,7 @@ impl Workspace {
     }
 
     /// Report and drop the live search session, if any.
-    pub(super) fn end_search_session(&mut self, outcome: &'static str, rank: Option<usize>) {
+    pub(super) fn end_search_session(&mut self, outcome: ev::SearchOutcome, rank: Option<usize>) {
         if let Some(session) = self.search_session.take() {
             fa::track(session.finish(outcome, rank));
         }
@@ -467,8 +335,8 @@ impl Workspace {
     /// `folder_opened` for a load that just landed (see `load_listing`).
     pub(super) fn track_folder_opened(
         &self,
-        path: &std::path::Path,
-        via: &'static str,
+        path: &Path,
+        via: NavVia,
         read: &anyhow::Result<Vec<filex::listing::Entry>>,
     ) {
         let outcome = read.as_ref().map(Vec::len);
@@ -488,7 +356,10 @@ impl Workspace {
             if current.share_diagnostics {
                 self.enable_analytics(cx);
             } else {
+                // Joins the worker and deletes two small files; bounded
+                // and only on this explicit toggle.
                 fa::disable();
+                self.search_session = None;
             }
             return;
         }
@@ -507,7 +378,10 @@ impl Workspace {
                 .spawn(async { fa::init("filex", env!("CARGO_PKG_VERSION"), true) })
                 .await;
             if started.is_some() {
-                feature("analytics_enabled");
+                fa::track(ev::FeatureUsed {
+                    feature: ev::Feature::AnalyticsEnabled,
+                    items: None,
+                });
                 this.update(cx, |this, cx| {
                     this.spawn_crash_upload(cx);
                     this.spawn_resource_sampling(cx);
@@ -519,40 +393,10 @@ impl Workspace {
     }
 }
 
-/// Track a `feature_used` event: one generic event for the long tail of
-/// UI affordances, keyed by a fixed `feature` label.
-pub(super) fn feature(feature: &'static str) {
-    fa::track(Event::new(names::FEATURE_USED).with("feature", feature));
-}
-
-/// `feature_used` with one extra typed property.
-pub(super) fn feature_with(feature: &'static str, key: &'static str, value: impl Into<fa::Prop>) {
-    fa::track(
-        Event::new(names::FEATURE_USED)
-            .with("feature", feature)
-            .with(key, value),
-    );
-}
-
-/// The coarse kind of a location, for navigation events. Never the path.
-/// Pure string checks, no I/O: a UNC path is `network`, anything else is
-/// classified by shape.
-pub(super) fn location_kind(path: &std::path::Path) -> &'static str {
-    let text = path.as_os_str().to_string_lossy();
-    if text.starts_with(r"\\") || text.starts_with("//") {
-        "network"
-    } else if path.parent().is_none() {
-        "root"
-    } else if dirs::home_dir().is_some_and(|home| path == home) {
-        "home"
-    } else {
-        "local"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filex::diagnostics::analytics::testing::Capture;
 
     #[test]
     fn text_editing_is_not_a_shortcut() {
@@ -564,27 +408,29 @@ mod tests {
     }
 
     #[test]
-    fn location_kinds() {
-        assert_eq!(
-            location_kind(std::path::Path::new(r"\\nas\share\x")),
-            "network"
-        );
-        assert_eq!(location_kind(std::path::Path::new("/")), "root");
-        assert_eq!(location_kind(std::path::Path::new("/srv/data")), "local");
-    }
-
-    #[test]
     fn search_session_summarizes_without_the_query() {
+        let capture = Capture::start();
         let mut session = SearchSession::new();
         session.edit(1);
         session.edit(4);
         session.edit(3);
-        session.issued(["kind", "modified"], true, false, "current_dir");
-        session.issued(["kind"], false, false, "current_dir");
+        session.issued(
+            [ev::SearchFilter::Kind, ev::SearchFilter::Modified],
+            true,
+            false,
+            ev::Scope::CurrentDir,
+        );
+        session.issued(
+            [ev::SearchFilter::Kind],
+            false,
+            false,
+            ev::Scope::CurrentDir,
+        );
         session.answered(std::time::Duration::from_millis(12), 0, false, false);
         session.answered(std::time::Duration::from_millis(8), 40, false, true);
-        let event = session.finish("opened", Some(2));
-        let json = serde_json::Value::Object(event.props_json());
+        fa::track(session.finish(ev::SearchOutcome::Opened, Some(2)));
+        let (name, json) = capture.events().remove(0);
+        assert_eq!(name, "search_session");
         assert_eq!(json["outcome"], "opened");
         assert_eq!(json["rank"], 2);
         assert_eq!(json["edits"], 3);
@@ -599,15 +445,28 @@ mod tests {
     }
 
     #[test]
-    fn file_kinds_are_coarse_labels() {
-        assert_eq!(file_kind("Tax Return 2025.pdf", false), "document");
-        assert_eq!(file_kind("holiday.JPG", false), "image");
-        assert_eq!(file_kind("Projects", true), "directory");
+    fn ops_report_batch_kind_and_tally() {
+        let capture = Capture::start();
+        let applied = vec![
+            filex::ops::AppliedOp::Created { path: "/a".into() },
+            filex::ops::AppliedOp::Moved {
+                from: "/b".into(),
+                to: "/c".into(),
+            },
+        ];
+        ops_applied(&applied, ev::OpSource::Magic, 3, None);
+        let (_, json) = capture.events().remove(0);
+        assert_eq!(json["op"], "mixed");
+        assert_eq!(json["source"], "magic");
+        assert_eq!(json["requested"], 3);
+        assert_eq!(json["kinds"], serde_json::json!({"create": 1, "move": 1}));
+        let text = serde_json::Value::Object(json).to_string();
+        assert!(!text.contains("/a") && !text.contains("/c"), "{text}");
     }
 
     #[test]
     fn launch_kinds_never_carry_the_path() {
         let kind = launch_kind(&Browse::Open("/Users/ann/Secret".into()));
-        assert_eq!(kind, "open_folder");
+        assert_eq!(kind, ev::LaunchKind::OpenFolder);
     }
 }

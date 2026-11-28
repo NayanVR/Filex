@@ -25,6 +25,11 @@ use super::event::Event;
 /// The capture-v1 endpoint path, appended to the configured host.
 pub const CAPTURE_PATH: &str = "/i/v1/analytics/events";
 
+/// Version of the event shapes in [`super::catalog`], sent on every event
+/// as `schema_version`. Bump it on a breaking change (a renamed or
+/// retyped property, a changed meaning) so dashboards can split on it.
+pub const SCHEMA_VERSION: u32 = 1;
+
 /// Default ingestion host when the build doesn't name one.
 pub const DEFAULT_HOST: &str = "https://us.i.posthog.com";
 
@@ -56,6 +61,7 @@ impl SuperProps {
             .into(),
         );
         map.insert("$geoip_disable".into(), true.into());
+        map.insert("schema_version".into(), SCHEMA_VERSION.into());
         map
     }
 }
@@ -189,7 +195,6 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostics::analytics::event::names;
 
     #[test]
     fn uuid_v7_has_version_variant_and_timestamp() {
@@ -216,7 +221,11 @@ mod tests {
 
     #[test]
     fn wire_event_is_anonymous_and_carries_super_props() {
-        let pending = Pending::new(Event::new(names::FOLDER_OPENED).with("via", "up"), [1; 10]);
+        let event = Event {
+            name: "folder_opened",
+            props: vec![("via", super::super::event::Prop::Label("up"))],
+        };
+        let pending = Pending::new(event, [1; 10]);
         let identity = Identity {
             distinct_id: "install".into(),
             session_id: "session".into(),
@@ -243,7 +252,10 @@ mod tests {
     #[test]
     fn event_props_override_super_props() {
         let pending = Pending::new(
-            Event::new(names::EXCEPTION).with("$app_version", "0.1.0"),
+            Event {
+                name: "$exception",
+                props: vec![("$app_version", super::super::event::Prop::Label("0.1.0"))],
+            },
             [0; 10],
         );
         let identity = Identity {

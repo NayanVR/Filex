@@ -1,18 +1,27 @@
 //! The delivery worker: one background thread owns the buffer, batches
-//! events, retries with backoff, and summarizes the session. Transport is
-//! a trait so the whole pipeline is tested without a network.
+//! events, retries with backoff, caps per-event volume, summarizes the
+//! session, and spools unsent events to disk at quit.
 //!
-//! Nothing here runs on the UI thread. `track` is a channel send, and the
-//! HTTP POST happens on the worker.
+//! Nothing here runs on the UI thread. `track` is a channel send. HTTP
+//! only happens on this worker.
+//!
+//! **Spool.** Quit never waits on the network. At shutdown the worker
+//! writes whatever is unsent (including `app_session_ended`) to
+//! `<data_local_dir>/filex/analytics-spool.jsonl`, and the next run sends
+//! it first. That also keeps the events of a session that ended offline.
+//! Opting out deletes the spool ([`super::disable`]).
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::event::{Event, Prop, names};
+use super::catalog::{AppSessionEnded, UsageSummary};
+use super::event::Event;
+use super::schema::Tally;
 use super::wire::{self, Identity, Pending, SuperProps};
 
 /// What one POST achieved.
@@ -26,10 +35,29 @@ pub enum PostOutcome {
     Reject,
 }
 
-/// Sends one batch body. Implemented over `ureq` in `client.rs`; tests
-/// substitute a recorder.
+/// Sends one batch body. Implemented over `ureq` in `client.rs`, by
+/// [`LogTransport`] for local development, and by a recorder in tests.
 pub trait Transport: Send + Sync {
     fn post(&self, body: &Value) -> PostOutcome;
+}
+
+/// Writes each batch to the log instead of the network
+/// (`FILEX_ANALYTICS=log`), so events can be inspected with no PostHog
+/// project: `RUST_LOG=filex=info` shows every batch.
+pub struct LogTransport;
+
+impl Transport for LogTransport {
+    fn post(&self, body: &Value) -> PostOutcome {
+        for event in body["batch"].as_array().into_iter().flatten() {
+            tracing::info!(
+                target: "filex::analytics_log",
+                "{} {}",
+                event["event"].as_str().unwrap_or("?"),
+                event["properties"]
+            );
+        }
+        PostOutcome::Delivered
+    }
 }
 
 /// Tunables, overridable in tests.
@@ -39,13 +67,15 @@ pub struct Limits {
     pub batch: usize,
     /// Flush at least this often while events are waiting.
     pub interval: Duration,
-    /// Oldest events are dropped past this, so being offline for a week
-    /// can't grow memory without bound.
+    /// Oldest events are dropped past this (memory and spool bound).
     pub max_buffer: usize,
-    /// Emit a `usage_summary` (counters) this often.
+    /// Emit a `usage_summary` this often.
     pub summary_every: Duration,
     /// Upper bound for retry backoff.
     pub max_backoff: Duration,
+    /// Most events of one name per session; the rest are counted in the
+    /// summary's `dropped`. A guard against a bug spending the quota.
+    pub max_per_event: u64,
 }
 
 impl Default for Limits {
@@ -56,27 +86,30 @@ impl Default for Limits {
             max_buffer: 1_000,
             summary_every: Duration::from_secs(30 * 60),
             max_backoff: Duration::from_secs(5 * 60),
+            max_per_event: 2_000,
         }
     }
 }
 
 pub enum Msg {
     Event(Box<Pending>),
-    /// Bump a named counter (e.g. one keyboard shortcut) that is reported
-    /// in aggregate, not per occurrence.
+    /// Bump a named counter (one keyboard shortcut) reported in aggregate.
     Count(&'static str),
     /// Flush now; replies whether the buffer emptied.
     Flush(Sender<bool>),
-    /// Emit the session summary, flush, and stop; replies when done.
+    /// Emit the session summary, spool what's unsent, and stop. Replies
+    /// once the spool is written (local disk, never the network).
     Shutdown(Sender<bool>),
 }
 
-/// Shared, immutable facts both the worker and synchronous senders
-/// (crash drain, feedback) need.
+/// Shared, immutable facts the worker and synchronous senders (crash
+/// drain, feedback) need.
 pub struct Shared {
     pub transport: Arc<dyn Transport>,
     pub identity: Identity,
     pub sup: SuperProps,
+    /// Where unsent events wait between runs; `None` disables spooling.
+    pub spool: Option<PathBuf>,
 }
 
 impl Shared {
@@ -91,12 +124,59 @@ impl Shared {
     }
 }
 
+/// `<data_local_dir>/filex/analytics-spool.jsonl`.
+pub fn default_spool_path() -> Option<PathBuf> {
+    Some(
+        dirs::data_local_dir()?
+            .join("filex")
+            .join("analytics-spool.jsonl"),
+    )
+}
+
+/// Read and delete the spool: one wire event per line. A torn or corrupt
+/// line is skipped. Assumes the file is only ever written by
+/// [`write_spool`] of this or an earlier build.
+pub fn take_spool(path: &Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let _ = std::fs::remove_file(path);
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["event"].is_string())
+        .collect()
+}
+
+/// Write unsent wire events as JSON lines, replacing any previous spool
+/// (the worker took it at start, so nothing is lost). Writes to a temp
+/// file and renames, so a crash mid-write leaves the old file or none.
+fn write_spool(path: &Path, events: &VecDeque<Value>) {
+    if events.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let mut text = String::new();
+    for event in events {
+        text.push_str(&event.to_string());
+        text.push('\n');
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 struct Worker {
     shared: Arc<Shared>,
     limits: Limits,
     buf: VecDeque<Value>,
-    /// Per-event-name totals for this session.
+    /// Events sent per name this session.
     events: BTreeMap<&'static str, u64>,
+    /// Events dropped by `max_per_event` since the last summary.
+    dropped: BTreeMap<&'static str, u64>,
     /// Counters since the last summary.
     counters: BTreeMap<&'static str, u64>,
     started: Instant,
@@ -105,15 +185,19 @@ struct Worker {
     backoff: Duration,
 }
 
-/// Run the worker until `Shutdown` or the channel closes.
+/// Run the worker until `Shutdown` or the channel closes. A closed
+/// channel means sharing was turned off: the buffer is discarded, not
+/// spooled.
 pub fn run(rx: Receiver<Msg>, shared: Arc<Shared>, limits: Limits) {
     let now = Instant::now();
+    let spooled = shared.spool.as_deref().map(take_spool).unwrap_or_default();
     let mut worker = Worker {
         shared,
         backoff: Duration::from_secs(5).min(limits.max_backoff),
         limits,
-        buf: VecDeque::new(),
+        buf: spooled.into(),
         events: BTreeMap::new(),
+        dropped: BTreeMap::new(),
         counters: BTreeMap::new(),
         started: now,
         last_summary: now,
@@ -132,18 +216,18 @@ pub fn run(rx: Receiver<Msg>, shared: Arc<Shared>, limits: Limits) {
                 let _ = reply.send(worker.flush(true));
             }
             Ok(Msg::Shutdown(reply)) => {
-                worker.summarize(names::APP_SESSION_ENDED);
-                let _ = reply.send(worker.flush(true));
+                worker.session_ended();
+                if let Some(path) = worker.shared.spool.clone() {
+                    write_spool(&path, &worker.buf);
+                }
+                let _ = reply.send(true);
                 return;
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                worker.flush(true);
-                return;
-            }
+            Err(RecvTimeoutError::Disconnected) => return,
         }
         if worker.last_summary.elapsed() >= worker.limits.summary_every {
-            worker.summarize(names::USAGE_SUMMARY);
+            worker.usage_summary();
         }
         if !worker.buf.is_empty() {
             worker.flush(false);
@@ -153,8 +237,15 @@ pub fn run(rx: Receiver<Msg>, shared: Arc<Shared>, limits: Limits) {
 
 impl Worker {
     fn push(&mut self, pending: Pending) {
-        *self.events.entry(pending.event.name).or_default() += 1;
+        let name = pending.event.name;
+        let sent = self.events.entry(name).or_default();
+        if *sent >= self.limits.max_per_event {
+            *self.dropped.entry(name).or_default() += 1;
+            return;
+        }
+        *sent += 1;
         let wire = wire::wire_event(&pending, &self.shared.identity, &self.shared.sup);
+        tracing::debug!(target: "filex::analytics_log", "queued {name} {}", wire["properties"]);
         self.buf.push_back(wire);
         while self.buf.len() > self.limits.max_buffer {
             self.buf.pop_front();
@@ -162,8 +253,7 @@ impl Worker {
     }
 
     /// Send buffered events in batches. Respects the backoff window unless
-    /// `force` (an explicit flush or shutdown gets one real attempt).
-    /// Returns whether the buffer is now empty.
+    /// `force`. Returns whether the buffer is now empty.
     fn flush(&mut self, force: bool) -> bool {
         if !force && self.retry_at.is_some_and(|at| Instant::now() < at) {
             return self.buf.is_empty();
@@ -188,25 +278,33 @@ impl Worker {
         true
     }
 
-    /// Queue a summary event: session length, how often each event fired,
-    /// and the aggregated counters (shortcuts). Counters reset after.
-    fn summarize(&mut self, name: &'static str) {
-        let counters = std::mem::take(&mut self.counters);
-        let mut event = Event::new(name)
-            .with("duration_s", self.started.elapsed().as_secs())
-            .with(
-                "since_last_summary_s",
-                self.last_summary.elapsed().as_secs(),
-            );
-        if !counters.is_empty() {
-            event = event.with("counters", Prop::Tally(counters.into_iter().collect()));
-        }
-        if name == names::APP_SESSION_ENDED {
-            let events = self.events.iter().map(|(k, v)| (*k, *v)).collect();
-            event = event.with("events", Prop::Tally(events));
-        }
+    fn take_tallies(&mut self) -> (Tally<&'static str>, Tally<&'static str>) {
+        let counters = Tally(std::mem::take(&mut self.counters).into_iter().collect());
+        let dropped = Tally(std::mem::take(&mut self.dropped).into_iter().collect());
+        (counters, dropped)
+    }
+
+    fn usage_summary(&mut self) {
+        let (counters, dropped) = self.take_tallies();
+        let event = UsageSummary {
+            duration_s: self.started.elapsed().as_secs(),
+            since_last_summary_s: self.last_summary.elapsed().as_secs(),
+            counters,
+            dropped,
+        };
         self.last_summary = Instant::now();
-        self.push(Pending::new(event, wire::random_bytes()));
+        self.push(Pending::new(Event::typed(&event), wire::random_bytes()));
+    }
+
+    fn session_ended(&mut self) {
+        let (counters, dropped) = self.take_tallies();
+        let event = AppSessionEnded {
+            duration_s: self.started.elapsed().as_secs(),
+            events: Tally(self.events.iter().map(|(k, v)| (*k, *v)).collect()),
+            counters,
+            dropped,
+        };
+        self.push(Pending::new(Event::typed(&event), wire::random_bytes()));
     }
 }
 
@@ -245,7 +343,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn shared(transport: Arc<Recorder>) -> Arc<Shared> {
+    pub fn shared(transport: Arc<Recorder>, spool: Option<PathBuf>) -> Arc<Shared> {
         Arc::new(Shared {
             transport,
             identity: Identity {
@@ -256,6 +354,7 @@ pub(crate) mod tests {
                 app: "filex",
                 version: "0.0.0",
             },
+            spool,
         })
     }
 
@@ -266,19 +365,51 @@ pub(crate) mod tests {
             max_buffer: 3,
             summary_every: Duration::from_secs(3600),
             max_backoff: Duration::from_millis(1),
+            max_per_event: 100,
         }
     }
 
     fn pending(name: &'static str) -> Box<Pending> {
-        Box::new(Pending::new(Event::new(name), [0; 10]))
+        Box::new(Pending::new(Event::raw(name), [0; 10]))
+    }
+
+    fn worker(rec: &Arc<Recorder>, limits: Limits) -> Worker {
+        Worker {
+            shared: shared(rec.clone(), None),
+            limits,
+            buf: VecDeque::new(),
+            events: BTreeMap::new(),
+            dropped: BTreeMap::new(),
+            counters: BTreeMap::new(),
+            started: Instant::now(),
+            last_summary: Instant::now(),
+            retry_at: None,
+            backoff: Duration::from_millis(1),
+        }
+    }
+
+    fn names(events: &[Value]) -> Vec<&str> {
+        events.iter().filter_map(|e| e["event"].as_str()).collect()
     }
 
     #[test]
-    fn shutdown_flushes_events_and_reports_the_session() {
+    fn shutdown_spools_instead_of_posting_and_next_run_sends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool.jsonl");
+        // An offline network: nothing may be posted at shutdown anyway.
         let rec = Arc::new(Recorder::default());
+        rec.script.lock().unwrap().extend([PostOutcome::Retry; 8]);
+        let limits = Limits {
+            interval: Duration::from_secs(60),
+            batch: 50,
+            ..quick()
+        };
         let (tx, rx) = channel();
-        let shared = shared(rec.clone());
-        let handle = std::thread::spawn(move || run(rx, shared, quick()));
+        let first = shared(rec.clone(), Some(spool.clone()));
+        let handle = std::thread::spawn({
+            let limits = limits.clone();
+            move || run(rx, first, limits)
+        });
         tx.send(Msg::Event(pending("folder_opened"))).unwrap();
         tx.send(Msg::Count("filex::GoUp")).unwrap();
         tx.send(Msg::Count("filex::GoUp")).unwrap();
@@ -286,13 +417,54 @@ pub(crate) mod tests {
         tx.send(Msg::Shutdown(reply)).unwrap();
         assert!(done.recv().unwrap());
         handle.join().unwrap();
+        // Offline the whole run: everything unsent is on disk now.
+        let spooled = std::fs::read_to_string(&spool).unwrap();
+        assert_eq!(spooled.lines().count(), 2, "{spooled}");
 
-        let events = rec.events();
-        let names: Vec<&str> = events.iter().filter_map(|e| e["event"].as_str()).collect();
-        assert_eq!(names, ["folder_opened", "app_session_ended"]);
+        // Next run: the spool goes out first, then the file is gone.
+        let rec2 = Arc::new(Recorder::default());
+        let (tx, rx) = channel();
+        let second = shared(rec2.clone(), Some(spool.clone()));
+        let handle = std::thread::spawn(move || run(rx, second, limits));
+        let (reply, flushed) = channel();
+        tx.send(Msg::Flush(reply)).unwrap();
+        assert!(flushed.recv().unwrap());
+        drop(tx);
+        handle.join().unwrap();
+        let events = rec2.events();
+        assert_eq!(names(&events), ["folder_opened", "app_session_ended"]);
         let summary = &events[1]["properties"];
         assert_eq!(summary["counters"]["filex::GoUp"], 2);
         assert_eq!(summary["events"]["folder_opened"], 1);
+        assert!(!spool.exists());
+    }
+
+    #[test]
+    fn revoked_consent_discards_instead_of_spooling() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool.jsonl");
+        let rec = Arc::new(Recorder::default());
+        rec.script.lock().unwrap().extend([PostOutcome::Retry; 8]);
+        let (tx, rx) = channel();
+        let s = shared(rec, Some(spool.clone()));
+        let limits = Limits {
+            batch: 50,
+            ..quick()
+        };
+        let handle = std::thread::spawn(move || run(rx, s, limits));
+        tx.send(Msg::Event(pending("a"))).unwrap();
+        drop(tx);
+        handle.join().unwrap();
+        assert!(!spool.exists());
+    }
+
+    #[test]
+    fn corrupt_spool_lines_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool.jsonl");
+        std::fs::write(&spool, "{\"event\":\"a\"}\n{torn\n{\"no_event\":1}\n").unwrap();
+        assert_eq!(names(&take_spool(&spool)), ["a"]);
+        assert!(!spool.exists());
     }
 
     #[test]
@@ -303,10 +475,9 @@ pub(crate) mod tests {
             .unwrap()
             .extend([PostOutcome::Retry, PostOutcome::Reject]);
         let (tx, rx) = channel();
-        let shared = shared(rec.clone());
-        let handle = std::thread::spawn(move || run(rx, shared, quick()));
+        let s = shared(rec.clone(), None);
+        let handle = std::thread::spawn(move || run(rx, s, quick()));
         tx.send(Msg::Event(pending("a"))).unwrap();
-        // First attempt: Retry (kept). Explicit flush: Reject (dropped).
         let (reply, flushed) = channel();
         std::thread::sleep(Duration::from_millis(30));
         tx.send(Msg::Flush(reply)).unwrap();
@@ -322,27 +493,35 @@ pub(crate) mod tests {
     #[test]
     fn buffer_is_bounded_dropping_oldest() {
         let rec = Arc::new(Recorder::default());
-        let mut worker = Worker {
-            shared: shared(rec.clone()),
-            limits: quick(),
-            buf: VecDeque::new(),
-            events: BTreeMap::new(),
-            counters: BTreeMap::new(),
-            started: Instant::now(),
-            last_summary: Instant::now(),
-            retry_at: None,
-            backoff: Duration::from_millis(1),
-        };
+        let mut worker = worker(&rec, quick());
         for name in ["e1", "e2", "e3", "e4", "e5"] {
             worker.push(*pending(name));
         }
-        let kept: Vec<&str> = worker
-            .buf
-            .iter()
-            .filter_map(|e| e["event"].as_str())
-            .collect();
-        assert_eq!(kept, ["e3", "e4", "e5"]);
+        assert_eq!(names(worker.buf.make_contiguous()), ["e3", "e4", "e5"]);
         assert!(worker.flush(true));
         assert_eq!(rec.bodies.lock().unwrap().len(), 2, "batches of two");
+    }
+
+    #[test]
+    fn per_event_cap_counts_what_it_drops() {
+        let rec = Arc::new(Recorder::default());
+        let mut worker = worker(
+            &rec,
+            Limits {
+                max_buffer: 100,
+                max_per_event: 2,
+                ..quick()
+            },
+        );
+        for _ in 0..5 {
+            worker.push(*pending("noisy"));
+        }
+        worker.push(*pending("quiet"));
+        worker.session_ended();
+        let kept = names(worker.buf.make_contiguous()).join(",");
+        assert_eq!(kept, "noisy,noisy,quiet,app_session_ended");
+        let summary = worker.buf.back().unwrap();
+        assert_eq!(summary["properties"]["dropped"]["noisy"], 3);
+        assert_eq!(summary["properties"]["events"]["noisy"], 2);
     }
 }

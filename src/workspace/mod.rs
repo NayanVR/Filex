@@ -33,6 +33,7 @@ use crate::ui::search_input::{self, SearchInput, SearchInputEvent};
 use crate::ui::theme::{ActiveTheme as _, Theme};
 pub use app::run;
 use filex::context_menu as menu_model;
+use filex::diagnostics::analytics::{self as fa, catalog as ev, catalog::NavVia};
 use filex::listing::FileKind;
 pub use picker::run_picker;
 pub(crate) use platform::open_with_default_app;
@@ -769,11 +770,9 @@ struct Workspace {
     /// When the latest folder load began. A load that began after a
     /// change was seen already shows it, so the watcher skips its own.
     last_load_start: std::time::Instant,
-    /// How the next folder load was reached, for `folder_opened` (a fixed
-    /// label set by the navigating call site; consumed by the load).
-    nav_via: &'static str,
-    /// The in-flight load to report once it lands: (request, via).
-    nav_pending: Option<(u64, &'static str)>,
+    /// The in-flight load to report as `folder_opened` once it lands:
+    /// (request, how it was reached). Set by `load_listing`.
+    nav_pending: Option<(u64, NavVia)>,
     /// The search being typed, summarized as `search_session` on open or
     /// clear (analytics only; `None` while analytics is off).
     search_session: Option<analytics::SearchSession>,
@@ -1054,7 +1053,6 @@ impl Workspace {
             watched_dir: None,
             folder_stale: false,
             last_load_start: std::time::Instant::now(),
-            nav_via: "launch",
             nav_pending: None,
             search_session: None,
             service_seen: false,

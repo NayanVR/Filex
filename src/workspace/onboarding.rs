@@ -34,17 +34,17 @@ pub(super) struct Optional {
 }
 
 impl Step {
-    /// A fixed label for analytics (`onboarding_step`).
-    fn id(self) -> &'static str {
+    /// The screen's analytics label (`onboarding_step`).
+    fn screen(self) -> ev::OnboardingScreen {
         match self {
-            Step::Loading => "loading",
-            Step::Welcome => "welcome",
-            Step::Theme => "theme",
-            Step::Favorites => "favorites",
-            Step::Search => "search",
-            Step::Magic => "magic",
-            Step::DefaultApp => "default_app",
-            Step::Ready => "ready",
+            Step::Loading => ev::OnboardingScreen::Loading,
+            Step::Welcome => ev::OnboardingScreen::Welcome,
+            Step::Theme => ev::OnboardingScreen::Theme,
+            Step::Favorites => ev::OnboardingScreen::Favorites,
+            Step::Search => ev::OnboardingScreen::Search,
+            Step::Magic => ev::OnboardingScreen::Magic,
+            Step::DefaultApp => ev::OnboardingScreen::DefaultApp,
+            Step::Ready => ev::OnboardingScreen::Ready,
         }
     }
 
@@ -299,14 +299,11 @@ const MAGIC_PLACEHOLDER: &str = "move all pdfs to Documents";
 /// `onboarding_step`: a move between screens and the time spent on the
 /// one being left, which is what shows where people drop off.
 fn track_step(from: Step, to: Step, on_step: std::time::Duration) {
-    filex::diagnostics::analytics::track(
-        filex::diagnostics::analytics::Event::new(
-            filex::diagnostics::analytics::names::ONBOARDING_STEP,
-        )
-        .with("from", from.id())
-        .with("to", to.id())
-        .with("on_step_ms", on_step),
-    );
+    fa::track(ev::OnboardingStep {
+        from: from.screen(),
+        to: to.screen(),
+        on_step_ms: on_step,
+    });
 }
 
 impl Workspace {
@@ -407,17 +404,14 @@ impl Workspace {
         } else {
             Vec::new()
         };
-        filex::diagnostics::analytics::track(
-            filex::diagnostics::analytics::Event::new(
-                filex::diagnostics::analytics::names::ONBOARDING_FINISHED,
-            )
-            .with("completed", import)
-            .with("last_step", onboarding.step.id())
-            .with("imported_favorites", imports.len())
-            .with("offered_favorites", onboarding.imports.len())
-            .with("default_app", onboarding.applies_default(import))
-            .with("magic_live", onboarding.magic_live),
-        );
+        fa::track(ev::OnboardingFinished {
+            completed: import,
+            last_step: onboarding.step.screen(),
+            imported_favorites: imports.len(),
+            offered_favorites: onboarding.imports.len(),
+            default_app: onboarding.applies_default(import),
+            magic_live: onboarding.magic_live,
+        });
         self.settings.update(cx, |store, cx| {
             store.update(cx, |settings| finish_settings(settings, imports));
         });

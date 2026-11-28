@@ -160,7 +160,7 @@ impl Workspace {
     fn reload_quietly(&mut self, cx: &mut Context<Self>) -> gpui::Task<()> {
         self.folder_stale = false;
         let dir = self.listed_dir.clone();
-        self.load_listing(&dir, None, true, cx)
+        self.load_listing(&dir, None, true, None, cx)
     }
 }
 

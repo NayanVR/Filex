@@ -1,6 +1,6 @@
 # Design: Telemetry — product analytics and error tracking (Phase 2c)
 
-Status: **PostHog, shipped 2026-11-28.** Replaces Sentry entirely (crash
+Status: **PostHog, built 2026-11-28 (not yet in production).** Replaces Sentry entirely (crash
 reporting, error events, measurements, release health and feedback).
 History is at the end.
 
@@ -18,13 +18,15 @@ Learn what to improve without collecting anything personal:
 
 ## Privacy invariants (non-negotiable)
 
-1. **No PII, enforced by types.** A product event is an `Event` whose
-   properties are `Prop`s, which can only be a number, a bool, or a
-   `&'static str` label (or a list or tally of labels). There is no
-   `From<String>`, so a file name, path, query, tag, folder name, URL or
-   anything the user typed *cannot* become a property. Every label is a
-   literal visible at its call site. Lists (roots, favorites, excluded
-   names, icon choices, shortcuts) are reported as **counts**.
+1. **No PII, enforced by types.** Every product event is a struct declared
+   in `catalog.rs`, and `track` accepts nothing else. Field types must
+   implement `schema::Field`, which exists only for numbers, bools,
+   durations, `&'static str` ids and closed label enums (plus lists,
+   tallies and `Option`s of those). A `String` or `PathBuf` field does not
+   compile, and a `compile_fail` doctest proves it. So a file name, path,
+   query, tag, folder name, URL or anything the user typed *cannot* become
+   a property. Lists (roots, favorites, excluded names, icon choices,
+   shortcuts) are reported as **counts**.
 2. **Free text is scrubbed twice.** Only three things carry text: panic
    messages, `error!` log messages and feedback the user chose to send.
    They go through `telemetry::scrub` (absolute paths, home dir) at capture,
@@ -71,95 +73,139 @@ that one message, even with sharing off. It then goes under a throwaway ID.
 ## Architecture
 
 ```
- UI code ── analytics::track(Event) ──▶ mpsc ──▶ worker thread "filex-analytics"
-   (channel send, never blocks)                  │ batches of 20 / every 30 s
-                                                 │ retry w/ backoff (5 s → 5 min)
- tracing error! ── AnalyticsLayer ─▶ track_raw ──┤ buffer ≤ 1000, oldest dropped
-                                                 ▼
+ UI code ── fa::track(ev::FolderOpened { .. }) ──▶ mpsc ──▶ worker "filex-analytics"
+   (typed struct from catalog.rs; channel send)            │ batch 20 / 30 s, retry w/ backoff
+ tracing error! ── AnalyticsLayer ─▶ track_raw ────────────┤ ≤ 2000 per event name per session
+                                                           │ buffer ≤ 1000 (oldest dropped)
  panic (UI or daemon) ─▶ telemetry queue (disk) ─▶ drain_crashes (next launch)
-                                                 ▼
-                              POST {host}/i/v1/analytics/events  (ureq + rustls)
-                              Authorization: Bearer <project key>
+                                                           ▼
+                         POST {host}/i/v1/analytics/events (ureq + rustls, Bearer key)
+ quit ─▶ worker adds app_session_ended, writes unsent ─▶ analytics-spool.jsonl ─▶ next run
 ```
+
+### The typed catalog
+
+`src/diagnostics/analytics/catalog.rs` is the single source of truth:
+
+```rust
+labels! {
+    /// How a folder was reached.
+    pub enum NavVia { Up = "up", Back = "back", /* … */ }
+}
+events! {
+    /// A folder's rows landed on screen.
+    FolderOpened => "folder_opened" {
+        via: NavVia,
+        location: Location,
+        /// Navigation to first paint.
+        load_ms: Duration,
+        entries: usize,
+        entries_bucket: CountBucket,
+    }
+}
+// call site:
+fa::track(ev::FolderOpened { via, location, load_ms, entries, entries_bucket });
+```
+
+- `labels!` makes closed vocabularies. A typo is a compile error, and the
+  allowed values appear in the docs.
+- `events!` makes the struct, its `AnalyticsEvent` impl (wire name and
+  properties in declaration order, `None` omitted) and a schema entry.
+- **`docs/analytics-events.md` is generated** from the schema (doc comments
+  included). The `catalog_doc_is_current` test fails when it is stale.
+  Regenerate with `FILEX_BLESS=1 cargo test --lib catalog_doc_is_current`.
+  Other tests check that names are unique snake_case and every event has a
+  doc.
+- `wire::SCHEMA_VERSION` (sent as `schema_version`) is bumped on a breaking
+  change to an event's shape, so dashboards can split old and new data.
+- Adding an event: declare it in `catalog.rs`, call `fa::track` at the
+  site, bless the docs. Reviewers read one file to know what is sent.
+
+### Delivery
+
+- **Spool, not a blocking flush.** At quit the worker adds
+  `app_session_ended`, writes unsent events to
+  `<data_local_dir>/filex/analytics-spool.jsonl` (temp file plus rename) and
+  stops. Quit waits at most 250 ms, for local disk only. The next run sends
+  the spool first, so an offline session isn't lost either. Turning sharing
+  off discards the buffer and deletes the spool and install ID. A launch
+  without consent deletes them too.
+- **Quota guard.** At most 2000 events of one name per session. The rest
+  are counted in the summary's `dropped` tally, so a runaway loop shows up
+  instead of burning the quota.
+- **Retries.** 408/429/5xx and transport errors back off from 5 s to 5 min.
+  Other 4xx responses drop the batch.
+
+### Attribution
+
+Navigation passes its cause explicitly: `navigate(path, NavVia::Sidebar…)`,
+`load_dir_via(path, NavVia::Back)`. `load_listing` records
+`(request, via)`, and only the latest request reports when it lands
+(superseded loads never do). Plain `load_dir` (reloads after file ops) is
+reported as `other` only if it lands on a different folder. This replaced a
+mutable "next load's cause" field, which could leave a stale label behind
+when `navigate` returned early for the current folder.
+
+### Seeing and testing events
+
+- `FILEX_ANALYTICS=log` logs every batch (`RUST_LOG=filex=info`) instead of
+  sending it. No key, project or `analytics` feature needed.
+  `FILEX_ANALYTICS=off` disables analytics.
+- `RUST_LOG=filex::analytics_log=debug` also shows each event as it is queued.
+- `analytics::testing::Capture::start()` captures events on the current
+  thread. `is_enabled()` reports true while a capture is active, so tests
+  can assert what a workflow emits (`capture.names()`, `capture.events()`).
+
+### Files
 
 | File | Role | Compiled |
 |---|---|---|
-| `diagnostics/analytics/event.rs` | `Event`/`Prop` (the PII guard), catalog `names`, `bucket` | always |
-| `diagnostics/analytics/wire.rs` | capture-v1 envelope, UUIDv7, super-properties | always |
-| `diagnostics/analytics/exception.rs` | `$exception` from crashes and logs, `scrub_text`, backtrace parsing | always |
-| `diagnostics/analytics/identity.rs` | install ID create/forget | always |
-| `diagnostics/analytics/snapshot.rs` | settings snapshot and `setting_changed` diff | always |
-| `diagnostics/analytics/pipeline.rs` | worker, batching, retry, session summary; `Transport` trait | always |
-| `diagnostics/analytics/client.rs` | `ureq` transport, key/host config | `analytics` |
-| `diagnostics/analytics/layer.rs` | `tracing` layer: `error!` → `$exception` | `analytics` |
-| `diagnostics/analytics/mod.rs` | public API: `init`, `track`, `count`, `shutdown`, `disable`, `drain_crashes`, `send_feedback` | always (no-ops without a transport) |
-| `workspace/analytics.rs` | UI helpers: launch, shortcuts, search session, op/file/index helpers | app |
+| `catalog.rs` | **every event and vocabulary**, the generated-docs test | always |
+| `schema.rs` | `Field`, `Label`, `Tally`, the `labels!`/`events!` macros, docs renderer | always |
+| `event.rs` | internal wire form (`Event`, `Prop`); crate-private constructors | always |
+| `wire.rs` | capture-v1 envelope, UUIDv7, super-properties, `SCHEMA_VERSION` | always |
+| `exception.rs` | `$exception` from crashes and logs, `scrub_text`, backtrace parsing | always |
+| `identity.rs` | install ID create/forget | always |
+| `snapshot.rs` | settings → `settings_snapshot` and `setting_changed` | always |
+| `pipeline.rs` | worker, batching, retry, caps, summaries, spool, `LogTransport` | always |
+| `testing.rs` | thread-local `Capture` | always |
+| `client.rs` | `ureq` transport, key/host config | `analytics` |
+| `layer.rs` | `tracing` layer: `error!` → `$exception` | `analytics` |
+| `mod.rs` | `init`, `track`, `count`, `shutdown`, `disable`, `drain_crashes`, `send_feedback` | always |
+| `workspace/analytics.rs` | UI glue: launch, shortcuts, search-session accumulator, shared helpers | app |
 
 **Why not the `posthog` crate:** it pulls in reqwest and tokio. filex already
-ships ureq + rustls for updates, so the client is in-tree (≈600 lines with
-tests). The wire format matches the official SDKs: `posthog` 1.7
-(`capture_event.rs`, `error_tracking.rs`, `endpoints.rs`) and Python 8.4
-(`capture_send.py`).
+ships ureq + rustls for updates. The wire format matches the official SDKs:
+`posthog` 1.7 (`capture_event.rs`, `error_tracking.rs`, `endpoints.rs`) and
+Python 8.4 (`capture_send.py`).
 
 **Wire format:** `POST /i/v1/analytics/events`, Bearer auth,
 `{created_at, batch: [{event, uuid (v7), distinct_id, timestamp, session_id,
-options: {process_person_profile: false}, properties}]}`. 2xx = delivered;
-408/429/5xx/transport errors = retry; other 4xx = drop.
+options: {process_person_profile: false}, properties}]}`.
 
 **Exceptions:** `$exception_list: [{type, value, mechanism: {type, handled,
 synthetic}, stacktrace: {type: "raw", frames}}]`. Frames are `{function,
 filename, lineno, lang: "rust", platform: "native", in_app, synthetic,
 client_resolved: true}`, outermost first. `$exception_fingerprint` is an
 FNV-1a hash of compile-time facts (panic location + innermost in-app
-function, or the log callsite), never the message, so issues stay stable
-across occurrences and toolchain bumps. Each log callsite reports at most 5
-times per process.
+function, or the log callsite), never the message. Each log callsite
+reports at most 5 times per process.
 
-**Threading / latency:** `track` and `count` are a channel send behind an
-atomic `is_enabled()` check. The per-keystroke cost on the search path is
-`chars().count()` plus an `Option` update. Folder navigation adds one
-`mem::replace` and a send. HTTP only happens on the worker. At quit,
-`shutdown` waits **up to 1 s** for the final POST (only when analytics is
-on). The app is already exiting, and GPUI's own 200 ms quit budget is too
-short for a request.
+**Latency:** `track` and `count` are a struct build plus a channel send. The
+per-keystroke cost on the search path is `chars().count()` and an `Option`
+update. Folder navigation adds one send. HTTP only happens on the worker.
 
 ## Event catalog
 
-Super-properties on every event: `$lib` = `filex`, `$lib_version`,
-`$app_name`, `$app_version`, `$os` (PostHog's names), `arch`,
-`environment` (`debug`/`release`), `$geoip_disable`.
+The complete list is generated: **[analytics-events.md](analytics-events.md)**.
+Super-properties on every event: `$lib` = `filex`, `$lib_version`, `$app_name`,
+`$app_version`, `$os`, `arch`, `environment` (`debug`/`release`),
+`$geoip_disable`, `schema_version`. Keyboard shortcuts are counted per action
+name and reported in `usage_summary` / `app_session_ended`, not sent one by
+one.
 
-| Event | When | Properties |
-|---|---|---|
-| `app_launched` | first window open | `launch` (default, open_folder, select_item, this_pc, foreign), `new_install`, `startup_ms`, `onboarding_pending`, settings snapshot (`setting_*` enums/bools, `*_count`) |
-| `app_session_ended` | quit | `duration_s`, `events` (tally by name), `counters` (shortcut tally) |
-| `usage_summary` | every 30 min | `duration_s`, `since_last_summary_s`, `counters` |
-| `resource_sample` | every 15 min | `rss_mb`, `index_roots`, `tabs` |
-| `index_status` | first daemon answer; each finished build | `trigger`, `building`, `roots`, `files`, `files_bucket`, `skipped`, `error` (bool) |
-| `folder_opened` | a folder's rows land | `via` (launch, up, back, forward, open, search_result, reveal, path_bar, breadcrumb, sidebar_place, sidebar_favorite, sidebar_drive, recent, this_pc, connect_server, magic, picker, new_tab, refresh, other), `location` (local, home, root, network), `load_ms`, `entries`, `entries_bucket` |
-| `folder_load_failed` | a load errored | `via`, `location`, `load_ms`, `error` (io kind) |
-| `search_session` | search opened/cleared/applied | `outcome` (opened, revealed, cleared, magic_applied, magic_command, magic_go), `rank`, `duration_ms`, `edits`, `max_query_len`, `final_query_len`, `responses`, `first_response_ms`, `mean_response_ms`, `max_response_ms`, `results`, `results_bucket`, `zero_result_responses`, `errors`, `pages_loaded`, `filters` (tag/kind/ext/size/modified), `phrases`, `magic`, `scope`, `hit_limit`, `literal_won` |
-| `magic_plan_shown` | first plan per search | `verb`, `matches`, `ok`, `refusal` (PlanError id) |
-| `magic_plan_applied` | confirm | `verb`, `selected`, `unchecked`, `local`, `conflicts` |
-| `magic_instant` | app command / go | `kind` (app, go), `command` (AppCommand id), `new_tab`, `target` |
-| `file_op` | batch reaches the undo journal; single-op failure | `op` (move, copy, rename, trash, create, mixed), `source` (paste, drop, delete, magic, single, new_folder, compress), `ok`, `items`, `requested`, `kinds` (tally), `duration_ms`, `error` (io kind) |
-| `undo` | undo finished | `items`, `kinds`, `ok`, `error` |
-| `file_opened` | open with default / chosen app | `kind` (image, video, audio, archive, code, document, other), `source` (browse, search, open_with), `app` (default, chosen), `ok` |
-| `feature_used` | UI affordances | `feature`: context_menu (`command`, `target`, `selected`), toolbar_button (`action`), quick_look (`items`), tab_opened/tab_closed (`tabs`), settings_opened, magic_toggle (`on`), search_scope (`scope`), drag_out (`items`), tag_saved (`edited_existing`), tag_removed, sidebar_tag_search, index_unavailable (`crash_looping`), analytics_enabled |
-| `setting_changed` | any settings change (store diff) | `setting`, `value` (label, bool or list length) |
-| `onboarding_step` | step change | `from`, `to`, `on_step_ms` |
-| `onboarding_finished` | flow closed | `completed`, `last_step`, `imported_favorites`, `offered_favorites`, `default_app`, `magic_live` |
-| `update` | update flow | `stage` (available, copy_command, open_url, restart, dismissed, failed) |
-| `feedback_submitted` | Send pressed | `message` (scrubbed, ≤ 5000 chars), `length` |
-| `$exception` | panic (drained) / `error!` | PostHog exception props; crashes add `process`, `thread`, `panic_location` and the crashing `$app_version`; logs add `log_target` |
-
-Keyboard shortcuts are counted, not sent one by one. Each keystroke that
-resolves to an app action bumps a counter named after the action
-(`filex::GoUp`), reported in `usage_summary` / `app_session_ended`.
-Search-box text editing keys are excluded.
-
-Not instrumented yet: the Open/Save dialog process (`filex --pick`), which
-doesn't start analytics, and the connect-server dialog's outcome.
+Not instrumented yet: the Open/Save dialog process (`filex --pick`) and the
+connect-server dialog's outcome.
 
 ## Owner setup (one time)
 
@@ -173,24 +219,28 @@ doesn't start analytics, and the connect-server dialog's outcome.
 4. Optional: in Error tracking, mark `filex::*` frames as in-app (the SDK
    already flags them) and set alerts on new issues.
 
-Local testing: `FILEX_POSTHOG_KEY=phc_… cargo run --features analytics`.
-Runtime env vars override the baked-in values. Debug builds tag events
-`environment: debug`.
+Local testing: `FILEX_ANALYTICS=log RUST_LOG=filex=info cargo run` to see
+events with no project, or `FILEX_POSTHOG_KEY=phc_… cargo run --features
+analytics` to send them. Runtime env vars override the baked-in values.
+Debug builds tag events `environment: debug`.
 
 ## Testing
 
-- Pure, no network: `Prop` serialization, buckets, UUIDv7/v4, envelope
-  shape and anonymity, super-property override, `scrub_text`, backtrace
-  parsing, crash/log exception shape and fingerprint stability, install-ID
-  lifecycle (including rejecting a non-UUID file), settings snapshot and
-  diff (lists as counts, custom accent hidden), search-session summary, AppCommand,
-  PlanError and menu-command ids.
-- Pipeline with a recording transport: batching, retry vs reject, bounded
-  buffer, session summary, global start/track/shutdown, crash drain
-  (timestamp and version kept, files deleted).
+- Catalog: generated docs are current; names unique snake_case and
+  documented; typed events serialize labels and omit `None`; helper
+  mappings (`CountBucket`, `FileKind`, `Location`, `IoError`) give closed
+  labels; a `compile_fail` doctest rejects a `String` field.
+- Pure, no network: envelope shape and anonymity, `schema_version`, UUIDs,
+  `scrub_text`, backtrace parsing, exception shape and fingerprint
+  stability, install-ID lifecycle, settings snapshot and diff, the search
+  session summary, op batch kinds.
+- Pipeline with a recording transport: shutdown spools instead of posting
+  and the next run sends the spool; revoked consent discards; corrupt spool
+  lines are skipped; retry vs reject; bounded buffer; per-event cap with a
+  `dropped` tally.
 - Transport against a loopback HTTP server: path, Bearer header, content
-  type, body; refused connection is a retry.
-- The `tracing` layer reads only `message` and rate-limits per callsite.
+  type, body; a refused connection is a retry.
+- `testing::Capture` is per-thread and makes `is_enabled()` true.
 
 ## History
 
@@ -205,3 +255,12 @@ Runtime env vars override the baked-in values. Debug builds tag events
   `scrub`, the panic hook and the `share_diagnostics` consent carry over.
   New: typed, PII-proof event properties, anonymous install ID, live
   consent toggle, and the email field removed from feedback.
+- **2026-11-28 (same day, pre-production):** architecture pass. A typed
+  catalog with macros and generated docs is now the only way to emit, plus
+  explicit navigation attribution (fixing a stale-label bug), a disk spool
+  instead of a blocking quit flush, per-event caps, `FILEX_ANALYTICS=log`, a
+  test capture and `schema_version`. `feature_used` is split into specific
+  events (`context_menu_used`, `toolbar_button_clicked`, `tab_changed`,
+  `magic_mode_toggled`, `search_scope_changed`, `tag_saved`,
+  `index_unavailable`), and the settings snapshot moved from
+  `app_launched` to its own `settings_snapshot` event.

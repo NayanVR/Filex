@@ -90,7 +90,7 @@ impl Workspace {
         if new_tab {
             self.open_tab(dir.clone(), cx);
         }
-        self.load_dir_selecting(&dir, select, cx);
+        self.load_dir_selecting(&dir, select, Some(NavVia::Launch), cx);
         cx.notify();
     }
 }

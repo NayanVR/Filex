@@ -295,7 +295,7 @@ impl Workspace {
             self.clipboard = None;
         }
         let dest = self.cwd.clone();
-        self.spawn_transfer_batch(sources, mode, dest, "paste", cx);
+        self.spawn_transfer_batch(sources, mode, dest, ev::OpSource::Paste, cx);
     }
 
     /// Paths carried by a drag that starts on row/card `ix`: the whole
@@ -393,7 +393,10 @@ impl Workspace {
             return;
         }
         tracing::info!(items = paths.len(), "drag left filex; handing it to the OS");
-        analytics::feature_with("drag_out", "items", paths.len());
+        fa::track(ev::FeatureUsed {
+            feature: ev::Feature::DragOut,
+            items: Some(paths.len()),
+        });
         self.drag_in_flight = None;
         cx.stop_active_drag(window);
         let finished = platform::start_os_drag(paths);
@@ -445,7 +448,7 @@ impl Workspace {
         if sources.is_empty() {
             return;
         }
-        self.spawn_transfer_batch(sources, mode, dest_dir, "drop", cx);
+        self.spawn_transfer_batch(sources, mode, dest_dir, ev::OpSource::Drop, cx);
     }
 
     /// Decorate a folder row/card so it accepts drops: an in-app drag of
@@ -494,8 +497,7 @@ impl Workspace {
             return;
         }
         let cwd = self.cwd.clone();
-        self.nav_via = "refresh";
-        self.load_dir(&cwd, cx);
+        self.load_dir_via(&cwd, NavVia::Refresh, cx);
         self.notice = Some("refreshed".into());
         cx.notify();
     }
@@ -511,7 +513,7 @@ impl Workspace {
         sources: Vec<PathBuf>,
         mode: ClipMode,
         dest_dir: PathBuf,
-        source: &'static str,
+        source: ev::OpSource,
         cx: &mut Context<Self>,
     ) {
         if !self.validate_search_paths(&sources, cx) {
@@ -597,7 +599,7 @@ impl Workspace {
                     );
                     this.sync_folder_icons(&applied, false, cx);
                 }
-                analytics::ops_applied(&applied, source, requested, started.elapsed());
+                analytics::ops_applied(&applied, source, requested, Some(started.elapsed()));
                 if !applied.is_empty() {
                     this.journal.record(applied);
                 }
@@ -670,7 +672,12 @@ impl Workspace {
                     this.report_search_check(outcome.map(drop), cx);
                     return;
                 };
-                analytics::ops_applied(&applied, "delete", requested, started.elapsed());
+                analytics::ops_applied(
+                    &applied,
+                    ev::OpSource::Delete,
+                    requested,
+                    Some(started.elapsed()),
+                );
                 if !applied.is_empty() {
                     this.notice = Some(
                         if applied.len() == 1 {
@@ -783,7 +790,7 @@ impl Workspace {
             cx.notify();
         }
         let tags = self.tags.clone();
-        let kind = analytics::op_kind(&op);
+        let kind = ev::OpKind::of_op(&op);
         let started = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -808,18 +815,18 @@ impl Workspace {
                         this.sync_folder_icons(std::slice::from_ref(&applied), false, cx);
                         analytics::ops_applied(
                             std::slice::from_ref(&applied),
-                            "single",
+                            ev::OpSource::Single,
                             1,
-                            started.elapsed(),
+                            Some(started.elapsed()),
                         );
                         this.journal.record(vec![applied]);
                     }
                     Err(err) if err.is::<ops::OpCanceled>() => {
-                        analytics::op_failed(kind, "single", "canceled");
+                        analytics::op_failed(kind, ev::OpSource::Single, ev::IoError::Canceled);
                         this.notice = Some("canceled".into());
                     }
                     Err(err) => {
-                        analytics::op_failed(kind, "single", analytics::io_error_kind(&err));
+                        analytics::op_failed(kind, ev::OpSource::Single, ev::IoError::of(&err));
                         this.notice = Some(format!("{err:#}").into());
                     }
                 }
@@ -890,7 +897,12 @@ impl Workspace {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                analytics::undo(&batch, result.as_ref().err());
+                fa::track(ev::Undo {
+                    items: batch.len(),
+                    kinds: batch.iter().map(ev::OpKind::of_applied).collect(),
+                    ok: result.is_ok(),
+                    error: result.as_ref().err().map(ev::IoError::of),
+                });
                 match result {
                     Ok(()) => {
                         this.sync_folder_icons(&batch, true, cx);
